@@ -1,6 +1,6 @@
 // core/math/vector.rs
 
-use crate::core::generic::vector;
+use crate::core::generic::vector::{Vector2, Vector3, Vector4};
 
 /// Returns true if `self_` is equal to `other` within `epsilon`.
 pub fn float_equal_epsilon(self_: f64, other: f64, epsilon: f64) -> bool
@@ -68,5 +68,29 @@ pub fn float_mod(f: f64, modulus: f64) -> f64
     } else {
         let r = f % modulus;
         float_mod_range(r, modulus)
+    }
+}
+
+/// Approximate equality
+impl Vector2<f64> {
+    pub fn equal_eps(&self, o: &Self, e: f64) -> bool
+    {
+        float_equal_epsilon(self.x, o.x, e) && float_equal_epsilon(self.y, o.y, e)
+    }
+}
+/// Approximate equality
+impl Vector3<f64> {
+    pub fn equal_eps(&self, o: &Self, e: f64) -> bool
+    {
+        float_equal_epsilon(self.x, o.x, e) && float_equal_epsilon(self.y, o.y, e) &&
+        float_equal_epsilon(self.z, o.z, e)
+    }
+}
+/// Approximate equality
+impl Vector4<f64> {
+    pub fn equal_eps(&self, o: &Self, e: f64) -> bool
+    {
+        float_equal_epsilon(self.x, o.x, e) && float_equal_epsilon(self.y, o.y, e) &&
+        float_equal_epsilon(self.z, o.z, e) && float_equal_epsilon(self.w, o.w, e)
     }
 }
