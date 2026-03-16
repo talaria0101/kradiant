@@ -1,4 +1,4 @@
-//! Small utility helpers for working with [`crate::map::Map`].
+//! Small convenience methods on [`crate::map::Map`] used by editor frontends.
 
 use crate::assets::resolve_editor_image_name;
 use crate::map::{BrushContent, Map};
@@ -10,6 +10,7 @@ impl Map {
         self.entities.iter().map(|e| e.brushes.len()).sum()
     }
 
+    /// Return the number of entities contained in the map.
     pub fn get_entity_count(&self) -> usize {
         self.entities.len()
     }
@@ -37,7 +38,7 @@ impl Map {
         out
     }
 
-    /// Mark the whole map dirty (call after any edit)
+    /// Increment the map generation counter to signal that something changed.
     pub fn mark_map_dirty(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }

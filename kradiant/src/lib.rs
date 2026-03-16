@@ -1,6 +1,10 @@
-//! radiant_core - CoD1 .map backend (idTech 3 style)
-//! High-priority: .map parser (text format mirroring Q3/CoD1)
-//! Low-priority: C FFI (cbindgen-ready stubs added later)
+//! The kradiant shared library for working with CoD maps.
+//!
+//! Currently this library handles:
+//! - parsing `.map` source files into a structured [`map`] model
+//! - tessellating brushes and patches into renderable geometry ([`geometry`])
+//! - resolving textures and shader metadata needed for editing and preview
+//! - providing loader facades ([`loader`]) that are independent of any UI or renderer
 
 pub mod assets;
 pub mod geometry;

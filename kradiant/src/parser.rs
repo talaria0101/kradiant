@@ -1,9 +1,9 @@
-//! Recursive descent .map parser for CoD1 (idTech 3 derivative)
+//! Recursive‑descent parser for idTech‑style `.map` source files.
 //!
-//! - Handles full nested { } structure for entities and brushes
-//! - CoD1 patch support: parses `patchTerrainDef3` (terrain) and `patchDef5` (bezier)
-//! - Line-based + token stream for zero-allocation where possible
-//! - Detailed errors with exact line numbers
+//! - Handles the full nested `{}` structure for entities and brushes.
+//! - Supports both terrain and Bezier patches (`patchTerrainDef3`, `patchDef5`).
+//! - Works on a line‑based token stream to keep allocations low.
+//! - Produces detailed error messages with exact line numbers.
 
 use crate::map::{
     Brush, BrushContent, BrushId, Entity, EntityId, Face, Map, Patch, PatchParams, PatchType,
@@ -670,26 +670,25 @@ impl Patch {
     }
 }
 
-/// Public API
+
+/// Parse a `.map` source string into an in‑memory [`Map`].
 pub fn parse_map_string(content: &str) -> Result<Map, ParseError> {
     let mut parser = Parser::new(content);
     parser.parse_map()
 }
 
+/// Read a `.map` file from disk and parse it into a [`Map`].
 pub fn load_map(path: &str) -> Result<Map, ParseError> {
     let content = std::fs::read_to_string(path)?;
     parse_map_string(&content)
 }
 
+/// Serialize a [`Map`] back to `.map` text and write it to disk.
 pub fn save_map(map: &Map, path: &str) -> Result<(), ParseError> {
     let content = map.to_map_string();
     std::fs::write(path, content).map_err(|e| ParseError::Io(e))?;
     Ok(())
 }
-
-// ==================== UNIT TESTS ====================
-// All tests derived directly from the .MAP examples in the provided MAPFiles PDF
-// (simple box on page 2 + multi-entity Counter-Strike map on page 3)
 
 #[cfg(test)]
 mod tests {
@@ -820,7 +819,7 @@ common/caulk
 
     #[test]
     fn parse_real_map() {
-        let map = include_str!("../test/door_tutorial.map");
+        let map = include_str!("../test/village.map");
         let res = parse_map_string(map);
         /*if res.is_err() {
             eprintln!("{}", res.as_ref().unwrap_err());

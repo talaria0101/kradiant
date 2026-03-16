@@ -1,7 +1,8 @@
-//! Game asset resolving/loading helpers (CoD1 / idTech3-style).
+//! Asset resolution and virtual filesystem helpers for `.map` content.
 //!
-//! This module is UI-agnostic: it resolves asset paths and decodes image bytes, but does not
-//! create GPU textures. Frontends can upload the returned RGBA8 to their renderer of choice.
+//! This module is UI‑agnostic: it resolves asset paths, locates files on disk or in `.pk3`
+//! archives, and decodes image bytes, but it does not create GPU resources. Callers are expected
+//! to upload the returned RGBA8 data to their rendering backend of choice.
 
 use crate::shader::{ShaderDb, parse_shader_source_into_db};
 use crate::texture::{TextureError, TextureImage, decode_texture_rgba8, load_texture_rgba8};
@@ -11,7 +12,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use zip::ZipArchive;
 
-/// Root folders for a CoD "main" directory.
+/// Root folders backing a typical game "main" directory.
 ///
 /// Convention:
 /// - textures live in `(main)/textures/...`
@@ -149,7 +150,7 @@ struct Pk3EntryRef {
     entry_name: String,
 }
 
-/// Asset database for a CoD "main" directory.
+/// Asset database for a game content directory.
 ///
 /// - Prefers loose files on disk.
 /// - Falls back to `.pk3` archives found directly under `<maindir>`.

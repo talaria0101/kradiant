@@ -1,7 +1,8 @@
-//! Texture coordinate mapping helpers for idTech3 / Radiant style brush faces.
+//! Texture coordinate mapping helpers for classic brush faces.
 //!
-//! This is the classic "texture axis from dominant normal" projection with per-face
-//! shift/rotate/scale applied, matching how Radiant's surface inspector parameters are used.
+//! This implements the familiar "texture axis from dominant normal" projection with per‑face
+//! shift/rotate/scale applied, matching how typical level‑editor surface inspector parameters
+//! are interpreted.
 
 use crate::map::Face;
 use crate::{IVec2, Vec2, Vec3};

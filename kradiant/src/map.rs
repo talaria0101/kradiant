@@ -1,19 +1,20 @@
-//! Data model mirroring CoD1 .map format
-//! Brushes = convex polyhedra defined by 3-point planes
-//! Entities = worldspawn + keys (CoD1-specific: targetname, origin, etc.)
-//! Face format: 3-point plane + texture + 9 numbers (CoD Radiant style)
+//! In‑memory data model mirroring an idTech‑style `.map` file.
+//!
+//! - Brushes are convex polyhedra defined by three‑point planes.
+//! - Entities are key/value dictionaries plus zero or more brushes.
+//! - Faces carry texture and classic "9‑number" surface parameters as written by level editors.
 
 use crate::{IVec2, Vec2, Vec3};
 use std::collections::HashMap;
 
-/// Strict newtype IDs (prevents accidental mixing of entity/brush indices)
+/// Strongly‑typed entity identifiers (prevents mixing entity and brush indices).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntityId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BrushId(pub u32);
 
-/// Surface flags (stored per-face in .map but must be identical across all faces of a brush)
+/// Surface flags stored per face in a `.map` file.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SurfaceFlags {
@@ -78,9 +79,9 @@ pub enum BrushContent {
 pub struct Brush {
     pub id: BrushId,
     pub content: BrushContent,
-    /// Cached geometry
+    /// Cached per‑face polygon data computed on demand.
     cached_geometry: Option<Vec<(Vec<Vec3>, Vec<u32>)>>,
-    /// Brush was modified
+    /// Indicates whether the brush has been modified since geometry was cached.
     dirty: bool,
 }
 
@@ -133,15 +134,15 @@ pub struct Patch {
     pub patch_type: PatchType,
     pub shader: String,
     pub params: PatchParams,
-    /// Vertex grid stored as `[row][col]`.
+    /// Vertex grid stored as `[row][col]` in map space.
     pub vertices: Vec<Vec<PatchVertex>>,
     cached_mesh: Option<PatchMesh>,
-    /// Patch was modified
+    /// Indicates whether the patch has been modified since tessellation was cached.
     dirty: bool,
 }
 
 impl Brush {
-    /// Create a new brush (used by parser and editor)
+    /// Create a new brush with the given identifier and content.
     pub fn new(id: BrushId, content: BrushContent) -> Self {
         Self {
             id,
@@ -151,8 +152,10 @@ impl Brush {
         }
     }
 
-    /// Returns cached polygons for a brush (recomputes only if the brush changed).
-    /// Call this every frame from the UI — it's O(1) when nothing changed.
+    /// Return cached polygons for a brush, recomputing only if the brush has changed.
+    ///
+    /// Callers are expected to reuse the returned slice between frames; when nothing changed this
+    /// is effectively O(1).
     pub fn get_polygons(&mut self) -> Option<&[(Vec<Vec3>, Vec<u32>)]> {
         if self.dirty || self.cached_geometry.is_none() {
             let polys = crate::geometry::brush_to_polygons(self).ok()?;
@@ -163,6 +166,7 @@ impl Brush {
         self.cached_geometry.as_deref()
     }
 
+    /// Update a single brush plane and bump the map generation counter if it changed.
     pub fn update_brush_plane(&mut self, generation: &mut u64, plane_index: usize, new_plane: [Vec3; 3]) {
         if let BrushContent::Convex(faces) = &mut self.content {
             if let Some(face) = faces.get_mut(plane_index) {
@@ -176,11 +180,12 @@ impl Brush {
 }
 
 impl Patch {
+    /// Create a new patch with the given shader, parameters and vertex grid.
     pub fn new(patch_type: PatchType, shader: String, params: PatchParams, vertices: Vec<Vec<PatchVertex>>) -> Self {
         Self { patch_type, shader, params, vertices, cached_mesh: None, dirty: false }
     }
 
-    /// Returns cached tessellation, recomputing only when map.generation changed.
+    /// Return cached tessellation, recomputing only when the patch was modified.
     pub fn get_mesh(&mut self) -> Option<&PatchMesh> {
         if self.dirty || self.cached_mesh.is_none() {
             let mesh = crate::geometry::tessellate_patch(self).ok()?;
@@ -190,6 +195,7 @@ impl Patch {
         self.cached_mesh.as_ref()
     }
 
+    /// Update a single vertex in the patch grid and bump the map generation counter if it changed.
     pub fn update_vertex(&mut self, generation: &mut u64, row: usize, col: usize, vtx: PatchVertex) {
         if let Some(r) = self.vertices.get_mut(row) {
             if let Some(v) = r.get_mut(col) {
@@ -201,18 +207,18 @@ impl Patch {
     }
 }
 
-/// Entity (worldspawn or any other - supports CoD1 keys)
+/// Entity (worldspawn or any other brush collection with key/value properties).
 #[derive(Debug, Clone)]
 pub struct Entity {
     pub id: EntityId,
-    /// The must have key for every entity
+    /// Mandatory classification key as written in the source `.map`.
     pub classname: String,
-    /// "origin", "targetname", etc.
+    /// Arbitrary key/value pairs such as `"origin"`, `"targetname"`, etc.
     pub properties: HashMap<String, String>,
     pub brushes: Vec<Brush>,
 }
 
-/// Top-level map (mirrors entire .map file)
+/// Top‑level map structure, mirroring a complete `.map` file.
 #[derive(Debug, Default, Clone)]
 pub struct Map {
     pub entities: Vec<Entity>,

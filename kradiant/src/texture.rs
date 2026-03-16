@@ -1,3 +1,8 @@
+//! Texture decoding utilities for turning common image formats into RGBA8 buffers.
+//!
+//! This module focuses on loading images from disk or memory and converting them into a simple
+//! CPU-side representation (`TextureImage`) that callers can upload to their rendering backend.
+
 use std::path::Path;
 
 use thiserror::Error;
@@ -25,7 +30,7 @@ pub enum TextureError {
     Decode(String),
 }
 
-/// Load a texture from disk and decode it into RGBA8 suitable for uploading to OpenGL.
+/// Load a texture from disk and decode it into RGBA8 suitable for uploading to a GPU.
 ///
 /// Supported:
 /// - `jpg`/`jpeg`

@@ -1,3 +1,8 @@
+//! Minimal shader database and `.shader` file parser focused on editor-facing metadata.
+//!
+//! It extracts `qer_*` properties (such as editor and light images) into a lightweight
+//! [`ShaderDb`] that can be queried by material name, without interpreting full rendering stages.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -75,7 +80,7 @@ pub enum ShaderError {
     },
 }
 
-/// Load all `.shader` files from `(main)/scripts` (or any scripts directory) and extract `qer_*` params.
+/// Load all `.shader` files from a `scripts` directory and extract `qer_*` parameters.
 pub fn load_shader_db_from_scripts_dir(
     scripts_dir: impl AsRef<Path>,
 ) -> Result<ShaderDb, ShaderError> {
@@ -109,7 +114,7 @@ pub fn load_shader_db_from_scripts_dir(
     Ok(db)
 }
 
-/// Convenience: load shaders from `(main_dir)/scripts`.
+/// Convenience wrapper around [`load_shader_db_from_scripts_dir`] for a game root directory.
 pub fn load_shader_db_from_main_dir(main_dir: impl AsRef<Path>) -> Result<ShaderDb, ShaderError> {
     load_shader_db_from_scripts_dir(main_dir.as_ref().join("scripts"))
 }
@@ -209,10 +214,10 @@ fn parse_shader_file_into_db(src: &str, path: &Path, db: &mut ShaderDb) -> Resul
     Ok(())
 }
 
-/// Parse a `.shader` source string and merge its `qer_*` params into an existing DB.
+/// Parse a `.shader` source string and merge its `qer_*` parameters into an existing database.
 ///
-/// This is useful when shader sources come from a virtual filesystem (e.g. `.pk3`) rather than
-/// the OS filesystem.
+/// This is useful when shader sources come from a virtual filesystem (for example a `.pk3`
+/// archive) rather than the OS filesystem.
 pub fn parse_shader_source_into_db(
     src: &str,
     path: &Path,
