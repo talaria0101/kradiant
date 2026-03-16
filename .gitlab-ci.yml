@@ -1,0 +1,33 @@
+# You can override the included template(s) by including variable overrides
+# SAST customization: https://docs.gitlab.com/ee/user/application_security/sast/#customizing-the-sast-settings
+# Secret Detection customization: https://docs.gitlab.com/user/application_security/secret_detection/pipeline/configure
+# Dependency Scanning customization: https://docs.gitlab.com/ee/user/application_security/dependency_scanning/#customizing-the-dependency-scanning-settings
+# Container Scanning customization: https://docs.gitlab.com/ee/user/application_security/container_scanning/#customizing-the-container-scanning-settings
+# Note that environment variables can be set in several places
+# See https://docs.gitlab.com/ee/ci/variables/#cicd-variable-precedence
+stages:
+  - test
+  - secret-detection
+
+variables:
+  SECRET_DETECTION_ENABLED: 'true'
+
+rust-test:
+  stage: test
+  image: rust:1.94.0
+  script:
+    # - rustup default stable || true
+    - cargo test --verbose
+  artifacts:
+    when: always
+    paths:
+      - target/
+    expire_in: 1 week
+  only:
+    - branches
+    - merge_requests
+
+secret_detection:
+  stage: secret-detection
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
