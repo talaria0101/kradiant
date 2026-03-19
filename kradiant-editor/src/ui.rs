@@ -1,0 +1,823 @@
+//! Editor UI
+//!
+
+use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
+
+use crate::config::EditorConfig;
+use crate::util;
+use util::{pack_abgr, screen_to_world, snap, text_width};
+use glam::IVec2;
+use kradiant::{geometry, map::{BrushContent, Entity, Map}};
+
+// State types
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ortho { #[default] XY, XZ, YZ }
+
+impl Ortho {
+    fn label(self) -> &'static str {
+        match self { Ortho::XY => "XY (top)", Ortho::XZ => "XZ (front)", Ortho::YZ => "YZ (side)" }
+    }
+
+    fn next(self) -> Self
+    {
+        match self {
+            Self::XY => Self::XZ,
+            Self::XZ => Self::YZ,
+            Self::YZ => Self::XY
+        }
+    }
+}
+
+pub struct LogEntry {
+    pub level: LogLevel,
+    pub text:  String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel { Info, Warn, Error }
+
+impl LogLevel {
+    fn color(self) -> [f32; 4] {
+        match self {
+            LogLevel::Info  => [0.85, 0.85, 0.85, 1.0],
+            LogLevel::Warn  => [1.0,  0.85, 0.2,  1.0],
+            LogLevel::Error => [1.0,  0.35, 0.35, 1.0],
+        }
+    }
+    fn prefix(self) -> &'static str {
+        match self { LogLevel::Info => "   ", LogLevel::Warn => "[W]", LogLevel::Error => "[E]" }
+    }
+}
+
+pub struct EditorState {
+    pub config: EditorConfig,
+    pub show_demo:      bool,
+    pub map_path:       String,
+    pub ortho_axis:     Ortho,
+    pub view2d_rect: [f32; 4],
+    pub view2d_zoom:    f32,
+    pub view2d_pan:     [f32; 2],
+    pub view2d_drag_start: Option<IVec2>,
+    pub view2d_drag_current: Option<IVec2>,
+    pub view2d_tex_id: Option<TextureId>,
+    pub tex_filter:     String,
+    pub tex_selected:   Option<String>,
+    pub tex_tile_size:  f32,
+    pub log:            Vec<LogEntry>,
+    //pub console_input:  String,
+    pub console_scroll: bool,
+    pub con_filter: String,
+    pub map: Option<kradiant::map::Map>,
+    pub selected_entity: Option<usize>,
+    pub new_prop_key: String,
+    pub new_prop_val: String,
+}
+
+macro_rules! editor_log {
+    (info, $($arg:tt)+) => {
+        self.log_info(format!($($arg)+))
+    };
+    (warn, $($arg:tt)+) => {
+        self.log_warn(format!($($arg)+))
+    };
+    (error, $($arg:tt)+) => {
+        self.log_error(format!($($arg)+))
+    };
+}
+
+macro_rules! editor_log_e {
+    ($state:expr, info, $($arg:tt)+) => {
+        $state.log_info(format!($($arg)+))
+    };
+    ($state:expr, warn, $($arg:tt)+) => {
+        $state.log_warn(format!($($arg)+))
+    };
+    ($state:expr, error, $($arg:tt)+) => {
+        $state.log_error(format!($($arg)+))
+    };
+}
+
+
+impl Default for EditorState {
+    fn default() -> Self
+    {
+        let mut s = Self {
+            config: EditorConfig::default(),
+            show_demo:      false,
+            map_path:       String::new(),
+            ortho_axis:     Ortho::default(),
+            view2d_rect: [0.0; 4],
+            view2d_zoom:    1.0,
+            view2d_pan:     [0.0, 0.0],
+            view2d_drag_start: None,
+            view2d_drag_current: None,
+            view2d_tex_id: None,
+            tex_filter:     String::new(),
+            tex_selected:   None,
+            tex_tile_size:  64.0,
+            log:            Vec::new(),
+            //console_input:  String::new(),
+            console_scroll: false,
+            con_filter: String::new(),
+            map: None,
+            selected_entity: None,
+            new_prop_key: String::new(),
+            new_prop_val: String::new(),
+        };
+        s.log_info("Kradiant editor started");
+
+        match EditorConfig::load() {
+            Ok(c) => s.config = c,
+            Err(e) => editor_log_e!(&mut s, error, "Failed to load configuration: {}", e.to_string()),
+        }
+
+        s.log_warn("this is a warning");
+        s
+    }
+}
+
+impl EditorState {
+    pub fn log_info(&mut self, msg: impl Into<String>) {
+        let string: String = msg.into();
+        println!("{}", &string);
+        self.log.push(LogEntry { level: LogLevel::Info,  text: string });
+        self.console_scroll = true;
+    }
+    pub fn log_warn(&mut self, msg: impl Into<String>) {
+        let string: String = msg.into();
+        println!("{}", &string);
+        self.log.push(LogEntry { level: LogLevel::Warn,  text: string });
+        self.console_scroll = true;
+    }
+    pub fn log_error(&mut self, msg: impl Into<String>) {
+        let string: String = msg.into();
+        eprintln!("{}", &string);
+        self.log.push(LogEntry { level: LogLevel::Error, text: string });
+        self.console_scroll = true;
+    }
+
+}
+
+// Top-level draw call
+
+pub fn draw_editor(ui: &Ui, state: &mut EditorState) {
+    draw_dockspace(ui);
+    draw_main_menu(ui, state);
+    draw_entity_list(ui, state);
+    draw_properties(ui, state);
+    draw_view3d(ui, state);
+    draw_view2d(ui, state);
+    draw_console(ui, state);
+    draw_texture_browser(ui, state);
+
+    if state.show_demo {
+        ui.show_demo_window(&mut state.show_demo);
+    }
+}
+
+// Dockspace
+
+fn draw_dockspace(ui: &Ui) {
+    unsafe {
+        let vp   = dear_imgui_rs::sys::igGetMainViewport();
+        let pos  = (*vp).WorkPos;
+        let size = (*vp).WorkSize;
+        dear_imgui_rs::sys::igSetNextWindowPos(
+            pos,
+            dear_imgui_rs::sys::ImGuiCond_Always as i32,
+            dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 },
+        );
+        dear_imgui_rs::sys::igSetNextWindowSize(
+            size,
+            dear_imgui_rs::sys::ImGuiCond_Always as i32,
+        );
+        dear_imgui_rs::sys::igSetNextWindowBgAlpha(0.0);
+    }
+
+    let flags = WindowFlags::NO_DECORATION
+        | WindowFlags::NO_MOVE
+        | WindowFlags::NO_NAV_FOCUS
+        | WindowFlags::from_bits_truncate(1 << 13); // NoBringToDisplayFront
+
+    ui.window("##dockspace_root")
+        .flags(flags)
+        .build(|| {
+            let id = unsafe {
+                dear_imgui_rs::sys::igGetID_Str(b"MainDockspace\0".as_ptr() as _)
+            };
+
+            // Build the default layout exactly once — before the DockSpace call so the
+            // nodes exist when windows are first shown.
+            build_default_layout(id);
+
+            unsafe {
+                // ImGuiDockNodeFlags_PassthruCentralNode = 1 << 3 = 8
+                dear_imgui_rs::sys::igDockSpace(
+                    id,
+                    dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 },
+                    8,
+                    std::ptr::null(),
+                );
+            }
+        });
+}
+
+fn build_default_layout(dockspace_id: dear_imgui_rs::sys::ImGuiID) {
+    use dear_imgui_rs::sys::*;
+
+    unsafe {
+        // Only initialise once — if the node already has children, the user has
+        // already arranged the layout (or the ini file loaded it).
+        if !igDockBuilderGetNode(dockspace_id).is_null()
+            && (*igDockBuilderGetNode(dockspace_id)).ChildNodes[0] != std::ptr::null_mut()
+        {
+            return;
+        }
+
+        let vp   = igGetMainViewport();
+        let size = (*vp).WorkSize;
+
+        // Start fresh.
+        igDockBuilderRemoveNode(dockspace_id);
+        // ImGuiDockNodeFlags_DockSpace = 1 << 10 = 1024
+        igDockBuilderAddNode(dockspace_id, 1024);
+        igDockBuilderSetNodeSize(dockspace_id, size);
+
+        // Split root LEFT / RIGHT  (left ~58 % of width)
+        let mut dock_right = 0u32;
+        let mut dock_left  = 0u32;
+        igDockBuilderSplitNode(
+            dockspace_id,
+            ImGuiDir_Left,
+            0.58,
+            &mut dock_left,
+            &mut dock_right,
+        );
+
+        // Split LEFT into TOP (2D View) and BOTTOM (Console)
+        let mut dock_2d      = 0u32;
+        let mut dock_console = 0u32;
+        igDockBuilderSplitNode(
+            dock_left,
+            ImGuiDir_Down,
+            0.19,             // console gets bottom ~19 %
+            &mut dock_console,
+            &mut dock_2d,
+        );
+
+        // Split RIGHT into TOP (3D View) and BOTTOM (tabs)
+        let mut dock_3d   = 0u32;
+        let mut dock_tabs = 0u32;
+        igDockBuilderSplitNode(
+            dock_right,
+            ImGuiDir_Down,
+            0.19,
+            &mut dock_tabs,
+            &mut dock_3d,
+        );
+
+        // Dock windows
+        igDockBuilderDockWindow(b"2D View\0".as_ptr()     as _, dock_2d);
+        igDockBuilderDockWindow(b"Console\0".as_ptr()     as _, dock_console);
+        igDockBuilderDockWindow(b"3D View\0".as_ptr()     as _, dock_3d);
+        // Three windows share the bottom-right node as tabs.
+        igDockBuilderDockWindow(b"Textures\0".as_ptr()    as _, dock_tabs);
+        igDockBuilderDockWindow(b"Entities\0".as_ptr()    as _, dock_tabs);
+        igDockBuilderDockWindow(b"Properties\0".as_ptr()  as _, dock_tabs);
+
+        igDockBuilderFinish(dockspace_id);
+    }
+}
+
+// Menu bar
+
+fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
+    // begin_main_menu_bar returns Option<MainMenuBarToken>; the bar is active while token lives.
+    if let Some(_bar) = ui.begin_main_menu_bar() {
+        ui.menu("File", || {
+            if ui.menu_item("Open map…") {
+                util::open_map(state);
+                if !state.map_path.is_empty() {
+                }
+            }
+            if ui.menu_item("Save map")  { util::save_map(state); }
+            ui.separator();
+            if ui.menu_item("Quit") { std::process::exit(0); }
+        });
+
+        ui.menu("View", || {
+            let mut demo = state.show_demo;
+            if ui.menu_item("ImGui demo") {
+                demo = !demo;
+            }
+            state.show_demo = demo;
+        });
+
+        ui.menu("Help", || {
+            if ui.menu_item("About kradiant") { /* TODO */ }
+        });
+    }
+}
+
+// Entity list
+
+fn draw_entity_list(ui: &Ui, state: &mut EditorState)
+{
+    ui.window("Entities")
+        .size([220.0, 500.0], Condition::FirstUseEver)
+        .build(||
+    {
+        let Some(map) = &state.map else {
+            ui.text_disabled("(no map loaded)");
+            return;
+        };
+        for (i, ent) in map.entities.iter().enumerate() {
+            let label = format!("{} ({})\0", ent.classname, ent.id.0);
+            let selected = state.selected_entity == Some(i);
+            if ui.selectable_config(&label[..label.len()-1])
+                .selected(selected)
+                .build()
+                {
+                    state.selected_entity = if selected { None } else { Some(i) };
+                }
+        }
+    });
+}
+
+// Properties
+
+fn draw_properties(ui: &Ui, state: &mut EditorState) {
+    ui.window("Properties")
+    .size([220.0, 280.0], Condition::FirstUseEver)
+    .build(|| {
+        let (Some(map), Some(idx)) = (&mut state.map, state.selected_entity) else {
+            ui.text_disabled("(select an entity)");
+            return;
+        };
+        let ent = &mut map.entities[idx];
+
+        ui.text(format!("classname: {}", ent.classname));
+        ui.separator();
+
+        let mut keys: Vec<String> = ent.properties.keys().cloned().collect();
+        keys.sort();
+
+        let mut to_delete: Option<String> = None;
+
+        for key in &keys {
+            if ui.small_button(format!("-##{key}")) {
+                to_delete = Some(key.clone());
+            }
+            ui.same_line();
+            ui.text(key);
+            ui.same_line();
+            ui.set_next_item_width(-1.0);
+            let value = ent.properties.get_mut(key).unwrap();
+            ui.input_text(format!("##{key}"), value).build();
+        }
+
+        if let Some(k) = to_delete {
+            ent.properties.remove(&k);
+        }
+
+        ui.separator();
+
+        // Add new property
+        ui.set_next_item_width(ui.content_region_avail()[0] * 0.45);
+        ui.input_text("##new_key", &mut state.new_prop_key).hint("key").build();
+        ui.same_line();
+        ui.set_next_item_width(-1.0);
+        ui.input_text("##new_val", &mut state.new_prop_val).hint("value").build();
+
+        let can_add = !state.new_prop_key.trim().is_empty();
+        /*if !can_add {
+            ui.push_style_color(StyleColor::Button,      [0.3, 0.3, 0.3, 1.0]);
+            ui.push_style_color(StyleColor::ButtonHovered,[0.3, 0.3, 0.3, 1.0]);
+        }*/
+        if ui.button("Add property") && can_add {
+            ent.properties
+            .entry(state.new_prop_key.trim().to_string())
+            .or_insert_with(|| state.new_prop_val.clone());
+            state.new_prop_key.clear();
+            state.new_prop_val.clear();
+        }
+        /*if !can_add {
+            ui.pop_style_color();
+            ui.pop_style_color();
+        }*/
+    });
+}
+
+// 3D View
+
+fn draw_view3d(ui: &Ui, state: &mut EditorState) {
+    ui.window("3D View")
+        .size([640.0, 480.0], Condition::FirstUseEver)
+        .build(|| {
+            ui.text("FOV");
+            ui.same_line();
+            ui.set_next_item_width(80.0);
+            ui.slider_config("##fov", 40.0f32, 120.0f32)
+                .display_format("%.0f°")
+                .build(&mut state.config.view3d_fov);
+
+            ui.separator();
+
+            let [w, h] = ui.content_region_avail();
+            let (w, h) = (w.max(1.0), h.max(1.0));
+            let p = ui.cursor_screen_pos();
+
+            /*let draw = ui.get_window_draw_list();
+            draw.add_rect(p, [p[0] + w, p[1] + h], 0xFF20_2020u32).filled(true).build();
+            draw.add_rect(p, [p[0] + w, p[1] + h], 0xFF44_4444u32).filled(false).build();*/
+
+            let label = "3D View";
+            let lw = text_width(ui, label);
+            ui.set_cursor_screen_pos([p[0] + (w - lw) * 0.5, p[1] + h * 0.5 - 7.0]);
+            ui.text_disabled(label);
+
+            ui.set_cursor_screen_pos(p);
+            ui.invisible_button("##3d_hit", [w, h]);
+            // TODO: camera mouse-look / WASD when item is active/hovered
+        });
+}
+
+// 2D View
+
+fn draw_view2d(ui: &Ui, state: &mut EditorState) {
+    ui.window("2D View")
+        .size([640.0, 480.0], Condition::FirstUseEver)
+        .flags(WindowFlags::NO_SCROLLBAR | WindowFlags::NO_SCROLL_WITH_MOUSE)
+        .build(|| {
+        if ui.small_button("Switch") {
+            state.ortho_axis = state.ortho_axis.next();
+        }
+
+        let [w, h] = ui.content_region_avail();
+        let (w, h) = (w.max(1.0), h.max(1.0));
+        let p = ui.cursor_screen_pos();
+        let draw = ui.get_window_draw_list();
+
+        state.view2d_rect = [p[0], p[1], w, h];
+
+        ui.set_cursor_screen_pos(p);
+        ui.invisible_button("##2d_canvas", [w, h]);
+        let canvas_interacting = ui.is_item_hovered() || ui.is_item_active();
+
+        if canvas_interacting {
+            let wheel = ui.io().mouse_wheel();
+            if wheel != 0.0 {
+                let mouse = ui.io().mouse_pos();
+                let old_zoom = state.view2d_zoom;
+                let f = if wheel > 0.0 { 1.15f32 } else { 1.0 / 1.15 };
+                let new_zoom = (old_zoom * f).clamp(0.025, 64.0);
+                if (new_zoom - old_zoom).abs() > f32::EPSILON {
+                    let world = screen_to_world(mouse, p, [w, h], old_zoom, state.view2d_pan);
+                    state.view2d_zoom = new_zoom;
+                    state.view2d_pan[0] = (mouse[0] - (p[0] + w * 0.5)) - world[0] * new_zoom;
+                    state.view2d_pan[1] = (mouse[1] - (p[1] + h * 0.5)) - world[1] * new_zoom;
+                }
+            }
+            if ui.is_mouse_dragging(dear_imgui_rs::MouseButton::Right) {
+                let [dx, dy] = ui.mouse_drag_delta(dear_imgui_rs::MouseButton::Right);
+                state.view2d_pan[0] += dx;
+                state.view2d_pan[1] += dy;
+                ui.reset_mouse_drag_delta(dear_imgui_rs::MouseButton::Right);
+            }
+        }
+
+        let mouse = ui.io().mouse_pos();
+        let world = screen_to_world(
+            mouse,
+            p,
+            [w, h],
+            state.view2d_zoom,
+            state.view2d_pan,
+        );
+        let world_axis = match state.ortho_axis {
+            Ortho::XY => world,
+            Ortho::XZ | Ortho::YZ => [world[0], -world[1]],
+        };
+
+        let step = state.config.grid_minor_step as f32;
+        let snapped = [snap(world[0], step), snap(world[1], step)];
+        let snapped_i = IVec2::new(snapped[0] as i32, snapped[1] as i32);
+
+        let mut snapped_marker: Option<([f32; 2], u32)> = None;
+        if canvas_interacting && ui.is_mouse_down(dear_imgui_rs::MouseButton::Left) {
+            let sx = p[0] + w * 0.5 + state.view2d_pan[0] + snapped[0] * state.view2d_zoom;
+            let sy = p[1] + h * 0.5 + state.view2d_pan[1] + snapped[1] * state.view2d_zoom;
+            let col = util::imgui_color_to_u32(ui.style_color(StyleColor::ButtonActive));
+            snapped_marker = Some(([sx, sy], col));
+        }
+        // START drag
+        if canvas_interacting
+            && ui.is_mouse_clicked(dear_imgui_rs::MouseButton::Left)
+            && !ui.is_key_down(dear_imgui_rs::Key::LeftShift) // LShift + LMouse for selecting only
+        {
+            state.view2d_drag_start = Some(snapped_i);
+            state.view2d_drag_current = Some(snapped_i);
+        }
+
+        // UPDATE drag
+        if canvas_interacting
+            && ui.is_mouse_down(dear_imgui_rs::MouseButton::Left)
+            && !ui.is_key_down(dear_imgui_rs::Key::LeftShift) // LShift + LMouse for selecting only
+        {
+            if state.view2d_drag_start.is_some() {
+                state.view2d_drag_current = Some(snapped_i);
+            }
+        }
+
+        // FINISH drag
+        if canvas_interacting && ui.is_mouse_released(dear_imgui_rs::MouseButton::Left) {
+            if let (Some(start), Some(end)) = (state.view2d_drag_start, state.view2d_drag_current) {
+                //create_brush_from_drag(state, start, end);
+            }
+
+            state.view2d_drag_start = None;
+            state.view2d_drag_current = None;
+        }
+
+        draw.with_clip_rect(p, [p[0] + w, p[1] + h], || {
+            draw.add_rect(p, [p[0] + w, p[1] + h], 0xFF18_1818u32).filled(true).build();
+
+            if let Some(tid) = state.view2d_tex_id {
+                draw.add_image(
+                    tid,
+                    p,
+                    [p[0] + w, p[1] + h],
+                    [0.0, 1.0], // flip Y: OpenGL origin is bottom-left
+                    [1.0, 0.0],
+                    0xFFFFFFFFu32,
+                );
+            }
+
+            draw.add_text([p[0] + 8.0, p[1] + 6.0], 0xFFFFFFFF, state.ortho_axis.label());
+            if canvas_interacting {
+                draw.add_text(
+                    [p[0] + 8.0, p[1] + 24.0],
+                    0xFFAAAAAA,
+                    format!("{:.1}, {:.1}", world_axis[0], world_axis[1]),
+                );
+            }
+
+            if let Some((pos, col)) = snapped_marker {
+                draw.add_circle(pos, 4.0, col).filled(true).build();
+            }
+
+            if let (Some(start), Some(end)) = (state.view2d_drag_start, state.view2d_drag_current) {
+                let min = start.min(end);
+                let max = start.max(end);
+
+                let to_screen = |v: IVec2| -> [f32; 2] {
+                    [
+                        p[0] + w * 0.5 + state.view2d_pan[0] + v.x as f32 * state.view2d_zoom,
+                        p[1] + h * 0.5 + state.view2d_pan[1] + v.y as f32 * state.view2d_zoom,
+                    ]
+                };
+
+                let a = to_screen(min);
+                let b = to_screen(max);
+                let col = ui.style_color(StyleColor::ButtonActive);
+                draw.add_rect(a, b, util::imgui_color_to_u32(col)).thickness(2.0).build();
+            }
+        });
+
+        // brush outlines
+    });
+}
+
+fn draw_ortho_grid(
+    draw: &dear_imgui_rs::DrawListMut<'_>,
+    origin: [f32; 2],
+    w: f32,
+    h: f32,
+    zoom: f32,
+    pan: [f32; 2],
+    minor_step: u8,
+) {
+    let major_world = 64.0;
+    let minor_world = minor_step.max(1);
+
+    let major_step = major_world * zoom;
+    let minor_step = minor_world as f32 * zoom;
+
+    if major_step < 3.0 {
+        return;
+    }
+
+    let cx = origin[0] + w * 0.5 + pan[0];
+    let cy = origin[1] + h * 0.5 + pan[1];
+
+    // --- MINOR GRID ---
+    if minor_step >= 3.0 {
+        let i0 = ((origin[0] - cx) / minor_step).floor() as i32 - 1;
+        let i1 = ((origin[0] + w - cx) / minor_step).ceil() as i32 + 1;
+
+        for i in i0..=i1 {
+            let x = cx + i as f32 * minor_step;
+
+            // skip lines where major grid will draw
+            if (i as f32 % (major_world / minor_world as f32)) == 0.0 {
+                continue;
+            }
+
+            draw.add_line(
+                [x, origin[1]],
+                [x, origin[1] + h],
+                0xFF22_2222u32,
+            ).thickness(1.0).build();
+        }
+
+        let j0 = ((origin[1] - cy) / minor_step).floor() as i32 - 1;
+        let j1 = ((origin[1] + h - cy) / minor_step).ceil() as i32 + 1;
+
+        for j in j0..=j1 {
+            let y = cy + j as f32 * minor_step;
+
+            if (j as f32 % (major_world / minor_world as f32)) == 0.0 {
+                continue;
+            }
+
+            draw.add_line(
+                [origin[0], y],
+                [origin[0] + w, y],
+                0xFF22_2222u32,
+            ).thickness(1.0).build();
+        }
+    }
+
+    // --- MAJOR GRID ---
+    let i0 = ((origin[0] - cx) / major_step).floor() as i32 - 1;
+    let i1 = ((origin[0] + w - cx) / major_step).ceil() as i32 + 1;
+
+    for i in i0..=i1 {
+        let x = cx + i as f32 * major_step;
+
+        draw.add_line(
+            [x, origin[1]],
+            [x, origin[1] + h],
+            0xFF2C_2C2Cu32,
+        ).thickness(1.0).build();
+    }
+
+    let j0 = ((origin[1] - cy) / major_step).floor() as i32 - 1;
+    let j1 = ((origin[1] + h - cy) / major_step).ceil() as i32 + 1;
+
+    for j in j0..=j1 {
+        let y = cy + j as f32 * major_step;
+
+        draw.add_line(
+            [origin[0], y],
+            [origin[0] + w, y],
+            0xFF2C_2C2Cu32,
+        ).thickness(1.0).build();
+    }
+}
+
+// Console
+
+fn draw_console(ui: &Ui, state: &mut EditorState) {
+    ui.window("Console")
+    .size([1280.0, 180.0], Condition::FirstUseEver)
+    .build(|| {
+        if ui.small_button("Clear") { state.log.clear(); }
+        ui.same_line();
+        ui.text("Filter:");
+        ui.same_line();
+        ui.set_next_item_width(180.0);
+        let mut fbuf = state.con_filter.clone();
+        if ui.input_text("##con_filter", &mut fbuf).hint("search…").build() {
+            state.con_filter = fbuf;
+        }
+
+        ui.separator();
+
+        ui.child_window("##console_log")
+        .size(ui.content_region_avail())
+        .build(ui, || {
+            let filter_lc = state.con_filter.to_ascii_lowercase();
+            for entry in &state.log {
+                if !filter_lc.is_empty()
+                    && !entry.text.to_ascii_lowercase().contains(&filter_lc)
+                    {
+                        continue;
+                    }
+                    let _tok = ui.push_style_color(StyleColor::Text, entry.level.color());
+                ui.text(format!("{} {}", entry.level.prefix(), entry.text));
+                // _tok drops → pops colour
+            }
+            if state.console_scroll {
+                ui.set_scroll_here_y(1.0);
+                state.console_scroll = false;
+            }
+        });
+    });
+}
+
+// Texture Browser
+
+fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
+    ui.window("Textures")
+        .size([1280.0, 200.0], Condition::FirstUseEver)
+        .build(|| {
+            ui.text("Filter:");
+            ui.same_line();
+            ui.set_next_item_width(200.0);
+            let mut fbuf = state.tex_filter.clone();
+            if ui.input_text("##tex_filter", &mut fbuf).hint("e.g. caulk").build() {
+                state.tex_filter = fbuf;
+            }
+            ui.same_line();
+            ui.text("  Size:");
+            ui.same_line();
+            ui.set_next_item_width(100.0);
+            ui.slider_config("##tile_size", 32.0f32, 256.0f32)
+                .display_format("%.0f px")
+                .build(&mut state.tex_tile_size);
+
+            if let Some(sel) = &state.tex_selected {
+                ui.same_line();
+                ui.text_disabled(format!("  selected: {sel}"));
+            }
+
+            ui.separator();
+
+            ui.child_window("##tex_scroll")
+                .size([0.0, 0.0])
+                .build(ui, || draw_texture_tiles(ui, state));
+        });
+}
+
+fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
+    // Placeholder list — replace with AssetDb::collect_used_materials() later
+    let materials: &[&str] = &[
+        "common/caulk",
+        "common/clip",
+        "common/trigger",
+        "common/water",
+    ];
+
+    let tile = state.tex_tile_size;
+    let label_h = ui.frame_height_with_spacing();
+    let cell_w = tile + 4.0;
+    let avail_w = ui.content_region_avail()[0].max(cell_w);
+    let cols = ((avail_w + 4.0) / cell_w).floor().max(1.0) as usize;
+
+    let filter_lc = state.tex_filter.to_ascii_lowercase();
+    let visible: Vec<&str> = materials
+        .iter()
+        .filter(|m| filter_lc.is_empty() || m.to_ascii_lowercase().contains(&filter_lc))
+        .copied()
+        .collect();
+
+    if visible.is_empty() {
+        ui.text_disabled("no textures match filter");
+        return;
+    }
+
+    for (i, material) in visible.iter().enumerate() {
+        let short = material.rsplit('/').next().unwrap_or(material);
+        let selected = state.tex_selected.as_deref() == Some(material);
+
+        if selected {
+            let p = ui.cursor_screen_pos();
+            ui.get_window_draw_list()
+                .add_rect(p, [p[0] + tile + 2.0, p[1] + tile + label_h + 2.0], 0xFF26_97FBu32)
+                .filled(true)
+                .rounding(3.0)
+                .build();
+        }
+
+        // Deterministic colour placeholder — swap for Image::new(gpu_tex_id, [tile,tile]) later.
+        {
+            let hash = short.bytes().fold(5381u32, |a, b| a.wrapping_mul(33).wrapping_add(b as u32));
+            let r = (((hash      ) & 0x7F) as f32 + 64.0) / 255.0;
+            let g = (((hash >>  8) & 0x7F) as f32 + 64.0) / 255.0;
+            let b = (((hash >> 16) & 0x7F) as f32 + 64.0) / 255.0;
+            // Pack as ABGR u32 that DrawList expects (0xAA_BB_GG_RR).
+            let col = pack_abgr(r, g, b, 1.0);
+            let p = ui.cursor_screen_pos();
+            ui.get_window_draw_list()
+                .add_rect(p, [p[0] + tile, p[1] + tile], col)
+                .filled(true)
+                .build();
+        }
+
+        if ui.invisible_button(format!("##t_{i}"), [tile, tile]) {
+            state.tex_selected = if selected { None } else { Some(material.to_string()) };
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text(*material);
+        }
+
+        //let label = truncate_to_width(ui, short, tile);
+        //ui.text(&label);
+
+        if (i + 1) % cols != 0 {
+            ui.same_line_with_spacing(0.0, 4.0);
+        }
+    }
+}

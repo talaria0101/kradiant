@@ -58,7 +58,7 @@ pub fn brush_to_polygons(brush: &Brush) -> Result<Vec<(Vec<Vec3>, Vec<u32>)>, Ge
 
     // Epsilon tuning:
     // - CoD1 maps are authored at grid-aligned scales, but plane intersection math introduces
-    //   small errors. Clipping with a modest epsilon is typically more robust than strict tests.
+    // small errors. Clipping with a modest epsilon is typically more robust than strict tests.
     const ORIENT_EPS: f32 = 1e-3;
     const CLIP_EPS: f32 = 1e-3;
     const DEDUP_EPS: f32 = 1e-4;

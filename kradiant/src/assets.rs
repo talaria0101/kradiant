@@ -52,7 +52,7 @@ impl AssetRoots {
     /// - Map material names usually omit the file extension.
     /// - We try a preferred extension order (`dds`, `tga`, `jpg`, `jpeg`).
     /// - We look under `(main)/textures/<name>` first, then fall back to `(main)/<name>` in case
-    ///   the material already includes a `textures/...` prefix.
+    /// the material already includes a `textures/...` prefix.
     pub fn resolve_texture_path(&self, material: &str) -> Option<PathBuf> {
         let rel = normalize_material_name(material);
         resolve_texture_path_under(&self.textures_dir, &rel)
@@ -380,7 +380,7 @@ impl AssetDb {
     /// Notes:
     /// - Tries `dds`, `tga`, `jpg`, `jpeg` when no extension is present.
     /// - Tries under `textures/` first, then falls back to the raw material string in case it
-    ///   already contains a `textures/...` prefix.
+    /// already contains a `textures/...` prefix.
     pub fn resolve_texture(&mut self, material: &str) -> Option<ResolvedAsset> {
         let rel = normalize_material_name(material);
         let rel = normalize_asset_path(&rel);

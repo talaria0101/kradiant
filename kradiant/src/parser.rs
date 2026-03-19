@@ -282,11 +282,11 @@ impl<'a> Parser<'a> {
     fn parse_patch(&mut self, patch_type: PatchType) -> Result<Patch, ParseError> {
         // Expected structure (inner block):
         // {
-        //   shader
-        //   ( rows cols contents 0 0 0 subdiv )
+        // shader
+        // ( rows cols contents 0 0 0 subdiv )
         // (
-        //   ( ( x y z u v r g b a turned ) ... )
-        //   ...
+        // ( ( x y z u v r g b a turned ) ... )
+        // ...
         // )
         // }
 
@@ -537,9 +537,11 @@ impl Map {
         let mut out = String::new();
 
         for (i, entity) in self.entities.iter().enumerate() {
-            writeln!(out, "// entity {}", i).unwrap();
+            if i != 0 {
+                writeln!(out, "// entity {}", i).unwrap();
+            }
             out.push_str(&entity.to_map_string());
-            out.push('\n');
+            //out.push('\n');
         }
         out
     }
@@ -563,7 +565,6 @@ impl Entity {
         for (i, brush) in self.brushes.iter().enumerate() {
             writeln!(out, "// brush {}", i).unwrap();
             out.push_str(&brush.to_map_string());
-            out.push('\n');
         }
 
         out.push_str("}\n");
@@ -599,7 +600,7 @@ impl Face {
         let f = self.params;
 
         format!(
-            "( {:.0} {:.0} {:.0}) ( {:.0} {:.0} {:.0}) ( {:.0} {:.0} {:.0}) {} {} {} {} {:.6} {:.6} {} {} {} {}",
+            "( {:.0} {:.0} {:.0} ) ( {:.0} {:.0} {:.0} ) ( {:.0} {:.0} {:.0} ) {} {shift_x} {shift_y} {rot} {scale_x} {scale_y} {s_flags} {idk} {value} {sample_size}",
             p[0].x,
             p[0].y,
             p[0].z,
@@ -610,15 +611,15 @@ impl Face {
             p[2].y,
             p[2].z,
             self.texture,
-            f.shift.x,
-            f.shift.y,
-            f.rotate,
-            f.scale.x,
-            f.scale.y,
-            f.surface_flags.as_u32(),
-            f.idk,
-            f.value,
-            f.sample_size
+            shift_x = f.shift.x,
+            shift_y = f.shift.y,
+            rot = f.rotate,
+            scale_x = format!("{:.6}", f.scale.x).trim_end_matches("0").trim_end_matches("."),
+            scale_y = format!("{:.6}", f.scale.y).trim_end_matches("0").trim_end_matches("."),
+            s_flags = f.surface_flags.as_u32(),
+            idk = f.idk,
+            value = f.value,
+            sample_size = f.sample_size
         )
     }
 }
