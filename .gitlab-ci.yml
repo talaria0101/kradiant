@@ -6,11 +6,16 @@
 # Note that environment variables can be set in several places
 # See https://docs.gitlab.com/ee/ci/variables/#cicd-variable-precedence
 stages:
-  - test
   - secret-detection
+  - test
 
 variables:
   SECRET_DETECTION_ENABLED: 'true'
+
+secret_detection:
+  stage: secret-detection
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
 
 rust-test:
   stage: test
@@ -28,8 +33,3 @@ rust-test:
   only:
     - branches
     - merge_requests
-
-secret_detection:
-  stage: secret-detection
-include:
-  - template: Security/Secret-Detection.gitlab-ci.yml
