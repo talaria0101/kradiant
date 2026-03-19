@@ -25,11 +25,6 @@ rust-test:
     - apt update
     - apt install -y libclang-dev libimgui-dev
     - cargo test --verbose
-  artifacts:
-    when: always
-    paths:
-      - target/
-    expire_in: 1 week
   only:
     - branches
     - merge_requests
