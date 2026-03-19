@@ -17,6 +17,8 @@ rust-test:
   image: rust:1.94.0
   script:
     # - rustup default stable || true
+    - apt update
+    - apt install -y libclang-dev libimgui-dev
     - cargo test --verbose
   artifacts:
     when: always
