@@ -4,11 +4,13 @@
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 
 use crate::config::EditorConfig;
-use crate::util;
+use crate::{editor_icons, util};
 use glam::{IVec2, IVec3, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::BrushId;
+use kradiant::loader::texture_loader;
 use util::{pack_abgr, screen_to_world, snap, text_width};
+use crate::icons::EditorIcons;
 
 // State types
 
@@ -94,6 +96,7 @@ pub struct EditorState {
     pub last_aabb: Option<Aabb>,
     pub new_prop_key: String,
     pub new_prop_val: String,
+    pub icons: EditorIcons,
 }
 
 macro_rules! editor_log {
@@ -149,6 +152,7 @@ impl Default for EditorState {
             last_aabb: None,
             new_prop_key: String::new(),
             new_prop_val: String::new(),
+            icons: EditorIcons::default(),
         };
         s.log_info("Kradiant editor started");
 
@@ -329,7 +333,6 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
         ui.menu("File", || {
             if ui.menu_item("Open map…") {
                 util::open_map(state);
-                if !state.map_path.is_empty() {}
             }
             if ui.menu_item("Save map") {
                 util::save_map(state);
@@ -487,11 +490,28 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
         .size([640.0, 480.0], Condition::FirstUseEver)
         .flags(WindowFlags::NO_SCROLLBAR | WindowFlags::NO_SCROLL_WITH_MOUSE)
         .build(|| {
-            if ui.small_button("Switch") {
+            /*if ui.small_button("Switch") {
                 state.ortho_axis = state.ortho_axis.next();
                 if let Some(aabb) = state.last_aabb.clone() {
                     update_last_work_from_aabb(state, &aabb);
                 }
+            }*/
+
+            let view_switched = if let Some(tid) = state.icons.view_cycle {
+                // image_button(id, texture_id, size) — the str id disambiguates multiple image buttons
+                //ui.image_button("##switch_view", tid, [24.0, 24.0])
+                ui.image_button_config("##switch_view", tid, [24.0, 24.0]).build()
+            } else {
+                ui.small_button("Switch") // fallback if texture didn't load
+            };
+            if view_switched {
+                state.ortho_axis = state.ortho_axis.next();
+                if let Some(aabb) = state.last_aabb.clone() {
+                    update_last_work_from_aabb(state, &aabb);
+                }
+            }
+            if ui.is_item_hovered() {
+                ui.tooltip_text("Switch View");
             }
 
             let [w, h] = ui.content_region_avail();

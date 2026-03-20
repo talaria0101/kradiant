@@ -24,11 +24,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use crate::config::EditorConfig;
+use crate::icons::EditorIcons;
 
 #[macro_use]
 mod ui;
 mod config;
 mod util;
+mod icons;
 
 fn main() {
     let event_loop = EventLoop::new().expect("failed to create event loop");
@@ -319,8 +321,15 @@ impl AppState {
             gl_for_renderer.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
 
-        let mut renderer =
-            GlowRenderer::new(gl_for_renderer, &mut imgui).expect("GlowRenderer::new failed");
+        let mut renderer = GlowRenderer::new(gl_for_renderer, &mut imgui).expect("GlowRenderer::new failed");
+
+        let img_view_cycle = EditorIcons::get_image(editor_icons::ICON_VIEW_CHANGE_DDS);
+        let id_icon_view_cycle = renderer.register_texture(
+            img_view_cycle.width,
+            img_view_cycle.height,
+            TextureFormat::RGBA32,
+            &img_view_cycle.rgba8
+        ).expect("register editor icon");
 
         let mut editor = ui::EditorState::default();
         editor.log_info(gl_info);
@@ -329,6 +338,7 @@ impl AppState {
                 .texture_map_mut()
                 .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
         editor.view2d_tex_id = Some(view2d_imgui_tex);
+        editor.icons.view_cycle = Some(id_icon_view_cycle);
 
         Self {
             window,

@@ -132,6 +132,8 @@ pub fn open_map(state: &mut EditorState) {
         let path_str = path.to_str().unwrap();
         match map_loader::load_map(path_str) {
             Ok(map) => {
+                state.selected_brushes.clear();
+                state.selected_entity = None;
                 state.map_path = path_str.to_string();
                 state.map = Some(map);
                 editor_log_e!(state, info, "Loaded map: {}", path_str);
@@ -165,14 +167,20 @@ pub fn save_map(state: &mut EditorState) {
 
     while choose_new_file {
         let cwd = std::env::current_dir().unwrap();
-        if let Some(p) = rfd::FileDialog::new()
+        match rfd::FileDialog::new()
             .set_title("Save map")
             .add_filter("CoD Map", &["map", "bak"])
             .set_directory(cwd)
             .save_file()
         {
-            chosen_path = p;
-            choose_new_file = false;
+            Some(p) => {
+                chosen_path = p;
+                choose_new_file = false;
+            }
+            None => {
+                editor_log_e!(state, info, "Save map cancelled by user");
+                return;
+            }
         }
     }
 
