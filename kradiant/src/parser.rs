@@ -614,8 +614,12 @@ impl Face {
             shift_x = f.shift.x,
             shift_y = f.shift.y,
             rot = f.rotate,
-            scale_x = format!("{:.6}", f.scale.x).trim_end_matches("0").trim_end_matches("."),
-            scale_y = format!("{:.6}", f.scale.y).trim_end_matches("0").trim_end_matches("."),
+            scale_x = format!("{:.6}", f.scale.x)
+                .trim_end_matches("0")
+                .trim_end_matches("."),
+            scale_y = format!("{:.6}", f.scale.y)
+                .trim_end_matches("0")
+                .trim_end_matches("."),
             s_flags = f.surface_flags.as_u32(),
             idk = f.idk,
             value = f.value,
@@ -670,7 +674,6 @@ impl Patch {
         out
     }
 }
-
 
 /// Parse a `.map` source string into an in‑memory [`Map`].
 pub fn parse_map_string(content: &str) -> Result<Map, ParseError> {

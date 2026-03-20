@@ -4,9 +4,9 @@
 //! - Entities are key/value dictionaries plus zero or more brushes.
 //! - Faces carry texture and classic "9‑number" surface parameters as written by level editors.
 
-use crate::{IVec2, Vec2, IVec3, Vec3};
-use std::collections::HashMap;
-use crate::editing::{Aabb, aabb_from_polys};
+use crate::editing::{Aabb, aabb_from_polys, aabb_from_positions};
+use crate::{IVec2, Vec2, Vec3};
+use std::collections::{HashMap, HashSet};
 
 /// Strongly‑typed entity identifiers (prevents mixing entity and brush indices).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -141,6 +141,8 @@ pub struct Patch {
     /// Vertex grid stored as `[row][col]` in map space.
     pub vertices: Vec<Vec<PatchVertex>>,
     cached_mesh: Option<PatchMesh>,
+    cached_aabb: Option<Aabb>,
+    cached_wire_edges: Option<Vec<(u32, u32)>>,
     // Indicates whether the patch has been modified since tessellation was cached.
     //dirty: bool,
     //generation: u64,
@@ -165,13 +167,15 @@ impl Brush {
     ///
     /// Callers are expected to reuse the returned slice between frames; when nothing changed this
     /// is effectively O(1).
-    pub fn get_polygons(&mut self) -> Option<&[(Vec<Vec3>, Vec<u32>)]> {
+    pub fn get_polygons_and_aabb(&mut self) -> Option<(&Aabb, &[(Vec<Vec3>, Vec<u32>)])> {
         /*if self.dirty || self.cached_geometry.is_none() {
             let polys = crate::geometry::brush_to_polygons(self).ok()?;
             self.cached_geometry = Some(polys);
             self.dirty = false;
         }*/
-        if /*self.generation != self.last_generation ||*/ self.cached_geometry.is_none() {
+        if
+        /*self.generation != self.last_generation ||*/
+        self.cached_geometry.is_none() {
             let polys = crate::geometry::brush_to_polygons(self).ok()?;
             self.aabb = aabb_from_polys(&polys);
             self.cached_geometry = Some(polys);
@@ -179,12 +183,22 @@ impl Brush {
             //self.last_generation = self.generation;
         }
 
-        self.cached_geometry.as_deref()
+        let aabb = &self.aabb;
+        let polys = self.cached_geometry.as_deref()?;
+        Some((aabb, polys))
+    }
+
+    pub fn get_polygons(&mut self) -> Option<&[(Vec<Vec3>, Vec<u32>)]> {
+        self.get_polygons_and_aabb().map(|(_, polys)| polys)
     }
 
     /// Update a single brush plane and bump the map generation counter if it changed.
-    pub fn update_brush_plane(&mut self, generation: &mut u64, plane_index: usize, new_plane: [Vec3; 3])
-    {
+    pub fn update_brush_plane(
+        &mut self,
+        generation: &mut u64,
+        plane_index: usize,
+        new_plane: [Vec3; 3],
+    ) {
         if let BrushContent::Convex(faces) = &mut self.content {
             if let Some(face) = faces.get_mut(plane_index) {
                 face.plane_points = new_plane;
@@ -197,10 +211,8 @@ impl Brush {
 
     pub fn polygons_for_drawing(&self) -> Option<Vec<(Vec<Vec3>, Vec<u32>)>> {
         match &self.content {
-            BrushContent::Convex(_) => {
-                crate::geometry::brush_to_polygons(self).ok()
-            }
-            BrushContent::Patch(_) => None,   // skip patches here
+            BrushContent::Convex(_) => crate::geometry::brush_to_polygons(self).ok(),
+            BrushContent::Patch(_) => None, // skip patches here
         }
     }
 
@@ -213,15 +225,47 @@ impl Brush {
 }
 
 impl Patch {
+    fn ensure_cached(&mut self) -> Option<()> {
+        if
+        /*self.generation != self.last_generation ||*/
+        self.cached_mesh.is_none() {
+            let mesh = crate::geometry::tessellate_patch(self).ok()?;
+            self.cached_aabb = Some(aabb_from_positions(mesh.positions.as_slice()));
+
+            let mut seen: HashSet<(u32, u32)> = HashSet::new();
+            for tri in mesh.indices.chunks_exact(3) {
+                let edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])];
+                for (a, b) in edges {
+                    let key = if a < b { (a, b) } else { (b, a) };
+                    seen.insert(key);
+                }
+            }
+            let mut edges: Vec<(u32, u32)> = seen.into_iter().collect();
+            edges.sort_unstable();
+            self.cached_wire_edges = Some(edges);
+
+            self.cached_mesh = Some(mesh);
+            //self.generation = self.generation.wrapping_add(1);
+            //self.last_generation = self.generation;
+        }
+        Some(())
+    }
+
     /// Create a new patch with the given shader, parameters and vertex grid.
-    pub fn new(patch_type: PatchType, shader: String, params: PatchParams, vertices: Vec<Vec<PatchVertex>>) -> Self
-    {
+    pub fn new(
+        patch_type: PatchType,
+        shader: String,
+        params: PatchParams,
+        vertices: Vec<Vec<PatchVertex>>,
+    ) -> Self {
         Self {
             patch_type,
             shader,
             params,
             vertices,
             cached_mesh: None,
+            cached_aabb: None,
+            cached_wire_edges: None,
             //generation: 0,
             //last_generation: 1,
         }
@@ -229,22 +273,33 @@ impl Patch {
 
     /// Return cached tessellation, recomputing only when the patch was modified.
     pub fn get_mesh(&mut self) -> Option<&PatchMesh> {
-        if /*self.generation != self.last_generation ||*/ self.cached_mesh.is_none() {
-            let mesh = crate::geometry::tessellate_patch(self).ok()?;
-            self.cached_mesh = Some(mesh);
-            //self.generation = self.generation.wrapping_add(1);
-            //self.last_generation = self.generation;
-        }
+        let _ = self.ensure_cached()?;
         self.cached_mesh.as_ref()
     }
 
+    pub fn get_mesh_aabb_wire(&mut self) -> Option<(&PatchMesh, &Aabb, &[(u32, u32)])> {
+        let _ = self.ensure_cached()?;
+        let mesh = self.cached_mesh.as_ref()?;
+        let aabb = self.cached_aabb.as_ref()?;
+        let edges = self.cached_wire_edges.as_deref()?;
+        Some((mesh, aabb, edges))
+    }
+
     /// Update a single vertex in the patch grid and bump the map generation counter if it changed.
-    pub fn update_vertex(&mut self, generation: &mut u64, row: usize, col: usize, vtx: PatchVertex) {
+    pub fn update_vertex(
+        &mut self,
+        generation: &mut u64,
+        row: usize,
+        col: usize,
+        vtx: PatchVertex,
+    ) {
         if let Some(r) = self.vertices.get_mut(row) {
             if let Some(v) = r.get_mut(col) {
                 *v = vtx;
                 *generation = generation.wrapping_add(1);
                 self.cached_mesh = None;
+                self.cached_aabb = None;
+                self.cached_wire_edges = None;
             }
         }
     }

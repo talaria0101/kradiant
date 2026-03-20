@@ -1,15 +1,16 @@
+use dear_imgui_rs::Ui;
+use kradiant::loader::map_loader;
 use std::fs::create_dir_all;
 use std::io;
 use std::path::PathBuf;
-use dear_imgui_rs::Ui;
-use kradiant::loader::map_loader;
 
 use crate::ui::{EditorState, Ortho};
 use glam::Vec3;
 
-pub(crate) fn get_config_dir() -> io::Result<PathBuf>
-{
-    let base = std::env::home_dir().unwrap().join(".config/kradiant_editor");
+pub(crate) fn get_config_dir() -> io::Result<PathBuf> {
+    let base = std::env::home_dir()
+        .unwrap()
+        .join(".config/kradiant_editor");
     if !base.exists() {
         create_dir_all(&base)?;
     }
@@ -26,12 +27,7 @@ pub fn text_width(ui: &Ui, text: &str) -> f32 {
     unsafe {
         // In this build igCalcTextSize(text, text_end, hide_text_after_double_hash, wrap_width)
         // and returns ImVec2 by value (no out-param).
-        let sz = dear_imgui_rs::sys::igCalcTextSize(
-            c.as_ptr(),
-            std::ptr::null(),
-            false,
-            -1.0,
-        );
+        let sz = dear_imgui_rs::sys::igCalcTextSize(c.as_ptr(), std::ptr::null(), false, -1.0);
         sz.x
     }
 }
@@ -61,15 +57,17 @@ pub fn pack_abgr(r: f32, g: f32, b: f32, a: f32) -> u32 {
     (ai << 24) | (bi << 16) | (gi << 8) | ri
 }
 
-pub fn screen_to_world(mouse: [f32; 2], origin: [f32; 2], size: [f32; 2], zoom: f32, pan: [f32; 2]) -> [f32; 2]
-{
+pub fn screen_to_world(
+    mouse: [f32; 2],
+    origin: [f32; 2],
+    size: [f32; 2],
+    zoom: f32,
+    pan: [f32; 2],
+) -> [f32; 2] {
     let cx = origin[0] + size[0] * 0.5 + pan[0];
     let cy = origin[1] + size[1] * 0.5 + pan[1];
 
-    [
-        (mouse[0] - cx) / zoom,
-        (mouse[1] - cy) / zoom,
-    ]
+    [(mouse[0] - cx) / zoom, (mouse[1] - cy) / zoom]
 }
 
 pub fn project_to_2d(v: Vec3, axis: Ortho) -> [f32; 2] {
@@ -88,16 +86,14 @@ pub fn world_to_screen(
     h: f32,
     zoom: f32,
     pan: [f32; 2],
-) -> [f32; 2]
-{
+) -> [f32; 2] {
     [
         p[0] + w * 0.5 + pan[0] + v[0] * zoom,
         p[1] + h * 0.5 + pan[1] + v[1] * zoom,
     ]
 }
 
-pub fn snap(v: f32, step: f32) -> f32
-{
+pub fn snap(v: f32, step: f32) -> f32 {
     (v / step).round() * step
 }
 /*
@@ -122,34 +118,8 @@ pub fn screen_to_world_ortho(
     [world_x, world_y]
 }
 */
-/// Adjust pan so that world_point stays under screen_point after zoom change
-pub fn zoom_around_point(
-    zoom_old: f32,
-    zoom_new: f32,
-    pan: &mut [f32; 2],
-    screen_point: [f32; 2],        // mouse position in window pixels
-    view_origin: [f32; 2],
-    view_size: [f32; 2],
-)
-{
-    let world_before = screen_to_world(screen_point, view_origin, view_size, zoom_old, *pan);
 
-    // Apply new zoom
-    let factor = zoom_new / zoom_old;
-
-    // New pan = old_pan + (world_before - old_center) * (1 - factor)
-    let half_w = view_size[0] / (2.0 * zoom_new);
-    let half_h = view_size[1] / (2.0 * zoom_new);
-
-    let new_center_x = world_before[0] - half_w + (half_w / factor);
-    let new_center_y = world_before[1] - half_h + (half_h / factor);
-
-    pan[0] = new_center_x - half_w;
-    pan[1] = new_center_y - half_h;
-}
-
-pub fn open_map(state: &mut EditorState)
-{
+pub fn open_map(state: &mut EditorState) {
     let cwd = std::env::current_dir().unwrap();
     let p = rfd::FileDialog::new()
         .set_title("Open a map")
@@ -167,25 +137,31 @@ pub fn open_map(state: &mut EditorState)
                 editor_log_e!(state, info, "Loaded map: {}", path_str);
             }
             Err(e) => {
-                editor_log_e!(state, error, "Failed to load {}: {}", path_str, e.to_string());
+                editor_log_e!(
+                    state,
+                    error,
+                    "Failed to load {}: {}",
+                    path_str,
+                    e.to_string()
+                );
             }
         }
     }
 }
 
-pub fn save_map(state: &mut EditorState)
-{
+pub fn save_map(state: &mut EditorState) {
     let mut chosen_path = PathBuf::new();
     let mut choose_new_file = if !state.map_path.is_empty() {
         let path = PathBuf::from(&state.map_path);
         if path.exists() && path.is_file() {
             chosen_path = path;
             false
-        }
-        else {
+        } else {
             true
         }
-    } else { true };
+    } else {
+        true
+    };
 
     while choose_new_file {
         let cwd = std::env::current_dir().unwrap();
@@ -204,7 +180,13 @@ pub fn save_map(state: &mut EditorState)
     match map_loader::save_map(state.map.as_ref().unwrap(), path_str) {
         Ok(_) => editor_log_e!(state, info, "Saved map to {}", path_str),
         Err(e) => {
-            editor_log_e!(state, error, "Failed to save map to {}: {}", path_str, e.to_string());
+            editor_log_e!(
+                state,
+                error,
+                "Failed to save map to {}: {}",
+                path_str,
+                e.to_string()
+            );
         }
     }
 }

@@ -6,8 +6,8 @@
 //! - resolving textures and shader metadata needed for editing and preview
 //! - providing loader facades ([`loader`]) that are independent of any UI or renderer
 
-pub mod editing;
 pub mod assets;
+pub mod editing;
 pub mod geometry;
 pub mod loader;
 pub mod map;
@@ -41,7 +41,7 @@ pub use texmap::{
 pub use map_utils::{collect_used_materials, count_brushes};*/
 
 // Re-export common types for UI layer
-pub use glam::{IVec2, Mat4, Quat, Vec2, IVec3, Vec3, Vec4};
+pub use glam::{IVec2, IVec3, Mat4, Quat, Vec2, Vec3, Vec4};
 
 // TODO: get_polygons_for_brush(id) -> &[Polygon] (cached vertex/index buffers)
 // TODO: FFI layer (extern "C" + cbindgen) - low priority

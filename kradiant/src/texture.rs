@@ -22,7 +22,6 @@ pub enum TextureError {
 
     //#[error("feature required: {0}")]
     //FeatureRequired(&'static str),
-
     #[error("unsupported texture format: {0}")]
     UnsupportedFormat(String),
 
@@ -54,15 +53,19 @@ pub fn load_texture_rgba8(path: impl AsRef<Path>) -> Result<TextureImage, Textur
 pub fn decode_texture_rgba8(bytes: &[u8], ext: &str) -> Result<TextureImage, TextureError> {
     let fmt = match ext {
         "jpg" | "jpeg" => image::ImageFormat::Jpeg,
-        "tga"          => image::ImageFormat::Tga,
-        "dds"          => image::ImageFormat::Dds,
-        _              => return Err(TextureError::UnsupportedFormat(ext.to_string())),
+        "tga" => image::ImageFormat::Tga,
+        "dds" => image::ImageFormat::Dds,
+        _ => return Err(TextureError::UnsupportedFormat(ext.to_string())),
     };
     let img = image::load_from_memory_with_format(bytes, fmt)
-    .map_err(|e| TextureError::Decode(e.to_string()))?;
+        .map_err(|e| TextureError::Decode(e.to_string()))?;
     let rgba = img.into_rgba8();
     let (width, height) = rgba.dimensions();
-    Ok(TextureImage { width, height, rgba8: rgba.into_raw() })
+    Ok(TextureImage {
+        width,
+        height,
+        rgba8: rgba.into_raw(),
+    })
 }
 
 #[cfg(test)]

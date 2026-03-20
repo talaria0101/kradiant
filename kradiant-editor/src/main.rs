@@ -7,32 +7,32 @@ use std::time::Instant;
 use dear_imgui_glow::GlowRenderer;
 use dear_imgui_rs::{Context, FontSource, TextureFormat};
 use dear_imgui_winit::WinitPlatform;
+use glam::Vec3;
+use glow::HasContext;
 use glutin::config::ConfigTemplateBuilder;
 use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext, Version};
 use glutin::display::GetGlDisplay;
 use glutin::prelude::*;
 use glutin::surface::{SurfaceAttributesBuilder, WindowSurface};
 use glutin_winit::DisplayBuilder;
-use glow::HasContext;
+use kradiant::map::BrushContent;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
-use glam::Vec3;
-use kradiant::map::BrushContent;
 
 use crate::config::EditorConfig;
 
 #[macro_use]
 mod ui;
-mod util;
 mod config;
+mod util;
 
 fn main() {
     let event_loop = EventLoop::new().expect("failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = App { state: None };
     event_loop.run_app(&mut app).expect("event loop error");
@@ -43,31 +43,48 @@ struct App {
 }
 
 struct AppState {
-    window:     Window,
+    window: Window,
     gl_surface: glutin::surface::Surface<WindowSurface>,
     gl_context: glutin::context::PossiblyCurrentContext,
     // GlowRenderer takes ownership of glow::Context, so we store it inside the renderer.
     // We still need a handle for clears — borrow it from the renderer when needed, or keep
     // a second Arc. Simplest: keep our own glow::Context for raw GL calls.
-    gl:         glow::Context,
-    imgui:      Context,
-    platform:   WinitPlatform,
-    renderer:   GlowRenderer,
-    editor:     ui::EditorState,
+    gl: glow::Context,
+    imgui: Context,
+    platform: WinitPlatform,
+    renderer: GlowRenderer,
+    editor: ui::EditorState,
     last_frame: Instant,
     last_title: String,
-    program:     glow::Program,
-    mvp_loc:     glow::UniformLocation,
-    color_loc:   glow::UniformLocation,
-    vbo:         glow::Buffer,
-    ebo:         glow::Buffer,
+    program: glow::Program,
+    mvp_loc: glow::UniformLocation,
+    color_loc: glow::UniformLocation,
+    vbo: glow::Buffer,
+    //ebo: glow::Buffer,
     vao: glow::NativeVertexArray,
     view2d_line_vertices: Vec<Vec3>,
+    view2d_selected_vertices: Vec<Vec3>,
     view2d_grid_vertices: Vec<Vec3>,
-    view2d_fbo:     glow::Framebuffer,
-    view2d_tex:     glow::Texture,
-    view2d_rbo:     glow::Renderbuffer,  // depth
+    view2d_fbo: glow::Framebuffer,
+    view2d_tex: glow::Texture,
+    view2d_rbo: glow::Renderbuffer, // depth
     view2d_fbo_size: [u32; 2],
+    view2d_cache: Option<View2dCache>,
+    needs_redraw: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct View2dCache {
+    axis: ui::Ortho,
+    map_present: bool,
+    map_ptr: usize,
+    map_generation: u64,
+    zoom: f32,
+    // Expanded cull bounds (world units in the 2D plane coordinates).
+    cull_left: f32,
+    cull_right: f32,
+    cull_top: f32,
+    cull_bottom: f32,
 }
 
 impl AppState {
@@ -86,7 +103,11 @@ impl AppState {
             .build(event_loop, template, |configs| {
                 configs
                     .reduce(|acc, cfg| {
-                        if cfg.num_samples() > acc.num_samples() { cfg } else { acc }
+                        if cfg.num_samples() > acc.num_samples() {
+                            cfg
+                        } else {
+                            acc
+                        }
                     })
                     .expect("no suitable GL config")
             })
@@ -94,8 +115,10 @@ impl AppState {
 
         let window = window.expect("window creation failed");
         window.set_maximized(true);
-        let icon_img = kradiant::texture::decode_texture_rgba8(editor_icons::ICON_LOGO_DDS, "dds").unwrap();
-        let icon = winit::window::Icon::from_rgba(icon_img.rgba8, icon_img.width, icon_img.height).unwrap();
+        let icon_img =
+            kradiant::texture::decode_texture_rgba8(editor_icons::ICON_LOGO_DDS, "dds").unwrap();
+        let icon = winit::window::Icon::from_rgba(icon_img.rgba8, icon_img.width, icon_img.height)
+            .unwrap();
         window.set_window_icon(Some(icon));
 
         // GL context ─
@@ -143,7 +166,9 @@ impl AppState {
         // ImGui context
         let cfg_dir = util::get_config_dir().unwrap();
         let mut imgui = Context::create();
-        imgui.set_ini_filename(Some(cfg_dir.join("editor_ui.ini"))).expect("Failed to load editor layout config");
+        imgui
+            .set_ini_filename(Some(cfg_dir.join("editor_ui.ini")))
+            .expect("Failed to load editor layout config");
 
         // Enable docking.
         let io = imgui.io_mut();
@@ -152,11 +177,7 @@ impl AppState {
         // platform backend
         //  attach_window(&window, HiDpiMode, &mut Context)
         let mut platform = WinitPlatform::new(&mut imgui);
-        platform.attach_window(
-            &window,
-            dear_imgui_winit::HiDpiMode::Default,
-            &mut imgui,
-        );
+        platform.attach_window(&window, dear_imgui_winit::HiDpiMode::Default, &mut imgui);
 
         // fonts
         imgui.fonts().add_font(&[
@@ -169,7 +190,7 @@ impl AppState {
                 data: include_bytes!("../assets/fonts/Nunito-SemiBold.ttf"),
                 size_pixels: Some(18.0),
                 config: None,
-            }
+            },
         ]);
 
         //  renderer ─
@@ -187,24 +208,32 @@ impl AppState {
         // ── Simple shader for 2D wire (GL 2.1 compatible) ─────────────────────
         let program = unsafe {
             let vert = gl_for_renderer.create_shader(glow::VERTEX_SHADER).unwrap();
-            gl_for_renderer.shader_source(vert, r#"
+            gl_for_renderer.shader_source(
+                vert,
+                r#"
             #version 120
             attribute vec3 a_pos;
             uniform mat4 u_mvp;
             void main() { gl_Position = u_mvp * vec4(a_pos, 1.0); }
-            "#);
+            "#,
+            );
             gl_for_renderer.compile_shader(vert);
-            
+
             if !gl_for_renderer.get_shader_compile_status(vert) {
                 panic!("vert: {}", gl_for_renderer.get_shader_info_log(vert));
             }
 
-            let frag = gl_for_renderer.create_shader(glow::FRAGMENT_SHADER).unwrap();
-            gl_for_renderer.shader_source(frag, r#"
+            let frag = gl_for_renderer
+                .create_shader(glow::FRAGMENT_SHADER)
+                .unwrap();
+            gl_for_renderer.shader_source(
+                frag,
+                r#"
             #version 120
             uniform vec4 u_color;
             void main() { gl_FragColor = u_color; }
-            "#);
+            "#,
+            );
             gl_for_renderer.compile_shader(frag);
             if !gl_for_renderer.get_shader_compile_status(frag) {
                 panic!("frag: {}", gl_for_renderer.get_shader_info_log(frag));
@@ -218,21 +247,29 @@ impl AppState {
             prog
         };
 
-        let mvp_loc   = unsafe { gl_for_renderer.get_uniform_location(program, "u_mvp").unwrap() };
-        let color_loc = unsafe { gl_for_renderer.get_uniform_location(program, "u_color").unwrap() };
+        let mvp_loc = unsafe {
+            gl_for_renderer
+                .get_uniform_location(program, "u_mvp")
+                .unwrap()
+        };
+        let color_loc = unsafe {
+            gl_for_renderer
+                .get_uniform_location(program, "u_color")
+                .unwrap()
+        };
 
         let vbo = unsafe { gl_for_renderer.create_buffer().unwrap() };
-        let ebo = unsafe { gl_for_renderer.create_buffer().unwrap() };
+        //let ebo = unsafe { gl_for_renderer.create_buffer().unwrap() };
         let vao = unsafe { gl_for_renderer.create_vertex_array().unwrap() };
         unsafe {
             gl_for_renderer.bind_vertex_array(Some(vao));
         }
-        
+
         let (view2d_fbo, view2d_tex, view2d_rbo) = unsafe {
             (
                 gl_for_renderer.create_framebuffer().unwrap(),
                 gl_for_renderer.create_texture().unwrap(),
-                gl_for_renderer.create_renderbuffer().unwrap()
+                gl_for_renderer.create_renderbuffer().unwrap(),
             )
         };
         let view2d_fbo_size = [1u32, 1u32]; // resized on first frame
@@ -242,33 +279,55 @@ impl AppState {
 
             gl_for_renderer.bind_texture(glow::TEXTURE_2D, Some(view2d_tex));
             gl_for_renderer.tex_image_2d(
-                glow::TEXTURE_2D, 0, glow::RGBA as i32,
-                1, 1, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                1,
+                1,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
             );
-            gl_for_renderer.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-            gl_for_renderer.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl_for_renderer.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl_for_renderer.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
             gl_for_renderer.framebuffer_texture_2d(
-                glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D, Some(view2d_tex), 0,
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(view2d_tex),
+                0,
             );
 
             gl_for_renderer.bind_renderbuffer(glow::RENDERBUFFER, Some(view2d_rbo));
             gl_for_renderer.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT16, 1, 1);
             gl_for_renderer.framebuffer_renderbuffer(
-                glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT,
-                glow::RENDERBUFFER, Some(view2d_rbo),
+                glow::FRAMEBUFFER,
+                glow::DEPTH_ATTACHMENT,
+                glow::RENDERBUFFER,
+                Some(view2d_rbo),
             );
 
             gl_for_renderer.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
 
-        let mut renderer = GlowRenderer::new(gl_for_renderer, &mut imgui).expect("GlowRenderer::new failed");
+        let mut renderer =
+            GlowRenderer::new(gl_for_renderer, &mut imgui).expect("GlowRenderer::new failed");
 
         let mut editor = ui::EditorState::default();
         editor.log_info(gl_info);
-        let view2d_imgui_tex = renderer
-            .texture_map_mut()
-            .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
+        let view2d_imgui_tex =
+            renderer
+                .texture_map_mut()
+                .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
         editor.view2d_tex_id = Some(view2d_imgui_tex);
 
         Self {
@@ -286,18 +345,23 @@ impl AppState {
             mvp_loc,
             color_loc,
             vbo,
-            ebo,
+            //ebo,
             vao,
             view2d_line_vertices: vec![],
+            view2d_selected_vertices: vec![],
             view2d_grid_vertices: vec![],
             view2d_fbo,
             view2d_tex,
             view2d_rbo,
             view2d_fbo_size,
+            view2d_cache: None,
+            needs_redraw: true,
         }
     }
 
     fn render(&mut self) {
+        self.needs_redraw = false;
+
         let now = Instant::now();
         let delta = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -320,7 +384,7 @@ impl AppState {
 
         self.platform.prepare_render(&mut self.imgui, &self.window);
         let draw_data = self.imgui.render();
-        
+
         //self.renderer.render(draw_data).expect("imgui render failed");
 
         unsafe {
@@ -330,12 +394,13 @@ impl AppState {
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.viewport(0, 0, win_w as i32, win_h as i32);
             self.gl.clear_color(0.1, 0.1, 0.1, 1.0);
-            self.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            self.gl
+                .clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
             //self.gl.enable(glow::DEPTH_TEST);
             self.gl.clear(glow::DEPTH_BUFFER_BIT);
 
             self.gl.use_program(Some(self.program));
-            
+
             // 2d
             let r2 = self.editor.view2d_rect;
             if r2[2] > 10.0 && r2[3] > 10.0 {
@@ -345,24 +410,36 @@ impl AppState {
                 // Resize FBO texture if the panel size changed.
                 if [fbo_w, fbo_h] != self.view2d_fbo_size {
                     self.view2d_fbo_size = [fbo_w, fbo_h];
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(self.view2d_tex));
+                    self.gl
+                        .bind_texture(glow::TEXTURE_2D, Some(self.view2d_tex));
                     self.gl.tex_image_2d(
-                        glow::TEXTURE_2D, 0, glow::RGBA as i32,
-                        fbo_w as i32, fbo_h as i32, 0,
-                        glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA as i32,
+                        fbo_w as i32,
+                        fbo_h as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(None),
                     );
-                    self.gl.bind_renderbuffer(glow::RENDERBUFFER, Some(self.view2d_rbo));
+                    self.gl
+                        .bind_renderbuffer(glow::RENDERBUFFER, Some(self.view2d_rbo));
                     self.gl.renderbuffer_storage(
-                        glow::RENDERBUFFER, glow::DEPTH_COMPONENT16,
-                        fbo_w as i32, fbo_h as i32,
+                        glow::RENDERBUFFER,
+                        glow::DEPTH_COMPONENT16,
+                        fbo_w as i32,
+                        fbo_h as i32,
                     );
                 }
 
                 // Draw into FBO.
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.view2d_fbo));
+                self.gl
+                    .bind_framebuffer(glow::FRAMEBUFFER, Some(self.view2d_fbo));
                 self.gl.viewport(0, 0, fbo_w as i32, fbo_h as i32);
                 self.gl.clear_color(0.11, 0.11, 0.11, 1.0);
-                self.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+                self.gl
+                    .clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
 
                 self.gl.use_program(Some(self.program));
 
@@ -386,7 +463,9 @@ impl AppState {
                     1024.0,
                 );
                 self.gl.uniform_matrix_4_f32_slice(
-                    Some(&self.mvp_loc), false, &ortho.to_cols_array(),
+                    Some(&self.mvp_loc),
+                    false,
+                    &ortho.to_cols_array(),
                 );
 
                 let axis = self.editor.ortho_axis;
@@ -409,7 +488,8 @@ impl AppState {
                         bytemuck::cast_slice(verts),
                         glow::STREAM_DRAW,
                     );
-                    self.gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
+                    self.gl
+                        .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
                     self.gl.enable_vertex_attrib_array(0);
                     self.gl.draw_arrays(glow::LINES, 0, verts.len() as i32);
                 };
@@ -423,7 +503,8 @@ impl AppState {
                     for i in i0..=i1 {
                         let x = i as f32 * major_world;
                         self.view2d_grid_vertices.push(Vec3::new(x, view_top, 0.0));
-                        self.view2d_grid_vertices.push(Vec3::new(x, view_bottom, 0.0));
+                        self.view2d_grid_vertices
+                            .push(Vec3::new(x, view_bottom, 0.0));
                     }
 
                     let j0 = (view_top / major_world).floor() as i32 - 1;
@@ -431,7 +512,8 @@ impl AppState {
                     for j in j0..=j1 {
                         let y = j as f32 * major_world;
                         self.view2d_grid_vertices.push(Vec3::new(view_left, y, 0.0));
-                        self.view2d_grid_vertices.push(Vec3::new(view_right, y, 0.0));
+                        self.view2d_grid_vertices
+                            .push(Vec3::new(view_right, y, 0.0));
                     }
 
                     draw_lines(&self.view2d_grid_vertices, [0.17, 0.17, 0.17, 1.0]);
@@ -457,7 +539,8 @@ impl AppState {
                         }
                         let x = i as f32 * minor_world;
                         self.view2d_grid_vertices.push(Vec3::new(x, view_top, 0.0));
-                        self.view2d_grid_vertices.push(Vec3::new(x, view_bottom, 0.0));
+                        self.view2d_grid_vertices
+                            .push(Vec3::new(x, view_bottom, 0.0));
                     }
 
                     let j0 = (view_top / minor_world).floor() as i32 - 1;
@@ -470,7 +553,8 @@ impl AppState {
                         }
                         let y = j as f32 * minor_world;
                         self.view2d_grid_vertices.push(Vec3::new(view_left, y, 0.0));
-                        self.view2d_grid_vertices.push(Vec3::new(view_right, y, 0.0));
+                        self.view2d_grid_vertices
+                            .push(Vec3::new(view_right, y, 0.0));
                     }
 
                     draw_lines(&self.view2d_grid_vertices, [0.13, 0.13, 0.13, 1.0]);
@@ -478,69 +562,243 @@ impl AppState {
 
                 // World origin axes under map lines.
                 self.view2d_grid_vertices.clear();
-                self.view2d_grid_vertices.push(Vec3::new(0.0, view_top, 0.0));
-                self.view2d_grid_vertices.push(Vec3::new(0.0, view_bottom, 0.0));
+                self.view2d_grid_vertices
+                    .push(Vec3::new(0.0, view_top, 0.0));
+                self.view2d_grid_vertices
+                    .push(Vec3::new(0.0, view_bottom, 0.0));
                 draw_lines(&self.view2d_grid_vertices, [0.0, 0.66, 0.0, 1.0]);
 
                 self.view2d_grid_vertices.clear();
-                self.view2d_grid_vertices.push(Vec3::new(view_left, 0.0, 0.0));
-                self.view2d_grid_vertices.push(Vec3::new(view_right, 0.0, 0.0));
+                self.view2d_grid_vertices
+                    .push(Vec3::new(view_left, 0.0, 0.0));
+                self.view2d_grid_vertices
+                    .push(Vec3::new(view_right, 0.0, 0.0));
                 draw_lines(&self.view2d_grid_vertices, [0.0, 0.0, 0.66, 1.0]);
 
                 // brush geometry
-                self.view2d_line_vertices.clear();
-                if let Some(map) = &mut self.editor.map {
-                    let view_dir = match axis {
-                        ui::Ortho::XY => glam::Vec3::new(0.0, 0.0, -1.0),
-                        ui::Ortho::XZ => glam::Vec3::new(0.0, -1.0, 0.0),
-                        ui::Ortho::YZ => glam::Vec3::new(-1.0, 0.0, 0.0),
-                    };
-                    let view_min_x = view_left.min(view_right);
-                    let view_max_x = view_left.max(view_right);
-                    let view_min_y = view_top.min(view_bottom);
-                    let view_max_y = view_top.max(view_bottom);
+                let map_ptr = self
+                    .editor
+                    .map
+                    .as_ref()
+                    .map(|m| (m as *const kradiant::map::Map) as usize)
+                    .unwrap_or(0);
+                let map_generation = self.editor.map.as_ref().map(|m| m.generation).unwrap_or(0);
+                let map_present = self.editor.map.is_some();
 
-                    for entity in &mut map.entities {
-                        for brush in &mut entity.brushes {
-                            if let BrushContent::Convex(_) = &brush.content {
-                                if let Some(polys) = brush.get_polygons() {
-                                    for (verts, _) in polys {
-                                        if verts.len() < 3 {
-                                            continue;
-                                        }
+                if !map_present {
+                    self.view2d_line_vertices.clear();
+                    self.view2d_cache = None;
+                }
 
-                                        // ChatGPT
-                                        // Backface cull faces relative to current ortho direction.
-                                        let n = (verts[1] - verts[0]).cross(verts[2] - verts[0]);
-                                        let n_len = n.length();
-                                        if n_len.is_finite() && n_len > 1e-6 {
-                                            let dot = (n / n_len).dot(view_dir);
-                                            if dot > 1e-4 {
+                let mut rebuild_view2d = false;
+                match self.view2d_cache {
+                    None => rebuild_view2d = map_present,
+                    Some(cache) => {
+                        if !map_present {
+                            rebuild_view2d = true;
+                        } else if cache.axis != axis
+                            || cache.map_present != map_present
+                            || cache.map_ptr != map_ptr
+                            || cache.map_generation != map_generation
+                            || (cache.zoom - zoom).abs() > 1.0e-6
+                        {
+                            rebuild_view2d = true;
+                        } else {
+                            // Reuse cached cull set while the current view stays within it.
+                            if view_left < cache.cull_left
+                                || view_right > cache.cull_right
+                                || view_top < cache.cull_top
+                                || view_bottom > cache.cull_bottom
+                            {
+                                rebuild_view2d = true;
+                            }
+                        }
+                    }
+                }
+
+                if rebuild_view2d {
+                    self.view2d_line_vertices.clear();
+
+                    let margin_x = (view_right - view_left).abs() * 0.50;
+                    let margin_y = (view_bottom - view_top).abs() * 0.50;
+                    let cull_left = view_left - margin_x;
+                    let cull_right = view_right + margin_x;
+                    let cull_top = view_top - margin_y;
+                    let cull_bottom = view_bottom + margin_y;
+
+                    self.view2d_cache = Some(View2dCache {
+                        axis,
+                        map_present,
+                        map_ptr,
+                        map_generation,
+                        zoom,
+                        cull_left,
+                        cull_right,
+                        cull_top,
+                        cull_bottom,
+                    });
+                }
+
+                if rebuild_view2d {
+                    if let Some(cache) = self.view2d_cache {
+                        let view_dir = match axis {
+                            ui::Ortho::XY => glam::Vec3::new(0.0, 0.0, -1.0),
+                            ui::Ortho::XZ => glam::Vec3::new(0.0, -1.0, 0.0),
+                            ui::Ortho::YZ => glam::Vec3::new(-1.0, 0.0, 0.0),
+                        };
+                        let view_min_x = cache.cull_left.min(cache.cull_right);
+                        let view_max_x = cache.cull_left.max(cache.cull_right);
+                        let view_min_y = cache.cull_top.min(cache.cull_bottom);
+                        let view_max_y = cache.cull_top.max(cache.cull_bottom);
+
+                        if let Some(map) = &mut self.editor.map {
+                            for entity in &mut map.entities {
+                                for brush in &mut entity.brushes {
+                                    match &mut brush.content {
+                                        BrushContent::Convex(_) => {
+                                            let Some((aabb, polys)) = brush.get_polygons_and_aabb()
+                                            else {
                                                 continue;
-                                            }
-                                        }
+                                            };
 
-                                        for i in 0..verts.len() {
-                                            let a = verts[i];
-                                            let b = verts[(i + 1) % verts.len()];
-
-                                            // Frustum cull in projected 2D space.
-                                            let pa = util::project_to_2d(a, axis);
-                                            let pb = util::project_to_2d(b, axis);
-                                            let seg_min_x = pa[0].min(pb[0]);
-                                            let seg_max_x = pa[0].max(pb[0]);
-                                            let seg_min_y = pa[1].min(pb[1]);
-                                            let seg_max_y = pa[1].max(pb[1]);
-                                            if seg_max_x < view_min_x
-                                                || seg_min_x > view_max_x
-                                                || seg_max_y < view_min_y
-                                                || seg_min_y > view_max_y
+                                            // Coarse frustum cull by brush AABB before iterating faces/edges.
+                                            let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
+                                                ui::Ortho::XY => (
+                                                    aabb.min.x as f32,
+                                                    aabb.max.x as f32,
+                                                    aabb.min.y as f32,
+                                                    aabb.max.y as f32,
+                                                ),
+                                                ui::Ortho::XZ => (
+                                                    aabb.min.x as f32,
+                                                    aabb.max.x as f32,
+                                                    -(aabb.max.z as f32),
+                                                    -(aabb.min.z as f32),
+                                                ),
+                                                ui::Ortho::YZ => (
+                                                    aabb.min.y as f32,
+                                                    aabb.max.y as f32,
+                                                    -(aabb.max.z as f32),
+                                                    -(aabb.min.z as f32),
+                                                ),
+                                            };
+                                            if a_max_x < view_min_x
+                                                || a_min_x > view_max_x
+                                                || a_max_y < view_min_y
+                                                || a_min_y > view_max_y
                                             {
                                                 continue;
                                             }
 
-                                            self.view2d_line_vertices.push(Vec3::new(pa[0], pa[1], 0.0));
-                                            self.view2d_line_vertices.push(Vec3::new(pb[0], pb[1], 0.0));
+                                            for (verts, _) in polys {
+                                                if verts.len() < 3 {
+                                                    continue;
+                                                }
+
+                                                // Backface cull faces relative to current ortho direction.
+                                                let n = (verts[1] - verts[0])
+                                                    .cross(verts[2] - verts[0]);
+                                                let n_len = n.length();
+                                                if n_len.is_finite() && n_len > 1e-6 {
+                                                    let dot = (n / n_len).dot(view_dir);
+                                                    if dot > 1e-4 {
+                                                        continue;
+                                                    }
+                                                }
+
+                                                for i in 0..verts.len() {
+                                                    let a = verts[i];
+                                                    let b = verts[(i + 1) % verts.len()];
+
+                                                    // Frustum cull in projected 2D space.
+                                                    let pa = util::project_to_2d(a, axis);
+                                                    let pb = util::project_to_2d(b, axis);
+                                                    let seg_min_x = pa[0].min(pb[0]);
+                                                    let seg_max_x = pa[0].max(pb[0]);
+                                                    let seg_min_y = pa[1].min(pb[1]);
+                                                    let seg_max_y = pa[1].max(pb[1]);
+                                                    if seg_max_x < view_min_x
+                                                        || seg_min_x > view_max_x
+                                                        || seg_max_y < view_min_y
+                                                        || seg_min_y > view_max_y
+                                                    {
+                                                        continue;
+                                                    }
+
+                                                    self.view2d_line_vertices
+                                                        .push(Vec3::new(pa[0], pa[1], 0.0));
+                                                    self.view2d_line_vertices
+                                                        .push(Vec3::new(pb[0], pb[1], 0.0));
+                                                }
+                                            }
+                                        }
+                                        BrushContent::Patch(patch) => {
+                                            let Some((mesh, patch_aabb, edges)) =
+                                                patch.get_mesh_aabb_wire()
+                                            else {
+                                                continue;
+                                            };
+                                            brush.aabb = patch_aabb.clone();
+                                            let positions = mesh.positions.as_slice();
+
+                                            let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
+                                                ui::Ortho::XY => (
+                                                    patch_aabb.min.x as f32,
+                                                    patch_aabb.max.x as f32,
+                                                    patch_aabb.min.y as f32,
+                                                    patch_aabb.max.y as f32,
+                                                ),
+                                                ui::Ortho::XZ => (
+                                                    patch_aabb.min.x as f32,
+                                                    patch_aabb.max.x as f32,
+                                                    -(patch_aabb.max.z as f32),
+                                                    -(patch_aabb.min.z as f32),
+                                                ),
+                                                ui::Ortho::YZ => (
+                                                    patch_aabb.min.y as f32,
+                                                    patch_aabb.max.y as f32,
+                                                    -(patch_aabb.max.z as f32),
+                                                    -(patch_aabb.min.z as f32),
+                                                ),
+                                            };
+                                            if a_max_x < view_min_x
+                                                || a_min_x > view_max_x
+                                                || a_max_y < view_min_y
+                                                || a_min_y > view_max_y
+                                            {
+                                                continue;
+                                            }
+
+                                            if positions.len() < 2 || edges.is_empty() {
+                                                continue;
+                                            }
+
+                                            for &(a, b) in edges {
+                                                let ia = a as usize;
+                                                let ib = b as usize;
+                                                if ia >= positions.len() || ib >= positions.len() {
+                                                    continue;
+                                                }
+                                                let pa = util::project_to_2d(positions[ia], axis);
+                                                let pb = util::project_to_2d(positions[ib], axis);
+
+                                                let seg_min_x = pa[0].min(pb[0]);
+                                                let seg_max_x = pa[0].max(pb[0]);
+                                                let seg_min_y = pa[1].min(pb[1]);
+                                                let seg_max_y = pa[1].max(pb[1]);
+                                                if seg_max_x < view_min_x
+                                                    || seg_min_x > view_max_x
+                                                    || seg_max_y < view_min_y
+                                                    || seg_min_y > view_max_y
+                                                {
+                                                    continue;
+                                                }
+
+                                                self.view2d_line_vertices
+                                                    .push(Vec3::new(pa[0], pa[1], 0.0));
+                                                self.view2d_line_vertices
+                                                    .push(Vec3::new(pb[0], pb[1], 0.0));
+                                            }
                                         }
                                     }
                                 }
@@ -552,6 +810,127 @@ impl AppState {
                     draw_lines(&self.view2d_line_vertices, [0.8, 0.8, 0.8, 1.0]);
                 }
 
+                self.view2d_selected_vertices.clear();
+                if !self.editor.selected_brushes.is_empty() {
+                    let view_min_x = view_left.min(view_right);
+                    let view_max_x = view_left.max(view_right);
+                    let view_min_y = view_top.min(view_bottom);
+                    let view_max_y = view_top.max(view_bottom);
+
+                    for (entity_index, brush_index) in &self.editor.selected_brushes {
+                        if let Some(map) = &mut self.editor.map {
+                            if let Some(entity) = map.entities.get_mut(*entity_index) {
+                                if let Some(brush) = entity.brushes.get_mut(*brush_index) {
+                                    match &mut brush.content {
+                                        BrushContent::Convex(_) => {
+                                            if let Some((_aabb, polys)) =
+                                                brush.get_polygons_and_aabb()
+                                            {
+                                                for (positions, _) in polys {
+                                                    if positions.len() < 2 {
+                                                        continue;
+                                                    }
+                                                    for i in 0..positions.len() {
+                                                        let a = positions[i];
+                                                        let b =
+                                                            positions[(i + 1) % positions.len()];
+                                                        let pa = util::project_to_2d(a, axis);
+                                                        let pb = util::project_to_2d(b, axis);
+
+                                                        let seg_min_x = pa[0].min(pb[0]);
+                                                        let seg_max_x = pa[0].max(pb[0]);
+                                                        let seg_min_y = pa[1].min(pb[1]);
+                                                        let seg_max_y = pa[1].max(pb[1]);
+                                                        if seg_max_x < view_min_x
+                                                            || seg_min_x > view_max_x
+                                                            || seg_max_y < view_min_y
+                                                            || seg_min_y > view_max_y
+                                                        {
+                                                            continue;
+                                                        }
+
+                                                        self.view2d_selected_vertices
+                                                            .push(Vec3::new(pa[0], pa[1], 0.0));
+                                                        self.view2d_selected_vertices
+                                                            .push(Vec3::new(pb[0], pb[1], 0.0));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        BrushContent::Patch(patch) => {
+                                            let Some((mesh, patch_aabb, edges)) =
+                                                patch.get_mesh_aabb_wire()
+                                            else {
+                                                continue;
+                                            };
+                                            brush.aabb = patch_aabb.clone();
+
+                                            let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
+                                                ui::Ortho::XY => (
+                                                    patch_aabb.min.x as f32,
+                                                    patch_aabb.max.x as f32,
+                                                    patch_aabb.min.y as f32,
+                                                    patch_aabb.max.y as f32,
+                                                ),
+                                                ui::Ortho::XZ => (
+                                                    patch_aabb.min.x as f32,
+                                                    patch_aabb.max.x as f32,
+                                                    -(patch_aabb.max.z as f32),
+                                                    -(patch_aabb.min.z as f32),
+                                                ),
+                                                ui::Ortho::YZ => (
+                                                    patch_aabb.min.y as f32,
+                                                    patch_aabb.max.y as f32,
+                                                    -(patch_aabb.max.z as f32),
+                                                    -(patch_aabb.min.z as f32),
+                                                ),
+                                            };
+                                            if a_max_x < view_min_x
+                                                || a_min_x > view_max_x
+                                                || a_max_y < view_min_y
+                                                || a_min_y > view_max_y
+                                            {
+                                                continue;
+                                            }
+
+                                            let positions = mesh.positions.as_slice();
+                                            for &(a, b) in edges {
+                                                let ia = a as usize;
+                                                let ib = b as usize;
+                                                if ia >= positions.len() || ib >= positions.len() {
+                                                    continue;
+                                                }
+                                                let pa = util::project_to_2d(positions[ia], axis);
+                                                let pb = util::project_to_2d(positions[ib], axis);
+
+                                                let seg_min_x = pa[0].min(pb[0]);
+                                                let seg_max_x = pa[0].max(pb[0]);
+                                                let seg_min_y = pa[1].min(pb[1]);
+                                                let seg_max_y = pa[1].max(pb[1]);
+                                                if seg_max_x < view_min_x
+                                                    || seg_min_x > view_max_x
+                                                    || seg_max_y < view_min_y
+                                                    || seg_min_y > view_max_y
+                                                {
+                                                    continue;
+                                                }
+
+                                                self.view2d_selected_vertices
+                                                    .push(Vec3::new(pa[0], pa[1], 0.0));
+                                                self.view2d_selected_vertices
+                                                    .push(Vec3::new(pb[0], pb[1], 0.0));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !self.view2d_selected_vertices.is_empty() {
+                    draw_lines(&self.view2d_selected_vertices, self.editor.selection_rgba);
+                }
+
                 self.gl.use_program(None);
                 self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
@@ -559,8 +938,12 @@ impl AppState {
             self.gl.use_program(None);
         }
 
-        self.renderer.render(draw_data).expect("imgui render failed");
-        self.gl_surface.swap_buffers(&self.gl_context).expect("swap failed");
+        self.renderer
+            .render(draw_data)
+            .expect("imgui render failed");
+        self.gl_surface
+            .swap_buffers(&self.gl_context)
+            .expect("swap failed");
     }
 }
 
@@ -579,11 +962,9 @@ impl ApplicationHandler for App {
     ) {
         let Some(state) = &mut self.state else { return };
 
-        state.platform.handle_window_event(
-            &mut state.imgui,
-            &state.window,
-            &event,
-        );
+        state
+            .platform
+            .handle_window_event(&mut state.imgui, &state.window, &event);
 
         match event {
             WindowEvent::CloseRequested => {
@@ -597,10 +978,24 @@ impl ApplicationHandler for App {
                     NonZeroU32::new(size.width).unwrap(),
                     NonZeroU32::new(size.height).unwrap(),
                 );
+                state.needs_redraw = true;
             }
             WindowEvent::RedrawRequested => {
                 state.render();
-                state.window.request_redraw();
+            }
+            // Any input/UI event should schedule a redraw; we avoid continuous rendering when idle.
+            WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::KeyboardInput { .. }
+            | WindowEvent::ModifiersChanged(_)
+            | WindowEvent::Focused(_)
+            | WindowEvent::ScaleFactorChanged { .. }
+            | WindowEvent::ThemeChanged(_)
+            | WindowEvent::Touch(_)
+            | WindowEvent::TouchpadPressure { .. }
+            | WindowEvent::AxisMotion { .. } => {
+                state.needs_redraw = true;
             }
             _ => {}
         }
@@ -608,7 +1003,9 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = &mut self.state {
-            state.window.request_redraw();
+            if state.needs_redraw {
+                state.window.request_redraw();
+            }
         }
     }
 }

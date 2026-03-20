@@ -1,16 +1,7 @@
 {
-"k2" "v2"
 "classname" "worldspawn"
+"k2" "v2"
 // brush 0
-{
-( 234 116 74 ) ( 194 116 74 ) ( 194 -12 74 ) common/caulk 0 0 0 0.25 0.25 0 0 0 0
-( 196 -72 172 ) ( 196 56 172 ) ( 236 56 172 ) common/case 0 0 0 0.25 0.25 0 0 0 0
-( 196 -64 150 ) ( 236 -64 150 ) ( 236 -64 108 ) common/caulk 0 0 0 0.25 0.25 0 0 0 0
-( 320 -54 138 ) ( 320 74 138 ) ( 320 74 96 ) common/caulk 0 0 0 0.25 0.25 0 0 0 0
-( 278 64 112 ) ( 238 64 112 ) ( 238 64 70 ) common/caulk 0 0 0 0.25 0.25 0 0 0 0
-( 192 52 156 ) ( 192 -76 156 ) ( 192 -76 114 ) common/caulk 0 0 0 0.25 0.25 0 0 0 0
-}
-// brush 1
 {
 ( 64 64 -2 ) ( -64 64 -2 ) ( -64 -60 -2 ) common/caulk 0 0 0 0.25 0.25 0 0 0 0
 ( -64 -60 0 ) ( -64 64 0 ) ( 64 64 0 ) global_use/concrete@sidewalk_base 0 256 0 0.25 0.25 0 0 0 0
@@ -22,19 +13,19 @@
 }
 // entity 1
 {
-"origin" "-124 -16 16"
 "classname" "mp_deathmatch_intermission"
+"origin" "-124 -16 16"
 }
 // entity 2
 {
-"origin" "-48 -38 0"
 "classname" "mp_deathmatch_spawn"
+"origin" "-48 -38 0"
 }
 // entity 3
 {
-"a" "c"
-"targetname" "finish_button"
 "classname" "trigger_use"
+"targetname" "finish_button"
+"a" "c"
 // brush 0
 {
 ( 576 16 64 ) ( 558 16 64 ) ( 558 -6 64 ) common/trigger 0 0 0 0.25 0.25 0 0 0 0
@@ -47,8 +38,8 @@
 }
 // entity 4
 {
-"targetname" "start_button"
 "classname" "trigger_use"
+"targetname" "start_button"
 // brush 0
 {
 ( -32 16 64 ) ( -50 16 64 ) ( -50 -6 64 ) common/trigger 0 0 0 0.25 0.25 0 0 0 0

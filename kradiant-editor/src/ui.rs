@@ -5,71 +5,93 @@ use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 
 use crate::config::EditorConfig;
 use crate::util;
+use glam::{IVec2, IVec3, Vec3};
+use kradiant::editing::{self, Aabb};
+use kradiant::map::BrushId;
 use util::{pack_abgr, screen_to_world, snap, text_width};
-use glam::IVec2;
-use kradiant::{geometry, map::{BrushContent, Entity, Map}};
 
 // State types
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Ortho { #[default] XY, XZ, YZ }
+pub enum Ortho {
+    #[default]
+    XY,
+    XZ,
+    YZ,
+}
 
 impl Ortho {
     fn label(self) -> &'static str {
-        match self { Ortho::XY => "XY (top)", Ortho::XZ => "XZ (front)", Ortho::YZ => "YZ (side)" }
+        match self {
+            Ortho::XY => "XY (top)",
+            Ortho::XZ => "XZ (front)",
+            Ortho::YZ => "YZ (side)",
+        }
     }
 
-    fn next(self) -> Self
-    {
+    fn next(self) -> Self {
         match self {
             Self::XY => Self::XZ,
             Self::XZ => Self::YZ,
-            Self::YZ => Self::XY
+            Self::YZ => Self::XY,
         }
     }
 }
 
 pub struct LogEntry {
     pub level: LogLevel,
-    pub text:  String,
+    pub text: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum LogLevel { Info, Warn, Error }
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+}
 
 impl LogLevel {
     fn color(self) -> [f32; 4] {
         match self {
-            LogLevel::Info  => [0.85, 0.85, 0.85, 1.0],
-            LogLevel::Warn  => [1.0,  0.85, 0.2,  1.0],
-            LogLevel::Error => [1.0,  0.35, 0.35, 1.0],
+            LogLevel::Info => [0.85, 0.85, 0.85, 1.0],
+            LogLevel::Warn => [1.0, 0.85, 0.2, 1.0],
+            LogLevel::Error => [1.0, 0.35, 0.35, 1.0],
         }
     }
     fn prefix(self) -> &'static str {
-        match self { LogLevel::Info => "   ", LogLevel::Warn => "[W]", LogLevel::Error => "[E]" }
+        match self {
+            LogLevel::Info => "   ",
+            LogLevel::Warn => "[W]",
+            LogLevel::Error => "[E]",
+        }
     }
 }
 
 pub struct EditorState {
     pub config: EditorConfig,
-    pub show_demo:      bool,
-    pub map_path:       String,
-    pub ortho_axis:     Ortho,
+    pub show_demo: bool,
+    pub map_path: String,
+    pub ortho_axis: Ortho,
+    pub work_pos: IVec3,
+    pub work_depth: IVec3,
     pub view2d_rect: [f32; 4],
-    pub view2d_zoom:    f32,
-    pub view2d_pan:     [f32; 2],
+    pub view2d_zoom: f32,
+    pub view2d_pan: [f32; 2],
     pub view2d_drag_start: Option<IVec2>,
     pub view2d_drag_current: Option<IVec2>,
     pub view2d_tex_id: Option<TextureId>,
-    pub tex_filter:     String,
-    pub tex_selected:   Option<String>,
-    pub tex_tile_size:  f32,
-    pub log:            Vec<LogEntry>,
+    pub selection_rgba: [f32; 4],
+    pub tex_filter: String,
+    pub tex_selected: Option<String>,
+    pub tex_tile_size: f32,
+    pub log: Vec<LogEntry>,
     //pub console_input:  String,
     pub console_scroll: bool,
     pub con_filter: String,
     pub map: Option<kradiant::map::Map>,
     pub selected_entity: Option<usize>,
+    pub selected_brushes: Vec<(usize, usize)>,
+    pub last_aabb: Option<Aabb>,
     pub new_prop_key: String,
     pub new_prop_val: String,
 }
@@ -98,30 +120,33 @@ macro_rules! editor_log_e {
     };
 }
 
-
 impl Default for EditorState {
-    fn default() -> Self
-    {
+    fn default() -> Self {
         let mut s = Self {
             config: EditorConfig::default(),
-            show_demo:      false,
-            map_path:       String::new(),
-            ortho_axis:     Ortho::default(),
+            show_demo: false,
+            map_path: String::new(),
+            ortho_axis: Ortho::default(),
+            work_pos: IVec3::new(0, 0, 0),
+            work_depth: IVec3::ZERO,
             view2d_rect: [0.0; 4],
-            view2d_zoom:    1.0,
-            view2d_pan:     [0.0, 0.0],
+            view2d_zoom: 1.0,
+            view2d_pan: [0.0, 0.0],
             view2d_drag_start: None,
             view2d_drag_current: None,
             view2d_tex_id: None,
-            tex_filter:     String::new(),
-            tex_selected:   None,
-            tex_tile_size:  64.0,
-            log:            Vec::new(),
+            selection_rgba: [0.3, 0.6, 1.0, 1.0],
+            tex_filter: String::new(),
+            tex_selected: None,
+            tex_tile_size: 64.0,
+            log: Vec::new(),
             //console_input:  String::new(),
             console_scroll: false,
             con_filter: String::new(),
             map: None,
             selected_entity: None,
+            selected_brushes: Vec::new(),
+            last_aabb: None,
             new_prop_key: String::new(),
             new_prop_val: String::new(),
         };
@@ -129,7 +154,12 @@ impl Default for EditorState {
 
         match EditorConfig::load() {
             Ok(c) => s.config = c,
-            Err(e) => editor_log_e!(&mut s, error, "Failed to load configuration: {}", e.to_string()),
+            Err(e) => editor_log_e!(
+                &mut s,
+                error,
+                "Failed to load configuration: {}",
+                e.to_string()
+            ),
         }
 
         s.log_warn("this is a warning");
@@ -141,22 +171,30 @@ impl EditorState {
     pub fn log_info(&mut self, msg: impl Into<String>) {
         let string: String = msg.into();
         println!("{}", &string);
-        self.log.push(LogEntry { level: LogLevel::Info,  text: string });
+        self.log.push(LogEntry {
+            level: LogLevel::Info,
+            text: string,
+        });
         self.console_scroll = true;
     }
     pub fn log_warn(&mut self, msg: impl Into<String>) {
         let string: String = msg.into();
         println!("{}", &string);
-        self.log.push(LogEntry { level: LogLevel::Warn,  text: string });
+        self.log.push(LogEntry {
+            level: LogLevel::Warn,
+            text: string,
+        });
         self.console_scroll = true;
     }
     pub fn log_error(&mut self, msg: impl Into<String>) {
         let string: String = msg.into();
         eprintln!("{}", &string);
-        self.log.push(LogEntry { level: LogLevel::Error, text: string });
+        self.log.push(LogEntry {
+            level: LogLevel::Error,
+            text: string,
+        });
         self.console_scroll = true;
     }
-
 }
 
 // Top-level draw call
@@ -180,18 +218,15 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState) {
 
 fn draw_dockspace(ui: &Ui) {
     unsafe {
-        let vp   = dear_imgui_rs::sys::igGetMainViewport();
-        let pos  = (*vp).WorkPos;
+        let vp = dear_imgui_rs::sys::igGetMainViewport();
+        let pos = (*vp).WorkPos;
         let size = (*vp).WorkSize;
         dear_imgui_rs::sys::igSetNextWindowPos(
             pos,
             dear_imgui_rs::sys::ImGuiCond_Always as i32,
             dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 },
         );
-        dear_imgui_rs::sys::igSetNextWindowSize(
-            size,
-            dear_imgui_rs::sys::ImGuiCond_Always as i32,
-        );
+        dear_imgui_rs::sys::igSetNextWindowSize(size, dear_imgui_rs::sys::ImGuiCond_Always as i32);
         dear_imgui_rs::sys::igSetNextWindowBgAlpha(0.0);
     }
 
@@ -200,27 +235,23 @@ fn draw_dockspace(ui: &Ui) {
         | WindowFlags::NO_NAV_FOCUS
         | WindowFlags::from_bits_truncate(1 << 13); // NoBringToDisplayFront
 
-    ui.window("##dockspace_root")
-        .flags(flags)
-        .build(|| {
-            let id = unsafe {
-                dear_imgui_rs::sys::igGetID_Str(b"MainDockspace\0".as_ptr() as _)
-            };
+    ui.window("##dockspace_root").flags(flags).build(|| {
+        let id = unsafe { dear_imgui_rs::sys::igGetID_Str(b"MainDockspace\0".as_ptr() as _) };
 
-            // Build the default layout exactly once — before the DockSpace call so the
-            // nodes exist when windows are first shown.
-            build_default_layout(id);
+        // Build the default layout exactly once — before the DockSpace call so the
+        // nodes exist when windows are first shown.
+        build_default_layout(id);
 
-            unsafe {
-                // ImGuiDockNodeFlags_PassthruCentralNode = 1 << 3 = 8
-                dear_imgui_rs::sys::igDockSpace(
-                    id,
-                    dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 },
-                    8,
-                    std::ptr::null(),
-                );
-            }
-        });
+        unsafe {
+            // ImGuiDockNodeFlags_PassthruCentralNode = 1 << 3 = 8
+            dear_imgui_rs::sys::igDockSpace(
+                id,
+                dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 },
+                8,
+                std::ptr::null(),
+            );
+        }
+    });
 }
 
 fn build_default_layout(dockspace_id: dear_imgui_rs::sys::ImGuiID) {
@@ -235,7 +266,7 @@ fn build_default_layout(dockspace_id: dear_imgui_rs::sys::ImGuiID) {
             return;
         }
 
-        let vp   = igGetMainViewport();
+        let vp = igGetMainViewport();
         let size = (*vp).WorkSize;
 
         // Start fresh.
@@ -246,7 +277,7 @@ fn build_default_layout(dockspace_id: dear_imgui_rs::sys::ImGuiID) {
 
         // Split root LEFT / RIGHT  (left ~58 % of width)
         let mut dock_right = 0u32;
-        let mut dock_left  = 0u32;
+        let mut dock_left = 0u32;
         igDockBuilderSplitNode(
             dockspace_id,
             ImGuiDir_Left,
@@ -256,18 +287,18 @@ fn build_default_layout(dockspace_id: dear_imgui_rs::sys::ImGuiID) {
         );
 
         // Split LEFT into TOP (2D View) and BOTTOM (Console)
-        let mut dock_2d      = 0u32;
+        let mut dock_2d = 0u32;
         let mut dock_console = 0u32;
         igDockBuilderSplitNode(
             dock_left,
             ImGuiDir_Down,
-            0.19,             // console gets bottom ~19 %
+            0.19, // console gets bottom ~19 %
             &mut dock_console,
             &mut dock_2d,
         );
 
         // Split RIGHT into TOP (3D View) and BOTTOM (tabs)
-        let mut dock_3d   = 0u32;
+        let mut dock_3d = 0u32;
         let mut dock_tabs = 0u32;
         igDockBuilderSplitNode(
             dock_right,
@@ -278,13 +309,13 @@ fn build_default_layout(dockspace_id: dear_imgui_rs::sys::ImGuiID) {
         );
 
         // Dock windows
-        igDockBuilderDockWindow(b"2D View\0".as_ptr()     as _, dock_2d);
-        igDockBuilderDockWindow(b"Console\0".as_ptr()     as _, dock_console);
-        igDockBuilderDockWindow(b"3D View\0".as_ptr()     as _, dock_3d);
+        igDockBuilderDockWindow(b"2D View\0".as_ptr() as _, dock_2d);
+        igDockBuilderDockWindow(b"Console\0".as_ptr() as _, dock_console);
+        igDockBuilderDockWindow(b"3D View\0".as_ptr() as _, dock_3d);
         // Three windows share the bottom-right node as tabs.
-        igDockBuilderDockWindow(b"Textures\0".as_ptr()    as _, dock_tabs);
-        igDockBuilderDockWindow(b"Entities\0".as_ptr()    as _, dock_tabs);
-        igDockBuilderDockWindow(b"Properties\0".as_ptr()  as _, dock_tabs);
+        igDockBuilderDockWindow(b"Textures\0".as_ptr() as _, dock_tabs);
+        igDockBuilderDockWindow(b"Entities\0".as_ptr() as _, dock_tabs);
+        igDockBuilderDockWindow(b"Properties\0".as_ptr() as _, dock_tabs);
 
         igDockBuilderFinish(dockspace_id);
     }
@@ -298,12 +329,15 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
         ui.menu("File", || {
             if ui.menu_item("Open map…") {
                 util::open_map(state);
-                if !state.map_path.is_empty() {
-                }
+                if !state.map_path.is_empty() {}
             }
-            if ui.menu_item("Save map")  { util::save_map(state); }
+            if ui.menu_item("Save map") {
+                util::save_map(state);
+            }
             ui.separator();
-            if ui.menu_item("Quit") { std::process::exit(0); }
+            if ui.menu_item("Quit") {
+                std::process::exit(0);
+            }
         });
 
         ui.menu("View", || {
@@ -322,91 +356,94 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
 
 // Entity list
 
-fn draw_entity_list(ui: &Ui, state: &mut EditorState)
-{
+fn draw_entity_list(ui: &Ui, state: &mut EditorState) {
     ui.window("Entities")
         .size([220.0, 500.0], Condition::FirstUseEver)
-        .build(||
-    {
-        let Some(map) = &state.map else {
-            ui.text_disabled("(no map loaded)");
-            return;
-        };
-        for (i, ent) in map.entities.iter().enumerate() {
-            let label = format!("{} ({})\0", ent.classname, ent.id.0);
-            let selected = state.selected_entity == Some(i);
-            if ui.selectable_config(&label[..label.len()-1])
-                .selected(selected)
-                .build()
+        .build(|| {
+            let Some(map) = &state.map else {
+                ui.text_disabled("(no map loaded)");
+                return;
+            };
+            for (i, ent) in map.entities.iter().enumerate() {
+                let label = format!("{} ({})\0", ent.classname, ent.id.0);
+                let selected = state.selected_entity == Some(i);
+                if ui
+                    .selectable_config(&label[..label.len() - 1])
+                    .selected(selected)
+                    .build()
                 {
                     state.selected_entity = if selected { None } else { Some(i) };
                 }
-        }
-    });
+            }
+        });
 }
 
 // Properties
 
 fn draw_properties(ui: &Ui, state: &mut EditorState) {
     ui.window("Properties")
-    .size([220.0, 280.0], Condition::FirstUseEver)
-    .build(|| {
-        let (Some(map), Some(idx)) = (&mut state.map, state.selected_entity) else {
-            ui.text_disabled("(select an entity)");
-            return;
-        };
-        let ent = &mut map.entities[idx];
+        .size([220.0, 280.0], Condition::FirstUseEver)
+        .build(|| {
+            let (Some(map), Some(idx)) = (&mut state.map, state.selected_entity) else {
+                ui.text_disabled("(select an entity)");
+                return;
+            };
+            let ent = &mut map.entities[idx];
 
-        ui.text(format!("classname: {}", ent.classname));
-        ui.separator();
+            ui.text(format!("classname: {}", ent.classname));
+            ui.separator();
 
-        let mut keys: Vec<String> = ent.properties.keys().cloned().collect();
-        keys.sort();
+            let mut keys: Vec<String> = ent.properties.keys().cloned().collect();
+            keys.sort();
 
-        let mut to_delete: Option<String> = None;
+            let mut to_delete: Option<String> = None;
 
-        for key in &keys {
-            if ui.small_button(format!("-##{key}")) {
-                to_delete = Some(key.clone());
+            for key in &keys {
+                if ui.small_button(format!("-##{key}")) {
+                    to_delete = Some(key.clone());
+                }
+                ui.same_line();
+                ui.text(key);
+                ui.same_line();
+                ui.set_next_item_width(-1.0);
+                let value = ent.properties.get_mut(key).unwrap();
+                ui.input_text(format!("##{key}"), value).build();
             }
-            ui.same_line();
-            ui.text(key);
+
+            if let Some(k) = to_delete {
+                ent.properties.remove(&k);
+            }
+
+            ui.separator();
+
+            // Add new property
+            ui.set_next_item_width(ui.content_region_avail()[0] * 0.45);
+            ui.input_text("##new_key", &mut state.new_prop_key)
+                .hint("key")
+                .build();
             ui.same_line();
             ui.set_next_item_width(-1.0);
-            let value = ent.properties.get_mut(key).unwrap();
-            ui.input_text(format!("##{key}"), value).build();
-        }
+            ui.input_text("##new_val", &mut state.new_prop_val)
+                .hint("value")
+                .build();
 
-        if let Some(k) = to_delete {
-            ent.properties.remove(&k);
-        }
-
-        ui.separator();
-
-        // Add new property
-        ui.set_next_item_width(ui.content_region_avail()[0] * 0.45);
-        ui.input_text("##new_key", &mut state.new_prop_key).hint("key").build();
-        ui.same_line();
-        ui.set_next_item_width(-1.0);
-        ui.input_text("##new_val", &mut state.new_prop_val).hint("value").build();
-
-        let can_add = !state.new_prop_key.trim().is_empty();
-        /*if !can_add {
-            ui.push_style_color(StyleColor::Button,      [0.3, 0.3, 0.3, 1.0]);
-            ui.push_style_color(StyleColor::ButtonHovered,[0.3, 0.3, 0.3, 1.0]);
-        }*/
-        if ui.button("Add property") && can_add {
-            ent.properties
-            .entry(state.new_prop_key.trim().to_string())
-            .or_insert_with(|| state.new_prop_val.clone());
-            state.new_prop_key.clear();
-            state.new_prop_val.clear();
-        }
-        /*if !can_add {
-            ui.pop_style_color();
-            ui.pop_style_color();
-        }*/
-    });
+            let can_add = !state.new_prop_key.trim().is_empty();
+            /*if !can_add {
+                ui.push_style_color(StyleColor::Button,      [0.3, 0.3, 0.3, 1.0]);
+                ui.push_style_color(StyleColor::ButtonHovered,[0.3, 0.3, 0.3, 1.0]);
+            }*/
+            if ui.button("Add property") && can_add {
+                ent.properties
+                    .entry(state.new_prop_key.trim().to_string())
+                    .or_insert_with(|| state.new_prop_val.clone());
+                state.new_prop_key.clear();
+                state.new_prop_val.clear();
+            }
+            /*if !can_add {
+                ui.pop_style_color();
+                ui.pop_style_color();
+            }*/
+        });
 }
 
 // 3D View
@@ -450,145 +487,418 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
         .size([640.0, 480.0], Condition::FirstUseEver)
         .flags(WindowFlags::NO_SCROLLBAR | WindowFlags::NO_SCROLL_WITH_MOUSE)
         .build(|| {
-        if ui.small_button("Switch") {
-            state.ortho_axis = state.ortho_axis.next();
-        }
-
-        let [w, h] = ui.content_region_avail();
-        let (w, h) = (w.max(1.0), h.max(1.0));
-        let p = ui.cursor_screen_pos();
-        let draw = ui.get_window_draw_list();
-
-        state.view2d_rect = [p[0], p[1], w, h];
-
-        ui.set_cursor_screen_pos(p);
-        ui.invisible_button("##2d_canvas", [w, h]);
-        let canvas_interacting = ui.is_item_hovered() || ui.is_item_active();
-
-        if canvas_interacting {
-            let wheel = ui.io().mouse_wheel();
-            if wheel != 0.0 {
-                let mouse = ui.io().mouse_pos();
-                let old_zoom = state.view2d_zoom;
-                let f = if wheel > 0.0 { 1.15f32 } else { 1.0 / 1.15 };
-                let new_zoom = (old_zoom * f).clamp(0.025, 64.0);
-                if (new_zoom - old_zoom).abs() > f32::EPSILON {
-                    let world = screen_to_world(mouse, p, [w, h], old_zoom, state.view2d_pan);
-                    state.view2d_zoom = new_zoom;
-                    state.view2d_pan[0] = (mouse[0] - (p[0] + w * 0.5)) - world[0] * new_zoom;
-                    state.view2d_pan[1] = (mouse[1] - (p[1] + h * 0.5)) - world[1] * new_zoom;
+            if ui.small_button("Switch") {
+                state.ortho_axis = state.ortho_axis.next();
+                if let Some(aabb) = state.last_aabb.clone() {
+                    update_last_work_from_aabb(state, &aabb);
                 }
             }
-            if ui.is_mouse_dragging(dear_imgui_rs::MouseButton::Right) {
-                let [dx, dy] = ui.mouse_drag_delta(dear_imgui_rs::MouseButton::Right);
-                state.view2d_pan[0] += dx;
-                state.view2d_pan[1] += dy;
-                ui.reset_mouse_drag_delta(dear_imgui_rs::MouseButton::Right);
-            }
-        }
 
-        let mouse = ui.io().mouse_pos();
-        let world = screen_to_world(
-            mouse,
-            p,
-            [w, h],
-            state.view2d_zoom,
-            state.view2d_pan,
-        );
-        let world_axis = match state.ortho_axis {
-            Ortho::XY => world,
-            Ortho::XZ | Ortho::YZ => [world[0], -world[1]],
-        };
+            let [w, h] = ui.content_region_avail();
+            let (w, h) = (w.max(1.0), h.max(1.0));
+            let p = ui.cursor_screen_pos();
+            let draw = ui.get_window_draw_list();
+            state.selection_rgba = ui.style_color(StyleColor::ButtonActive);
 
-        let step = state.config.grid_minor_step as f32;
-        let snapped = [snap(world[0], step), snap(world[1], step)];
-        let snapped_i = IVec2::new(snapped[0] as i32, snapped[1] as i32);
+            state.view2d_rect = [p[0], p[1], w, h];
 
-        let mut snapped_marker: Option<([f32; 2], u32)> = None;
-        if canvas_interacting && ui.is_mouse_down(dear_imgui_rs::MouseButton::Left) {
-            let sx = p[0] + w * 0.5 + state.view2d_pan[0] + snapped[0] * state.view2d_zoom;
-            let sy = p[1] + h * 0.5 + state.view2d_pan[1] + snapped[1] * state.view2d_zoom;
-            let col = util::imgui_color_to_u32(ui.style_color(StyleColor::ButtonActive));
-            snapped_marker = Some(([sx, sy], col));
-        }
-        // START drag
-        if canvas_interacting
-            && ui.is_mouse_clicked(dear_imgui_rs::MouseButton::Left)
-            && !ui.is_key_down(dear_imgui_rs::Key::LeftShift) // LShift + LMouse for selecting only
-        {
-            state.view2d_drag_start = Some(snapped_i);
-            state.view2d_drag_current = Some(snapped_i);
-        }
+            ui.set_cursor_screen_pos(p);
+            ui.invisible_button("##2d_canvas", [w, h]);
+            let canvas_interacting = ui.is_item_hovered() || ui.is_item_active();
 
-        // UPDATE drag
-        if canvas_interacting
-            && ui.is_mouse_down(dear_imgui_rs::MouseButton::Left)
-            && !ui.is_key_down(dear_imgui_rs::Key::LeftShift) // LShift + LMouse for selecting only
-        {
-            if state.view2d_drag_start.is_some() {
-                state.view2d_drag_current = Some(snapped_i);
-            }
-        }
-
-        // FINISH drag
-        if canvas_interacting && ui.is_mouse_released(dear_imgui_rs::MouseButton::Left) {
-            if let (Some(start), Some(end)) = (state.view2d_drag_start, state.view2d_drag_current) {
-                //create_brush_from_drag(state, start, end);
-            }
-
-            state.view2d_drag_start = None;
-            state.view2d_drag_current = None;
-        }
-
-        draw.with_clip_rect(p, [p[0] + w, p[1] + h], || {
-            draw.add_rect(p, [p[0] + w, p[1] + h], 0xFF18_1818u32).filled(true).build();
-
-            if let Some(tid) = state.view2d_tex_id {
-                draw.add_image(
-                    tid,
-                    p,
-                    [p[0] + w, p[1] + h],
-                    [0.0, 1.0], // flip Y: OpenGL origin is bottom-left
-                    [1.0, 0.0],
-                    0xFFFFFFFFu32,
-                );
-            }
-
-            draw.add_text([p[0] + 8.0, p[1] + 6.0], 0xFFFFFFFF, state.ortho_axis.label());
             if canvas_interacting {
-                draw.add_text(
-                    [p[0] + 8.0, p[1] + 24.0],
-                    0xFFAAAAAA,
-                    format!("{:.1}, {:.1}", world_axis[0], world_axis[1]),
-                );
+                let wheel = ui.io().mouse_wheel();
+                if wheel != 0.0 {
+                    let mouse = ui.io().mouse_pos();
+                    let old_zoom = state.view2d_zoom;
+                    let f = if wheel > 0.0 { 1.15f32 } else { 1.0 / 1.15 };
+                    let new_zoom = (old_zoom * f).clamp(0.025, 64.0);
+                    if (new_zoom - old_zoom).abs() > f32::EPSILON {
+                        let world = screen_to_world(mouse, p, [w, h], old_zoom, state.view2d_pan);
+                        state.view2d_zoom = new_zoom;
+                        state.view2d_pan[0] = (mouse[0] - (p[0] + w * 0.5)) - world[0] * new_zoom;
+                        state.view2d_pan[1] = (mouse[1] - (p[1] + h * 0.5)) - world[1] * new_zoom;
+                    }
+                }
+                if ui.is_mouse_dragging(dear_imgui_rs::MouseButton::Right) {
+                    let [dx, dy] = ui.mouse_drag_delta(dear_imgui_rs::MouseButton::Right);
+                    state.view2d_pan[0] += dx;
+                    state.view2d_pan[1] += dy;
+                    ui.reset_mouse_drag_delta(dear_imgui_rs::MouseButton::Right);
+                }
             }
 
-            if let Some((pos, col)) = snapped_marker {
-                draw.add_circle(pos, 4.0, col).filled(true).build();
-            }
+            let mouse = ui.io().mouse_pos();
+            let world = screen_to_world(mouse, p, [w, h], state.view2d_zoom, state.view2d_pan);
+            let world_axis = match state.ortho_axis {
+                Ortho::XY => world,
+                Ortho::XZ | Ortho::YZ => [world[0], -world[1]],
+            };
 
-            if let (Some(start), Some(end)) = (state.view2d_drag_start, state.view2d_drag_current) {
-                let min = start.min(end);
-                let max = start.max(end);
+            let step = state.config.grid_minor_step as f32;
+            let snapped = [snap(world[0], step), snap(world[1], step)];
+            let snapped_i = IVec2::new(snapped[0] as i32, snapped[1] as i32);
 
-                let to_screen = |v: IVec2| -> [f32; 2] {
-                    [
-                        p[0] + w * 0.5 + state.view2d_pan[0] + v.x as f32 * state.view2d_zoom,
-                        p[1] + h * 0.5 + state.view2d_pan[1] + v.y as f32 * state.view2d_zoom,
-                    ]
+            if canvas_interacting
+                && (ui.is_mouse_clicked(dear_imgui_rs::MouseButton::Left)
+                    || ui.is_mouse_dragging(dear_imgui_rs::MouseButton::Left))
+                && ui.is_key_down(dear_imgui_rs::Key::LeftShift)
+            {
+                let ray_far = 1.0e6;
+                let (ray_origin, ray_dir) = match state.ortho_axis {
+                    Ortho::XY => (
+                        Vec3::new(world[0], world[1], ray_far),
+                        Vec3::new(0.0, 0.0, -1.0),
+                    ),
+                    Ortho::XZ => (
+                        Vec3::new(world[0], ray_far, -world[1]),
+                        Vec3::new(0.0, -1.0, 0.0),
+                    ),
+                    Ortho::YZ => (
+                        Vec3::new(ray_far, world[0], -world[1]),
+                        Vec3::new(-1.0, 0.0, 0.0),
+                    ),
                 };
 
-                let a = to_screen(min);
-                let b = to_screen(max);
-                let col = ui.style_color(StyleColor::ButtonActive);
-                draw.add_rect(a, b, util::imgui_color_to_u32(col)).thickness(2.0).build();
+                let selected_brush = state.map.as_mut().and_then(|m| {
+                    editing::pick_brush_by_ray(m, ray_origin, ray_dir, editing::PickMask::ALL)
+                });
+                if let Some(sel) = selected_brush {
+                    if !state.selected_brushes.contains(&sel) {
+                        state.selected_brushes.push(sel);
+                    }
+                    state.selected_entity = Some(sel.0);
+                    if let Some(aabb) = selection_aabb(state) {
+                        state.last_aabb = Some(aabb.clone());
+                        update_last_work_from_aabb(state, &aabb);
+                    }
+                }
             }
-        });
 
-        // brush outlines
-    });
+            let mut snapped_marker: Option<([f32; 2], u32)> = None;
+            if canvas_interacting && ui.is_mouse_down(dear_imgui_rs::MouseButton::Left) {
+                let sx = p[0] + w * 0.5 + state.view2d_pan[0] + snapped[0] * state.view2d_zoom;
+                let sy = p[1] + h * 0.5 + state.view2d_pan[1] + snapped[1] * state.view2d_zoom;
+                let col = util::imgui_color_to_u32(ui.style_color(StyleColor::ButtonActive));
+                snapped_marker = Some(([sx, sy], col));
+            }
+            // START drag
+            if canvas_interacting
+                && ui.is_mouse_clicked(dear_imgui_rs::MouseButton::Left)
+                && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
+            {
+                state.view2d_drag_start = Some(snapped_i);
+                state.view2d_drag_current = Some(snapped_i);
+            }
+
+            // UPDATE drag
+            if canvas_interacting
+                && ui.is_mouse_down(dear_imgui_rs::MouseButton::Left)
+                && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
+            // LShift + LMouse for selecting only
+            {
+                if state.view2d_drag_start.is_some() {
+                    state.view2d_drag_current = Some(snapped_i);
+                }
+            }
+
+            // FINISH drag
+            if canvas_interacting && ui.is_mouse_released(dear_imgui_rs::MouseButton::Left) {
+                if let (Some(start), Some(end)) =
+                    (state.view2d_drag_start, state.view2d_drag_current)
+                {
+                    if state.selected_brushes.is_empty() {
+                        if let Some(created) = create_brush_from_drag(state, start, end) {
+                            state.selected_brushes.push((0, created.0 as usize));
+                            if let Some(aabb) = selection_aabb(state) {
+                                state.last_aabb = Some(aabb.clone());
+                                update_last_work_from_aabb(state, &aabb);
+                            }
+                        }
+                    }
+                }
+
+                state.view2d_drag_start = None;
+                state.view2d_drag_current = None;
+            }
+
+            if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
+                if let Some(aabb) = selection_aabb(state) {
+                    state.last_aabb = Some(aabb.clone());
+                    update_last_work_from_aabb(state, &aabb);
+                }
+                state.selected_brushes.clear();
+            }
+
+            if ui.is_key_pressed(dear_imgui_rs::Key::Backspace) {
+                if let Some(aabb) = selection_aabb(state) {
+                    state.last_aabb = Some(aabb.clone());
+                    update_last_work_from_aabb(state, &aabb);
+                }
+
+                if let Some(map) = state.map.as_mut() {
+                    use std::collections::BTreeMap;
+                    let mut by_entity: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                    for &(entity_idx, brush_idx) in &state.selected_brushes {
+                        by_entity.entry(entity_idx).or_default().push(brush_idx);
+                    }
+
+                    for brush_indices in by_entity.values_mut() {
+                        brush_indices.sort_unstable();
+                        brush_indices.dedup();
+                        brush_indices.sort_unstable_by(|a, b| b.cmp(a));
+                    }
+
+                    for (entity_idx, brush_indices) in by_entity {
+                        let Some(entity) = map.entities.get_mut(entity_idx) else {
+                            continue;
+                        };
+                        for brush_idx in brush_indices {
+                            if brush_idx < entity.brushes.len() {
+                                entity.brushes.swap_remove(brush_idx);
+                            }
+                        }
+                    }
+
+                    map.generation = map.generation.wrapping_add(1);
+                }
+
+                state.selected_brushes.clear();
+                state.selected_entity = None;
+            }
+
+            draw.with_clip_rect(p, [p[0] + w, p[1] + h], || {
+                draw.add_rect(p, [p[0] + w, p[1] + h], 0xFF18_1818u32)
+                    .filled(true)
+                    .build();
+
+                if let Some(tid) = state.view2d_tex_id {
+                    draw.add_image(
+                        tid,
+                        p,
+                        [p[0] + w, p[1] + h],
+                        [0.0, 1.0], // flip Y: OpenGL origin is bottom-left
+                        [1.0, 0.0],
+                        0xFFFFFFFFu32,
+                    );
+                }
+
+                draw.add_text(
+                    [p[0] + 8.0, p[1] + 6.0],
+                    0xFFFFFFFF,
+                    state.ortho_axis.label(),
+                );
+                if canvas_interacting {
+                    draw.add_text(
+                        [p[0] + 8.0, p[1] + 24.0],
+                        0xFFAAAAAA,
+                        format!("{:.1}, {:.1}", world_axis[0], world_axis[1]),
+                    );
+                }
+
+                draw.add_text(
+                    [p[0] + 100.0, p[1] + 6.0],
+                    0xFF2222FF,
+                    format!("{:.2} FPS (average)", ui.io().framerate()),
+                );
+
+                if let Some((pos, col)) = snapped_marker {
+                    draw.add_circle(pos, 4.0, col).filled(true).build();
+                }
+
+                if let (Some(start), Some(end)) =
+                    (state.view2d_drag_start, state.view2d_drag_current)
+                {
+                    let min = start.min(end);
+                    let max = start.max(end);
+
+                    let to_screen = |v: IVec2| -> [f32; 2] {
+                        [
+                            p[0] + w * 0.5 + state.view2d_pan[0] + v.x as f32 * state.view2d_zoom,
+                            p[1] + h * 0.5 + state.view2d_pan[1] + v.y as f32 * state.view2d_zoom,
+                        ]
+                    };
+
+                    let a = to_screen(min);
+                    let b = to_screen(max);
+                    let col = ui.style_color(StyleColor::ButtonActive);
+                    draw.add_rect(a, b, util::imgui_color_to_u32(col))
+                        .thickness(2.0)
+                        .build();
+                }
+
+                if !state.selected_brushes.is_empty() {
+                    let mut selection_aabb = Aabb {
+                        min: IVec3::new(i32::MAX, i32::MAX, i32::MAX),
+                        max: IVec3::new(i32::MIN, i32::MIN, i32::MIN),
+                    };
+                    for (entity_idx, brush_idx) in &state.selected_brushes {
+                        if let Some(map) = state.map.as_ref() {
+                            if let Some(entity) = map.entities.get(*entity_idx) {
+                                if let Some(brush) = entity.brushes.get(*brush_idx) {
+                                    selection_aabb.min = selection_aabb.min.min(brush.aabb.min);
+                                    selection_aabb.max = selection_aabb.max.max(brush.aabb.max);
+                                }
+                            }
+                        }
+                    }
+
+                    let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
+                        Ortho::XY => (
+                            selection_aabb.min.x as f32,
+                            selection_aabb.max.x as f32,
+                            selection_aabb.min.y as f32,
+                            selection_aabb.max.y as f32,
+                        ),
+                        Ortho::XZ => (
+                            selection_aabb.min.x as f32,
+                            selection_aabb.max.x as f32,
+                            -(selection_aabb.max.z as f32),
+                            -(selection_aabb.min.z as f32),
+                        ),
+                        Ortho::YZ => (
+                            selection_aabb.min.y as f32,
+                            selection_aabb.max.y as f32,
+                            -(selection_aabb.max.z as f32),
+                            -(selection_aabb.min.z as f32),
+                        ),
+                    };
+
+                    let width = (max_x - min_x).abs();
+                    let height = (max_y - min_y).abs();
+
+                    let col_u32 =
+                        util::imgui_color_to_u32(ui.style_color(StyleColor::ButtonActive));
+                    let to_screen_f = |v: [f32; 2]| -> [f32; 2] {
+                        [
+                            p[0] + w * 0.5 + state.view2d_pan[0] + v[0] * state.view2d_zoom,
+                            p[1] + h * 0.5 + state.view2d_pan[1] + v[1] * state.view2d_zoom,
+                        ]
+                    };
+
+                    let bottom = to_screen_f([(min_x + max_x) * 0.5, max_y]);
+                    let right = to_screen_f([max_x, (min_y + max_y) * 0.5]);
+
+                    let w_text = format!("{width:.0}");
+                    let h_text = format!("{height:.0}");
+                    let w_tw = text_width(ui, &w_text);
+                    //let h_tw = text_width(ui, &h_text);
+
+                    draw.add_text([bottom[0] - w_tw * 0.5, bottom[1] + 8.0], col_u32, w_text);
+                    draw.add_text([right[0] + 12.0 - 4.0, right[1] - 7.0], col_u32, h_text);
+
+                    // the handle bars (c) raph
+                    let v0 = to_screen_f([max_x, min_y]);
+                    let v1 = to_screen_f([max_x, max_y]);
+                    draw.add_line([v0[0] + 3.0, v0[1]], [v1[0] + 3.0, v1[1]], col_u32)
+                        .build(); //.thickness(1.0).build();
+
+                    let h0 = to_screen_f([min_x, max_y]);
+                    let h1 = to_screen_f([max_x, max_y]);
+                    draw.add_line([h0[0], h0[1] + 3.5], [h1[0], h1[1] + 3.5], col_u32)
+                        .build(); //.thickness(1.0).build();
+                }
+            });
+
+            // brush outlines
+        });
 }
 
+fn selection_aabb(state: &EditorState) -> Option<Aabb> {
+    if state.selected_brushes.is_empty() {
+        return None;
+    }
+    let map = state.map.as_ref()?;
+
+    let mut out = Aabb {
+        min: IVec3::new(i32::MAX, i32::MAX, i32::MAX),
+        max: IVec3::new(i32::MIN, i32::MIN, i32::MIN),
+    };
+
+    let mut any = false;
+    for (entity_idx, brush_idx) in &state.selected_brushes {
+        let Some(entity) = map.entities.get(*entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get(*brush_idx) else {
+            continue;
+        };
+        out.min = out.min.min(brush.aabb.min);
+        out.max = out.max.max(brush.aabb.max);
+        any = true;
+    }
+    any.then_some(out)
+}
+
+fn normalize_depth(v: i32, fallback: i32) -> i32 {
+    let v = v.abs();
+    if v == 0 { fallback.max(1) } else { v }
+}
+
+fn update_last_work_from_aabb(state: &mut EditorState, aabb: &Aabb) {
+    state.work_pos = (aabb.min + aabb.max) / 2;
+    let d = aabb.max - aabb.min;
+    let fallback = (state.config.grid_minor_step as i32).max(1);
+    state.work_depth = IVec3::new(
+        normalize_depth(d.x, fallback),
+        normalize_depth(d.y, fallback),
+        normalize_depth(d.z, fallback),
+    );
+}
+
+fn create_brush_from_drag(state: &mut EditorState, start: IVec2, end: IVec2) -> Option<BrushId> {
+    let min2 = start.min(end);
+    let max2 = start.max(end);
+    if min2.x == max2.x || min2.y == max2.y {
+        return None;
+    }
+
+    let fallback = (state.config.grid_minor_step as i32).max(1);
+    let last = state.last_aabb.as_ref();
+    let (min3, max3) = match state.ortho_axis {
+        Ortho::XY => {
+            let (z0, z1) = last.map(|a| (a.min.z, a.max.z)).unwrap_or((0, fallback));
+            (
+                IVec3::new(min2.x, min2.y, z0),
+                IVec3::new(max2.x, max2.y, z1),
+            )
+        }
+        Ortho::XZ => {
+            let (y0, y1) = last.map(|a| (a.min.y, a.max.y)).unwrap_or((0, fallback));
+            (
+                IVec3::new(min2.x, y0, -max2.y),
+                IVec3::new(max2.x, y1, -min2.y),
+            )
+        }
+        Ortho::YZ => {
+            let (x0, x1) = last.map(|a| (a.min.x, a.max.x)).unwrap_or((0, fallback));
+            (
+                IVec3::new(x0, min2.x, -max2.y),
+                IVec3::new(x1, max2.x, -min2.y),
+            )
+        }
+    };
+
+    if state.map.is_none() {
+        state.map = Some(kradiant::map::Map::default());
+    }
+    let Some(map) = state.map.as_mut() else {
+        return None;
+    };
+
+    let aabb = editing::Aabb::from_points(min3, max3);
+    match editing::add_convex_brush_from_aabb(map, 0, aabb, "common/caulk") {
+        Ok(id) => {
+            state.log_info(format!("Created brush {:?}", id));
+            Some(id)
+        }
+        Err(e) => {
+            state.log_error(format!("Failed to create brush: {e}"));
+            None
+        }
+    }
+}
+/*
 fn draw_ortho_grid(
     draw: &dear_imgui_rs::DrawListMut<'_>,
     origin: [f32; 2],
@@ -624,11 +934,9 @@ fn draw_ortho_grid(
                 continue;
             }
 
-            draw.add_line(
-                [x, origin[1]],
-                [x, origin[1] + h],
-                0xFF22_2222u32,
-            ).thickness(1.0).build();
+            draw.add_line([x, origin[1]], [x, origin[1] + h], 0xFF22_2222u32)
+                .thickness(1.0)
+                .build();
         }
 
         let j0 = ((origin[1] - cy) / minor_step).floor() as i32 - 1;
@@ -641,11 +949,9 @@ fn draw_ortho_grid(
                 continue;
             }
 
-            draw.add_line(
-                [origin[0], y],
-                [origin[0] + w, y],
-                0xFF22_2222u32,
-            ).thickness(1.0).build();
+            draw.add_line([origin[0], y], [origin[0] + w, y], 0xFF22_2222u32)
+                .thickness(1.0)
+                .build();
         }
     }
 
@@ -656,11 +962,9 @@ fn draw_ortho_grid(
     for i in i0..=i1 {
         let x = cx + i as f32 * major_step;
 
-        draw.add_line(
-            [x, origin[1]],
-            [x, origin[1] + h],
-            0xFF2C_2C2Cu32,
-        ).thickness(1.0).build();
+        draw.add_line([x, origin[1]], [x, origin[1] + h], 0xFF2C_2C2Cu32)
+            .thickness(1.0)
+            .build();
     }
 
     let j0 = ((origin[1] - cy) / major_step).floor() as i32 - 1;
@@ -669,52 +973,56 @@ fn draw_ortho_grid(
     for j in j0..=j1 {
         let y = cy + j as f32 * major_step;
 
-        draw.add_line(
-            [origin[0], y],
-            [origin[0] + w, y],
-            0xFF2C_2C2Cu32,
-        ).thickness(1.0).build();
+        draw.add_line([origin[0], y], [origin[0] + w, y], 0xFF2C_2C2Cu32)
+            .thickness(1.0)
+            .build();
     }
-}
+}*/
 
 // Console
 
 fn draw_console(ui: &Ui, state: &mut EditorState) {
     ui.window("Console")
-    .size([1280.0, 180.0], Condition::FirstUseEver)
-    .build(|| {
-        if ui.small_button("Clear") { state.log.clear(); }
-        ui.same_line();
-        ui.text("Filter:");
-        ui.same_line();
-        ui.set_next_item_width(180.0);
-        let mut fbuf = state.con_filter.clone();
-        if ui.input_text("##con_filter", &mut fbuf).hint("search…").build() {
-            state.con_filter = fbuf;
-        }
+        .size([1280.0, 180.0], Condition::FirstUseEver)
+        .build(|| {
+            if ui.small_button("Clear") {
+                state.log.clear();
+            }
+            ui.same_line();
+            ui.text("Filter:");
+            ui.same_line();
+            ui.set_next_item_width(180.0);
+            let mut fbuf = state.con_filter.clone();
+            if ui
+                .input_text("##con_filter", &mut fbuf)
+                .hint("search…")
+                .build()
+            {
+                state.con_filter = fbuf;
+            }
 
-        ui.separator();
+            ui.separator();
 
-        ui.child_window("##console_log")
-        .size(ui.content_region_avail())
-        .build(ui, || {
-            let filter_lc = state.con_filter.to_ascii_lowercase();
-            for entry in &state.log {
-                if !filter_lc.is_empty()
-                    && !entry.text.to_ascii_lowercase().contains(&filter_lc)
-                    {
-                        continue;
+            ui.child_window("##console_log")
+                .size(ui.content_region_avail())
+                .build(ui, || {
+                    let filter_lc = state.con_filter.to_ascii_lowercase();
+                    for entry in &state.log {
+                        if !filter_lc.is_empty()
+                            && !entry.text.to_ascii_lowercase().contains(&filter_lc)
+                        {
+                            continue;
+                        }
+                        let _tok = ui.push_style_color(StyleColor::Text, entry.level.color());
+                        ui.text(format!("{} {}", entry.level.prefix(), entry.text));
+                        // _tok drops → pops colour
                     }
-                    let _tok = ui.push_style_color(StyleColor::Text, entry.level.color());
-                ui.text(format!("{} {}", entry.level.prefix(), entry.text));
-                // _tok drops → pops colour
-            }
-            if state.console_scroll {
-                ui.set_scroll_here_y(1.0);
-                state.console_scroll = false;
-            }
+                    if state.console_scroll {
+                        ui.set_scroll_here_y(1.0);
+                        state.console_scroll = false;
+                    }
+                });
         });
-    });
 }
 
 // Texture Browser
@@ -727,7 +1035,11 @@ fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
             ui.same_line();
             ui.set_next_item_width(200.0);
             let mut fbuf = state.tex_filter.clone();
-            if ui.input_text("##tex_filter", &mut fbuf).hint("e.g. caulk").build() {
+            if ui
+                .input_text("##tex_filter", &mut fbuf)
+                .hint("e.g. caulk")
+                .build()
+            {
                 state.tex_filter = fbuf;
             }
             ui.same_line();
@@ -785,7 +1097,11 @@ fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
         if selected {
             let p = ui.cursor_screen_pos();
             ui.get_window_draw_list()
-                .add_rect(p, [p[0] + tile + 2.0, p[1] + tile + label_h + 2.0], 0xFF26_97FBu32)
+                .add_rect(
+                    p,
+                    [p[0] + tile + 2.0, p[1] + tile + label_h + 2.0],
+                    0xFF26_97FBu32,
+                )
                 .filled(true)
                 .rounding(3.0)
                 .build();
@@ -793,9 +1109,11 @@ fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
 
         // Deterministic colour placeholder — swap for Image::new(gpu_tex_id, [tile,tile]) later.
         {
-            let hash = short.bytes().fold(5381u32, |a, b| a.wrapping_mul(33).wrapping_add(b as u32));
-            let r = (((hash      ) & 0x7F) as f32 + 64.0) / 255.0;
-            let g = (((hash >>  8) & 0x7F) as f32 + 64.0) / 255.0;
+            let hash = short
+                .bytes()
+                .fold(5381u32, |a, b| a.wrapping_mul(33).wrapping_add(b as u32));
+            let r = (((hash) & 0x7F) as f32 + 64.0) / 255.0;
+            let g = (((hash >> 8) & 0x7F) as f32 + 64.0) / 255.0;
             let b = (((hash >> 16) & 0x7F) as f32 + 64.0) / 255.0;
             // Pack as ABGR u32 that DrawList expects (0xAA_BB_GG_RR).
             let col = pack_abgr(r, g, b, 1.0);
@@ -807,7 +1125,11 @@ fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
         }
 
         if ui.invisible_button(format!("##t_{i}"), [tile, tile]) {
-            state.tex_selected = if selected { None } else { Some(material.to_string()) };
+            state.tex_selected = if selected {
+                None
+            } else {
+                Some(material.to_string())
+            };
         }
         if ui.is_item_hovered() {
             ui.tooltip_text(*material);
