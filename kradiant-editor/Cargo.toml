@@ -20,4 +20,6 @@ glam = { version = "0.32.1", features = ["bytemuck"] }
 #bytemuck = { version = "1.25.0", features = ["derive"] }
 rust-ini = { version = "0.21.3", features = ["inline-comment"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
+toml = "1.0.7"
+serde = { version = "1.0.228", features = ["derive"] }
 #image = { version = "0.25.10", features = ["dds"], default-features = false }

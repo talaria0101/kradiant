@@ -4,13 +4,14 @@
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 
 use crate::config::EditorConfig;
-use crate::{editor_icons, util};
+use crate::{EDITOR_THEMES, util};
 use glam::{IVec2, IVec3, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::BrushId;
-use kradiant::loader::texture_loader;
+//use kradiant::loader::texture_loader;
 use util::{pack_abgr, screen_to_world, snap, text_width};
 use crate::icons::EditorIcons;
+use crate::theme::{ThemeEntry, theme_from_str};
 
 // State types
 
@@ -97,6 +98,8 @@ pub struct EditorState {
     pub new_prop_key: String,
     pub new_prop_val: String,
     pub icons: EditorIcons,
+    pub themes: Vec<ThemeEntry>,
+    pub pending_theme: Option<usize>,
 }
 
 macro_rules! editor_log {
@@ -124,7 +127,13 @@ macro_rules! editor_log_e {
 }
 
 impl Default for EditorState {
-    fn default() -> Self {
+    fn default() -> Self
+    {
+        let themes: Vec<ThemeEntry> = EDITOR_THEMES.iter().map(|theme_decl| {
+            let theme_data = theme_from_str(theme_decl[1]).expect("Failed to parse theme");
+            ThemeEntry { name: theme_decl[0].to_string(), data: theme_data }
+        }).collect();
+
         let mut s = Self {
             config: EditorConfig::default(),
             show_demo: false,
@@ -153,6 +162,8 @@ impl Default for EditorState {
             new_prop_key: String::new(),
             new_prop_val: String::new(),
             icons: EditorIcons::default(),
+            themes,
+            pending_theme: None,
         };
         s.log_info("Kradiant editor started");
 
@@ -351,6 +362,17 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
             state.show_demo = demo;
         });
 
+        ui.menu("Misc", || {
+            ui.text_disabled("Theme");
+            ui.separator();
+            for (i, entry) in state.themes.iter().enumerate() {
+                //let active = state.config.active_theme == i;
+                if ui.menu_item(&entry.name) {
+                    state.pending_theme = Some(i);
+                }
+            }
+        });
+
         ui.menu("Help", || {
             if ui.menu_item("About kradiant") { /* TODO */ }
         });
@@ -518,7 +540,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
             let (w, h) = (w.max(1.0), h.max(1.0));
             let p = ui.cursor_screen_pos();
             let draw = ui.get_window_draw_list();
-            state.selection_rgba = ui.style_color(StyleColor::ButtonActive);
+            state.selection_rgba = ui.style_color(StyleColor::TabSelectedOverline);
 
             state.view2d_rect = [p[0], p[1], w, h];
 
@@ -599,7 +621,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
             if canvas_interacting && ui.is_mouse_down(dear_imgui_rs::MouseButton::Left) {
                 let sx = p[0] + w * 0.5 + state.view2d_pan[0] + snapped[0] * state.view2d_zoom;
                 let sy = p[1] + h * 0.5 + state.view2d_pan[1] + snapped[1] * state.view2d_zoom;
-                let col = util::imgui_color_to_u32(ui.style_color(StyleColor::ButtonActive));
+                let col = util::imgui_color_to_u32(ui.style_color(StyleColor::TabSelectedOverline));
                 snapped_marker = Some(([sx, sy], col));
             }
             // START drag
@@ -741,7 +763,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
 
                     let a = to_screen(min);
                     let b = to_screen(max);
-                    let col = ui.style_color(StyleColor::ButtonActive);
+                    let col = ui.style_color(StyleColor::TabSelectedOverline);
                     draw.add_rect(a, b, util::imgui_color_to_u32(col))
                         .thickness(2.0)
                         .build();

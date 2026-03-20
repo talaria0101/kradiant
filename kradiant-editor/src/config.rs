@@ -5,6 +5,7 @@ use ini::Ini;
 pub struct EditorConfig {
     pub grid_minor_step: u8,
     pub view3d_fov: f32,
+    pub active_theme: usize,
 }
 
 impl EditorConfig {
@@ -38,6 +39,7 @@ impl Default for EditorConfig {
         Self {
             grid_minor_step: 4,
             view3d_fov: 80.0,
+            active_theme: 0,
         }
     }
 }
@@ -46,10 +48,12 @@ impl From<Ini> for EditorConfig {
     fn from(value: Ini) -> Self {
         let g_s = value.get_from(Some("view"), "grid_size").unwrap_or("4");
         let fov = value.get_from(Some("view"), "3d_fov").unwrap_or("80");
+        let theme = value.get_from(Some("misc"), "active_theme").unwrap_or("0");
 
         Self {
             grid_minor_step: g_s.parse().unwrap(),
             view3d_fov: fov.parse().unwrap(),
+            active_theme: theme.parse().unwrap(),
         }
     }
 }

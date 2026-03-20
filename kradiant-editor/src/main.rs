@@ -1,4 +1,5 @@
 include!(concat!(env!("OUT_DIR"), "/generated_icons.rs"));
+include!(concat!(env!("OUT_DIR"), "/generated_themes.rs"));
 //use editor_icons;
 
 use std::num::NonZeroU32;
@@ -31,6 +32,7 @@ mod ui;
 mod config;
 mod util;
 mod icons;
+mod theme;
 
 fn main() {
     let event_loop = EventLoop::new().expect("failed to create event loop");
@@ -386,6 +388,13 @@ impl AppState {
         if new_title != self.last_title {
             self.window.set_title(&new_title);
             self.last_title = new_title;
+        }
+
+        if let Some(idx) = self.editor.pending_theme.take() {
+            if let Some(entry) = self.editor.themes.get(idx) {
+                theme::apply_theme(&mut self.imgui, &entry.data);
+                self.editor.config.active_theme = idx;
+            }
         }
 
         self.platform.prepare_frame(&self.window, &mut self.imgui);
