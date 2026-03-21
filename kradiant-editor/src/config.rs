@@ -65,6 +65,9 @@ impl Into<Ini> for EditorConfig {
             .set("grid_size", self.grid_minor_step.to_string())
             .set("3d_fov", self.view3d_fov.to_string());
 
+        conf.with_section(Some("misc"))
+            .set("active_theme", self.active_theme.to_string());
+
         conf
     }
 }

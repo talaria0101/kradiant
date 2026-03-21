@@ -5,7 +5,7 @@
 //! - Faces carry texture and classic "9‑number" surface parameters as written by level editors.
 
 use crate::editing::{Aabb, aabb_from_polys, aabb_from_positions};
-use crate::{IVec2, Vec2, Vec3};
+use crate::{IVec2, IVec3, Vec2, Vec3};
 use std::collections::{HashMap, HashSet};
 
 /// Strongly‑typed entity identifiers (prevents mixing entity and brush indices).
@@ -214,6 +214,31 @@ impl Brush {
             BrushContent::Convex(_) => crate::geometry::brush_to_polygons(self).ok(),
             BrushContent::Patch(_) => None, // skip patches here
         }
+    }
+
+    pub fn translate(&mut self, generation: &mut u64, delta: IVec3) {
+        let dv = delta.as_vec3();
+        match &mut self.content {
+            BrushContent::Convex(faces) => {
+                for face in faces {
+                    for p in &mut face.plane_points {
+                        *p += dv;
+                    }
+                }
+                self.cached_geometry = None;
+            }
+            BrushContent::Patch(patch) => {
+                for row in &mut patch.vertices {
+                    for v in row {
+                        v.position += dv;
+                    }
+                }
+                patch.cached_mesh = None;
+            }
+        }
+        *generation = generation.wrapping_add(1);
+        self.aabb.min += delta;
+        self.aabb.max += delta;
     }
 
     /*pub fn recompute_aabb(&mut self)

@@ -30,9 +30,9 @@ use crate::icons::EditorIcons;
 #[macro_use]
 mod ui;
 mod config;
-mod util;
 mod icons;
 mod theme;
+mod util;
 
 fn main() {
     let event_loop = EventLoop::new().expect("failed to create event loop");
@@ -323,18 +323,41 @@ impl AppState {
             gl_for_renderer.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
 
-        let mut renderer = GlowRenderer::new(gl_for_renderer, &mut imgui).expect("GlowRenderer::new failed");
+        let mut renderer =
+            GlowRenderer::new(gl_for_renderer, &mut imgui).expect("GlowRenderer::new failed");
 
         let img_view_cycle = EditorIcons::get_image(editor_icons::ICON_VIEW_CHANGE_DDS);
-        let id_icon_view_cycle = renderer.register_texture(
-            img_view_cycle.width,
-            img_view_cycle.height,
-            TextureFormat::RGBA32,
-            &img_view_cycle.rgba8
-        ).expect("register editor icon");
+        let id_icon_view_cycle = renderer
+            .register_texture(
+                img_view_cycle.width,
+                img_view_cycle.height,
+                TextureFormat::RGBA32,
+                &img_view_cycle.rgba8,
+            )
+            .expect("register editor icon");
 
         let mut editor = ui::EditorState::default();
         editor.log_info(gl_info);
+
+        // Apply configured theme on startup.
+        if !editor.themes.is_empty() {
+            let idx = editor
+                .config
+                .active_theme
+                .min(editor.themes.len().saturating_sub(1));
+            if let Some(entry) = editor.themes.get(idx) {
+                theme::apply_theme(&mut imgui, &entry.data);
+                editor.config.active_theme = idx;
+            }
+        }
+        editor.palette = theme::palette_from_theme(
+            &imgui,
+            editor
+                .themes
+                .get(editor.config.active_theme)
+                .map(|e| &e.data),
+        );
+
         let view2d_imgui_tex =
             renderer
                 .texture_map_mut()
@@ -397,9 +420,17 @@ impl AppState {
             }
         }
 
+        self.editor.palette = theme::palette_from_theme(
+            &self.imgui,
+            self.editor
+                .themes
+                .get(self.editor.config.active_theme)
+                .map(|e| &e.data),
+        );
+
         self.platform.prepare_frame(&self.window, &mut self.imgui);
         let ui = self.imgui.frame();
-        ui::draw_editor(ui, &mut self.editor);
+        ui::draw_editor(ui, &mut self.editor, delta);
 
         self.platform.prepare_render(&mut self.imgui, &self.window);
         let draw_data = self.imgui.render();
@@ -412,7 +443,9 @@ impl AppState {
 
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.viewport(0, 0, win_w as i32, win_h as i32);
-            self.gl.clear_color(0.1, 0.1, 0.1, 1.0);
+            let win_clear = self.editor.palette.window_clear;
+            self.gl
+                .clear_color(win_clear[0], win_clear[1], win_clear[2], win_clear[3]);
             self.gl
                 .clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
             //self.gl.enable(glow::DEPTH_TEST);
@@ -456,7 +489,9 @@ impl AppState {
                 self.gl
                     .bind_framebuffer(glow::FRAMEBUFFER, Some(self.view2d_fbo));
                 self.gl.viewport(0, 0, fbo_w as i32, fbo_h as i32);
-                self.gl.clear_color(0.11, 0.11, 0.11, 1.0);
+                let view_bg = self.editor.palette.view2d_bg;
+                self.gl
+                    .clear_color(view_bg[0], view_bg[1], view_bg[2], view_bg[3]);
                 self.gl
                     .clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
 
@@ -535,7 +570,10 @@ impl AppState {
                             .push(Vec3::new(view_right, y, 0.0));
                     }
 
-                    draw_lines(&self.view2d_grid_vertices, [0.17, 0.17, 0.17, 1.0]);
+                    draw_lines(
+                        &self.view2d_grid_vertices,
+                        self.editor.palette.view2d_grid_major,
+                    );
                 }
 
                 if major_step_px >= 3.0 && minor_step_px >= 3.0 && (minor_world < major_world) {
@@ -576,7 +614,10 @@ impl AppState {
                             .push(Vec3::new(view_right, y, 0.0));
                     }
 
-                    draw_lines(&self.view2d_grid_vertices, [0.13, 0.13, 0.13, 1.0]);
+                    draw_lines(
+                        &self.view2d_grid_vertices,
+                        self.editor.palette.view2d_grid_minor,
+                    );
                 }
 
                 // World origin axes under map lines.
@@ -585,14 +626,20 @@ impl AppState {
                     .push(Vec3::new(0.0, view_top, 0.0));
                 self.view2d_grid_vertices
                     .push(Vec3::new(0.0, view_bottom, 0.0));
-                draw_lines(&self.view2d_grid_vertices, [0.0, 0.66, 0.0, 1.0]);
+                draw_lines(
+                    &self.view2d_grid_vertices,
+                    self.editor.palette.view2d_axis_y,
+                );
 
                 self.view2d_grid_vertices.clear();
                 self.view2d_grid_vertices
                     .push(Vec3::new(view_left, 0.0, 0.0));
                 self.view2d_grid_vertices
                     .push(Vec3::new(view_right, 0.0, 0.0));
-                draw_lines(&self.view2d_grid_vertices, [0.0, 0.0, 0.66, 1.0]);
+                draw_lines(
+                    &self.view2d_grid_vertices,
+                    self.editor.palette.view2d_axis_x,
+                );
 
                 // brush geometry
                 let map_ptr = self
@@ -826,7 +873,10 @@ impl AppState {
                     }
                 }
                 if !self.view2d_line_vertices.is_empty() {
-                    draw_lines(&self.view2d_line_vertices, [0.8, 0.8, 0.8, 1.0]);
+                    draw_lines(
+                        &self.view2d_line_vertices,
+                        self.editor.palette.view2d_geometry,
+                    );
                 }
 
                 self.view2d_selected_vertices.clear();
@@ -853,8 +903,20 @@ impl AppState {
                                                         let a = positions[i];
                                                         let b =
                                                             positions[(i + 1) % positions.len()];
-                                                        let pa = util::project_to_2d(a, axis);
-                                                        let pb = util::project_to_2d(b, axis);
+                                                        let pa = util::project_to_2d(
+                                                            a + self
+                                                                .editor
+                                                                .view2d_move_offset
+                                                                .as_vec3(),
+                                                            axis,
+                                                        );
+                                                        let pb = util::project_to_2d(
+                                                            b + self
+                                                                .editor
+                                                                .view2d_move_offset
+                                                                .as_vec3(),
+                                                            axis,
+                                                        );
 
                                                         let seg_min_x = pa[0].min(pb[0]);
                                                         let seg_max_x = pa[0].max(pb[0]);

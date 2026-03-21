@@ -5,7 +5,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::ui::{EditorState, Ortho};
-use glam::Vec3;
+use glam::{IVec2, IVec3, Vec3};
 
 pub(crate) fn get_config_dir() -> io::Result<PathBuf> {
     let base = std::env::home_dir()
@@ -32,6 +32,18 @@ pub fn text_width(ui: &Ui, text: &str) -> f32 {
     }
 }
 
+/// Measure text width via the imgui sys layer (calc_text_size is not on &Ui in 0.10).
+pub fn text_height(ui: &Ui, text: &str) -> f32 {
+    let _ = ui; // keep signature symmetric with the rest
+    let c = std::ffi::CString::new(text).unwrap_or_default();
+    unsafe {
+        // In this build igCalcTextSize(text, text_end, hide_text_after_double_hash, wrap_width)
+        // and returns ImVec2 by value (no out-param).
+        let sz = dear_imgui_rs::sys::igCalcTextSize(c.as_ptr(), std::ptr::null(), false, -1.0);
+        sz.y
+    }
+}
+
 /// Truncate `text` so it fits within `max_px`, appending `…` if needed.
 pub fn truncate_to_width(_ui: &Ui, text: &str, max_px: f32) -> String {
     if text_width(_ui, text) <= max_px {
@@ -55,6 +67,41 @@ pub fn pack_abgr(r: f32, g: f32, b: f32, a: f32) -> u32 {
     let bi = (b.clamp(0.0, 1.0) * 255.0).round() as u32;
     let ai = (a.clamp(0.0, 1.0) * 255.0).round() as u32;
     (ai << 24) | (bi << 16) | (gi << 8) | ri
+}
+
+pub fn imgui_color_to_u32(c: [f32; 4]) -> u32 {
+    let r = (c[0] * 255.0) as u32;
+    let g = (c[1] * 255.0) as u32;
+    let b = (c[2] * 255.0) as u32;
+    let a = (c[3] * 255.0) as u32;
+
+    (a << 24) | (b << 16) | (g << 8) | r
+}
+
+/// Adjust brightness of an ImGui u32 color (format: 0xAARRGGBB).
+/// `brightness` multiplies RGB channels (1.0 = unchanged, <1.0 darker, >1.0 brighter).
+pub fn adjust_color_brightness(color: u32, brightness: f32) -> u32 {
+    let a = ((color >> 24) & 0xFF) as u8;
+    let r = ((color >> 16) & 0xFF) as u8;
+    let g = ((color >> 8) & 0xFF) as u8;
+    let b = (color & 0xFF) as u8;
+
+    let scale = |v: u8| -> u8 {
+        let v = (v as f32 * brightness).round();
+        if v < 0.0 {
+            0
+        } else if v > 255.0 {
+            255
+        } else {
+            v as u8
+        }
+    };
+
+    let r = scale(r);
+    let g = scale(g);
+    let b = scale(b);
+
+    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
 pub fn screen_to_world(
@@ -152,6 +199,10 @@ pub fn open_map(state: &mut EditorState) {
 }
 
 pub fn save_map(state: &mut EditorState) {
+    if state.map.is_none() {
+        editor_log_e!(state, info, "Not allowed to save empty map!");
+        return;
+    }
     let mut chosen_path = PathBuf::new();
     let mut choose_new_file = if !state.map_path.is_empty() {
         let path = PathBuf::from(&state.map_path);
@@ -199,11 +250,32 @@ pub fn save_map(state: &mut EditorState) {
     }
 }
 
-pub fn imgui_color_to_u32(c: [f32; 4]) -> u32 {
-    let r = (c[0] * 255.0) as u32;
-    let g = (c[1] * 255.0) as u32;
-    let b = (c[2] * 255.0) as u32;
-    let a = (c[3] * 255.0) as u32;
+pub fn click_in_selection_aabb(state: &EditorState, pt: IVec2) -> bool {
+    for &(entity_idx, brush_idx) in &state.selected_brushes {
+        let Some(map) = &state.map else { continue };
+        let Some(entity) = map.entities.get(entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get(brush_idx) else {
+            continue;
+        };
+        let aabb = &brush.aabb;
+        let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
+            Ortho::XY => (aabb.min.x, aabb.max.x, aabb.min.y, aabb.max.y),
+            Ortho::XZ => (aabb.min.x, aabb.max.x, -aabb.max.z, -aabb.min.z),
+            Ortho::YZ => (aabb.min.y, aabb.max.y, -aabb.max.z, -aabb.min.z),
+        };
+        if pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y {
+            return true;
+        }
+    }
+    false
+}
 
-    (a << 24) | (b << 16) | (g << 8) | r
+pub fn drag_delta_to_3d(d: IVec2, axis: Ortho) -> IVec3 {
+    match axis {
+        Ortho::XY => IVec3::new(d.x, d.y, 0),
+        Ortho::XZ => IVec3::new(d.x, 0, -d.y),
+        Ortho::YZ => IVec3::new(0, d.x, -d.y),
+    }
 }

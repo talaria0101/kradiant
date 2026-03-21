@@ -4,14 +4,15 @@
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 
 use crate::config::EditorConfig;
+use crate::util::{project_to_2d, text_height};
 use crate::{EDITOR_THEMES, util};
 use glam::{IVec2, IVec3, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::BrushId;
 //use kradiant::loader::texture_loader;
-use util::{pack_abgr, screen_to_world, snap, text_width};
 use crate::icons::EditorIcons;
-use crate::theme::{ThemeEntry, theme_from_str};
+use crate::theme::{EditorPalette, ThemeEntry, theme_from_str};
+use util::{pack_abgr, screen_to_world, snap, text_width};
 
 // State types
 
@@ -41,6 +42,13 @@ impl Ortho {
     }
 }
 
+#[derive(Default, PartialEq, Eq)]
+pub enum DragMode {
+    #[default]
+    NewBrush,
+    MoveSelection,
+}
+
 pub struct LogEntry {
     pub level: LogLevel,
     pub text: String,
@@ -54,13 +62,6 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    fn color(self) -> [f32; 4] {
-        match self {
-            LogLevel::Info => [0.85, 0.85, 0.85, 1.0],
-            LogLevel::Warn => [1.0, 0.85, 0.2, 1.0],
-            LogLevel::Error => [1.0, 0.35, 0.35, 1.0],
-        }
-    }
     fn prefix(self) -> &'static str {
         match self {
             LogLevel::Info => "   ",
@@ -82,7 +83,10 @@ pub struct EditorState {
     pub view2d_pan: [f32; 2],
     pub view2d_drag_start: Option<IVec2>,
     pub view2d_drag_current: Option<IVec2>,
+    pub view2d_drag_mode: DragMode,
     pub view2d_tex_id: Option<TextureId>,
+    /// Offset for rendering when we are moving something
+    pub view2d_move_offset: IVec3,
     pub selection_rgba: [f32; 4],
     pub tex_filter: String,
     pub tex_selected: Option<String>,
@@ -100,6 +104,7 @@ pub struct EditorState {
     pub icons: EditorIcons,
     pub themes: Vec<ThemeEntry>,
     pub pending_theme: Option<usize>,
+    pub palette: EditorPalette,
 }
 
 macro_rules! editor_log {
@@ -127,12 +132,17 @@ macro_rules! editor_log_e {
 }
 
 impl Default for EditorState {
-    fn default() -> Self
-    {
-        let themes: Vec<ThemeEntry> = EDITOR_THEMES.iter().map(|theme_decl| {
-            let theme_data = theme_from_str(theme_decl[1]).expect("Failed to parse theme");
-            ThemeEntry { name: theme_decl[0].to_string(), data: theme_data }
-        }).collect();
+    fn default() -> Self {
+        let themes: Vec<ThemeEntry> = EDITOR_THEMES
+            .iter()
+            .map(|theme_decl| {
+                let theme_data = theme_from_str(theme_decl[1]).expect("Failed to parse theme");
+                ThemeEntry {
+                    name: theme_decl[0].to_string(),
+                    data: theme_data,
+                }
+            })
+            .collect();
 
         let mut s = Self {
             config: EditorConfig::default(),
@@ -146,7 +156,9 @@ impl Default for EditorState {
             view2d_pan: [0.0, 0.0],
             view2d_drag_start: None,
             view2d_drag_current: None,
+            view2d_drag_mode: DragMode::NewBrush,
             view2d_tex_id: None,
+            view2d_move_offset: IVec3::ZERO,
             selection_rgba: [0.3, 0.6, 1.0, 1.0],
             tex_filter: String::new(),
             tex_selected: None,
@@ -164,6 +176,7 @@ impl Default for EditorState {
             icons: EditorIcons::default(),
             themes,
             pending_theme: None,
+            palette: EditorPalette::default(),
         };
         s.log_info("Kradiant editor started");
 
@@ -214,13 +227,13 @@ impl EditorState {
 
 // Top-level draw call
 
-pub fn draw_editor(ui: &Ui, state: &mut EditorState) {
+pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
     draw_dockspace(ui);
     draw_main_menu(ui, state);
     draw_entity_list(ui, state);
     draw_properties(ui, state);
     draw_view3d(ui, state);
-    draw_view2d(ui, state);
+    draw_view2d(ui, state, dt);
     draw_console(ui, state);
     draw_texture_browser(ui, state);
 
@@ -507,7 +520,7 @@ fn draw_view3d(ui: &Ui, state: &mut EditorState) {
 
 // 2D View
 
-fn draw_view2d(ui: &Ui, state: &mut EditorState) {
+fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
     ui.window("2D View")
         .size([640.0, 480.0], Condition::FirstUseEver)
         .flags(WindowFlags::NO_SCROLLBAR | WindowFlags::NO_SCROLL_WITH_MOUSE)
@@ -522,7 +535,8 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
             let view_switched = if let Some(tid) = state.icons.view_cycle {
                 // image_button(id, texture_id, size) — the str id disambiguates multiple image buttons
                 //ui.image_button("##switch_view", tid, [24.0, 24.0])
-                ui.image_button_config("##switch_view", tid, [24.0, 24.0]).build()
+                ui.image_button_config("##switch_view", tid, [24.0, 24.0])
+                    .build()
             } else {
                 ui.small_button("Switch") // fallback if texture didn't load
             };
@@ -540,7 +554,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
             let (w, h) = (w.max(1.0), h.max(1.0));
             let p = ui.cursor_screen_pos();
             let draw = ui.get_window_draw_list();
-            state.selection_rgba = ui.style_color(StyleColor::TabSelectedOverline);
+            state.selection_rgba = ui.style_color(StyleColor::ButtonActive);
 
             state.view2d_rect = [p[0], p[1], w, h];
 
@@ -629,6 +643,13 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
                 && ui.is_mouse_clicked(dear_imgui_rs::MouseButton::Left)
                 && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
             {
+                state.view2d_drag_mode = if !state.selected_brushes.is_empty()
+                    && util::click_in_selection_aabb(state, snapped_i)
+                {
+                    DragMode::MoveSelection
+                } else {
+                    DragMode::NewBrush
+                };
                 state.view2d_drag_start = Some(snapped_i);
                 state.view2d_drag_current = Some(snapped_i);
             }
@@ -641,6 +662,30 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
             {
                 if state.view2d_drag_start.is_some() {
                     state.view2d_drag_current = Some(snapped_i);
+
+                    if state.view2d_drag_mode == DragMode::MoveSelection {
+                        let d = snapped_i - state.view2d_drag_start.unwrap();
+                        state.view2d_move_offset = util::drag_delta_to_3d(d, state.ortho_axis);
+                    }
+
+                    let edge_zone = 20.0;
+                    let pan_speed = 100.0 * dt;
+
+                    let mouse = ui.mouse_pos();
+                    let [rx, ry, rw, rh] = state.view2d_rect;
+
+                    if mouse[0] < rx + edge_zone {
+                        state.view2d_pan[0] += pan_speed;
+                    }
+                    if mouse[0] > rx + rw - edge_zone {
+                        state.view2d_pan[0] -= pan_speed;
+                    }
+                    if mouse[1] < ry + edge_zone {
+                        state.view2d_pan[1] += pan_speed;
+                    }
+                    if mouse[1] > ry + rh - edge_zone {
+                        state.view2d_pan[1] -= pan_speed;
+                    }
                 }
             }
 
@@ -649,17 +694,44 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
                 if let (Some(start), Some(end)) =
                     (state.view2d_drag_start, state.view2d_drag_current)
                 {
-                    if state.selected_brushes.is_empty() {
-                        if let Some(created) = create_brush_from_drag(state, start, end) {
-                            state.selected_brushes.push((0, created.0 as usize));
-                            if let Some(aabb) = selection_aabb(state) {
-                                state.last_aabb = Some(aabb.clone());
-                                update_last_work_from_aabb(state, &aabb);
+                    match state.view2d_drag_mode {
+                        DragMode::MoveSelection => {
+                            let d = end - start;
+                            if d != IVec2::ZERO {
+                                let delta = util::drag_delta_to_3d(d, state.ortho_axis);
+                                if let Some(map) = state.map.as_mut() {
+                                    let gen_ = &mut map.generation;
+                                    for &(entity_idx, brush_idx) in &state.selected_brushes {
+                                        if let Some(entity) = map.entities.get_mut(entity_idx) {
+                                            if let Some(brush) = entity.brushes.get_mut(brush_idx) {
+                                                brush.translate(gen_, delta);
+                                            }
+                                        }
+                                    }
+                                }
+                                // Keep last_aabb in sync
+                                if let Some(aabb) = selection_aabb(state) {
+                                    state.last_aabb = Some(aabb.clone());
+                                    update_last_work_from_aabb(state, &aabb);
+                                }
+                            }
+
+                            state.view2d_move_offset = IVec3::ZERO;
+                            editor_log_e!(state, info, "Dragged selection");
+                        }
+                        DragMode::NewBrush => {
+                            if state.selected_brushes.is_empty() {
+                                if let Some(created) = create_brush_from_drag(state, start, end) {
+                                    state.selected_brushes.push((0, created.0 as usize));
+                                    if let Some(aabb) = selection_aabb(state) {
+                                        state.last_aabb = Some(aabb.clone());
+                                        update_last_work_from_aabb(state, &aabb);
+                                    }
+                                }
                             }
                         }
                     }
                 }
-
                 state.view2d_drag_start = None;
                 state.view2d_drag_current = None;
             }
@@ -710,9 +782,13 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
             }
 
             draw.with_clip_rect(p, [p[0] + w, p[1] + h], || {
-                draw.add_rect(p, [p[0] + w, p[1] + h], 0xFF18_1818u32)
-                    .filled(true)
-                    .build();
+                draw.add_rect(
+                    p,
+                    [p[0] + w, p[1] + h],
+                    util::imgui_color_to_u32(state.palette.view2d_bg),
+                )
+                .filled(true)
+                .build();
 
                 if let Some(tid) = state.view2d_tex_id {
                     draw.add_image(
@@ -727,20 +803,20 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
 
                 draw.add_text(
                     [p[0] + 8.0, p[1] + 6.0],
-                    0xFFFFFFFF,
+                    util::imgui_color_to_u32(state.palette.hud_text),
                     state.ortho_axis.label(),
                 );
                 if canvas_interacting {
                     draw.add_text(
                         [p[0] + 8.0, p[1] + 24.0],
-                        0xFFAAAAAA,
+                        util::imgui_color_to_u32(state.palette.hud_text_dim),
                         format!("{:.1}, {:.1}", world_axis[0], world_axis[1]),
                     );
                 }
 
                 draw.add_text(
                     [p[0] + 100.0, p[1] + 6.0],
-                    0xFF2222FF,
+                    util::imgui_color_to_u32(state.palette.hud_text_dim),
                     format!("{:.2} FPS (average)", ui.io().framerate()),
                 );
 
@@ -751,8 +827,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
                 if let (Some(start), Some(end)) =
                     (state.view2d_drag_start, state.view2d_drag_current)
                 {
-                    let min = start.min(end);
-                    let max = start.max(end);
+                    let col = ui.style_color(StyleColor::TabSelectedOverline);
 
                     let to_screen = |v: IVec2| -> [f32; 2] {
                         [
@@ -761,12 +836,51 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
                         ]
                     };
 
-                    let a = to_screen(min);
-                    let b = to_screen(max);
-                    let col = ui.style_color(StyleColor::TabSelectedOverline);
-                    draw.add_rect(a, b, util::imgui_color_to_u32(col))
-                        .thickness(2.0)
-                        .build();
+                    match state.view2d_drag_mode {
+                        DragMode::MoveSelection => {
+                            let a = to_screen(start);
+                            let b = to_screen(end);
+
+                            let off = state.view2d_move_offset;
+                            let (dx, dy) = match state.ortho_axis {
+                                Ortho::XY => (off.x, off.y),
+                                Ortho::XZ => (off.x, -off.z),
+                                Ortho::YZ => (off.y, -off.z),
+                            };
+                            let delta_info = format!("({}, {})", dx, dy);
+
+                            //let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+                            let tw = text_width(ui, &delta_info);
+                            let ry = state.view2d_rect[1];
+                            let text_h = text_height(ui, "1") + 2.0;
+                            let d_info_pos = if b[1] - text_h > ry {
+                                [b[0] - tw / 2.0, b[1] - text_h]
+                            } else {
+                                [b[0] - tw - 12.0, b[1] + 4.0]
+                            };
+                            //let d_info_pos = [mid[0] - tw / 2.0, mid[1] - 18.0];
+
+                            draw.add_line(a, b, util::imgui_color_to_u32(col))
+                                .thickness(2.0)
+                                .build();
+                            draw.add_text(
+                                d_info_pos,
+                                util::adjust_color_brightness(util::imgui_color_to_u32(col), 2.0),
+                                delta_info,
+                            );
+                        }
+                        DragMode::NewBrush => {
+                            let min = start.min(end);
+                            let max = start.max(end);
+
+                            let a = to_screen(min);
+                            let b = to_screen(max);
+
+                            draw.add_rect(a, b, util::imgui_color_to_u32(col))
+                                .thickness(2.0)
+                                .build();
+                        }
+                    }
                 }
 
                 if !state.selected_brushes.is_empty() {
@@ -785,24 +899,26 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState) {
                         }
                     }
 
+                    let off = project_to_2d(state.view2d_move_offset.as_vec3(), state.ortho_axis);
+
                     let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
                         Ortho::XY => (
-                            selection_aabb.min.x as f32,
-                            selection_aabb.max.x as f32,
-                            selection_aabb.min.y as f32,
-                            selection_aabb.max.y as f32,
+                            selection_aabb.min.x as f32 + off[0],
+                            selection_aabb.max.x as f32 + off[0],
+                            selection_aabb.min.y as f32 + off[1],
+                            selection_aabb.max.y as f32 + off[1],
                         ),
                         Ortho::XZ => (
-                            selection_aabb.min.x as f32,
-                            selection_aabb.max.x as f32,
-                            -(selection_aabb.max.z as f32),
-                            -(selection_aabb.min.z as f32),
+                            selection_aabb.min.x as f32 + off[0],
+                            selection_aabb.max.x as f32 + off[0],
+                            -(selection_aabb.max.z as f32) + off[1],
+                            -(selection_aabb.min.z as f32) + off[1],
                         ),
                         Ortho::YZ => (
-                            selection_aabb.min.y as f32,
-                            selection_aabb.max.y as f32,
-                            -(selection_aabb.max.z as f32),
-                            -(selection_aabb.min.z as f32),
+                            selection_aabb.min.y as f32 + off[0],
+                            selection_aabb.max.y as f32 + off[0],
+                            -(selection_aabb.max.z as f32) + off[1],
+                            -(selection_aabb.min.z as f32) + off[1],
                         ),
                     };
 
@@ -1055,7 +1171,12 @@ fn draw_console(ui: &Ui, state: &mut EditorState) {
                         {
                             continue;
                         }
-                        let _tok = ui.push_style_color(StyleColor::Text, entry.level.color());
+                        let col = match entry.level {
+                            LogLevel::Info => state.palette.console_info,
+                            LogLevel::Warn => state.palette.console_warn,
+                            LogLevel::Error => state.palette.console_error,
+                        };
+                        let _tok = ui.push_style_color(StyleColor::Text, col);
                         ui.text(format!("{} {}", entry.level.prefix(), entry.text));
                         // _tok drops → pops colour
                     }
@@ -1142,7 +1263,7 @@ fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
                 .add_rect(
                     p,
                     [p[0] + tile + 2.0, p[1] + tile + label_h + 2.0],
-                    0xFF26_97FBu32,
+                    util::imgui_color_to_u32(ui.style_color(StyleColor::TabSelectedOverline)),
                 )
                 .filled(true)
                 .rounding(3.0)
