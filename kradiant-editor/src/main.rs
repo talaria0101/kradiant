@@ -886,59 +886,104 @@ impl AppState {
                     let view_min_y = view_top.min(view_bottom);
                     let view_max_y = view_top.max(view_bottom);
 
+                    let preview_drag_mode = self.editor.view2d_drag_mode;
+                    let preview_stretch_mode = self.editor.stretch_mode;
+                    let preview_move_offset = self.editor.view2d_move_offset.as_vec3();
+                    let preview_stretch = self.editor.view2d_stretch_preview_xform();
+                    let preview_face = self.editor.view2d_face_stretch_preview();
+                    let preview_point = |p: Vec3| -> Vec3 {
+                        match preview_drag_mode {
+                            ui::DragMode::MoveSelection => p + preview_move_offset,
+                            ui::DragMode::StretchSelection => {
+                                if preview_stretch_mode == ui::StretchMode::Scale {
+                                    preview_stretch.map(|x| x.apply_point(p)).unwrap_or(p)
+                                } else {
+                                    p
+                                }
+                            }
+                            ui::DragMode::NewBrush => p,
+                        }
+                    };
+
                     for (entity_index, brush_index) in &self.editor.selected_brushes {
                         if let Some(map) = &mut self.editor.map {
                             if let Some(entity) = map.entities.get_mut(*entity_index) {
                                 if let Some(brush) = entity.brushes.get_mut(*brush_index) {
-                                    match &mut brush.content {
-                                        BrushContent::Convex(_) => {
-                                            if let Some((_aabb, polys)) =
-                                                brush.get_polygons_and_aabb()
-                                            {
-                                                for (positions, _) in polys {
-                                                    if positions.len() < 2 {
-                                                        continue;
-                                                    }
-                                                    for i in 0..positions.len() {
-                                                        let a = positions[i];
-                                                        let b =
-                                                            positions[(i + 1) % positions.len()];
-                                                        let pa = util::project_to_2d(
-                                                            a + self
-                                                                .editor
-                                                                .view2d_move_offset
-                                                                .as_vec3(),
-                                                            axis,
-                                                        );
-                                                        let pb = util::project_to_2d(
-                                                            b + self
-                                                                .editor
-                                                                .view2d_move_offset
-                                                                .as_vec3(),
-                                                            axis,
-                                                        );
-
-                                                        let seg_min_x = pa[0].min(pb[0]);
-                                                        let seg_max_x = pa[0].max(pb[0]);
-                                                        let seg_min_y = pa[1].min(pb[1]);
-                                                        let seg_max_y = pa[1].max(pb[1]);
-                                                        if seg_max_x < view_min_x
-                                                            || seg_min_x > view_max_x
-                                                            || seg_max_y < view_min_y
-                                                            || seg_min_y > view_max_y
-                                                        {
+                                    if matches!(&brush.content, BrushContent::Convex(_)) {
+                                        if preview_drag_mode == ui::DragMode::StretchSelection
+                                            && preview_stretch_mode == ui::StretchMode::Faces
+                                        {
+                                            if let Some((faces, delta)) = preview_face {
+                                                if let Some(polys) = kradiant::editing::preview_convex_face_stretch_polys(
+                                                    &*brush,
+                                                    faces,
+                                                    delta,
+                                                    self.editor.config.grid_minor_step as i32,
+                                                ) {
+                                                    for (positions, _) in polys {
+                                                        if positions.len() < 2 {
                                                             continue;
                                                         }
+                                                        for i in 0..positions.len() {
+                                                            let a = positions[i];
+                                                            let b = positions[(i + 1) % positions.len()];
+                                                            let pa = util::project_to_2d(a, axis);
+                                                            let pb = util::project_to_2d(b, axis);
 
-                                                        self.view2d_selected_vertices
-                                                            .push(Vec3::new(pa[0], pa[1], 0.0));
-                                                        self.view2d_selected_vertices
-                                                            .push(Vec3::new(pb[0], pb[1], 0.0));
+                                                            let seg_min_x = pa[0].min(pb[0]);
+                                                            let seg_max_x = pa[0].max(pb[0]);
+                                                            let seg_min_y = pa[1].min(pb[1]);
+                                                            let seg_max_y = pa[1].max(pb[1]);
+                                                            if seg_max_x < view_min_x
+                                                                || seg_min_x > view_max_x
+                                                                || seg_max_y < view_min_y
+                                                                || seg_min_y > view_max_y
+                                                            {
+                                                                continue;
+                                                            }
+
+                                                            self.view2d_selected_vertices.push(Vec3::new(pa[0], pa[1], 0.0));
+                                                            self.view2d_selected_vertices.push(Vec3::new(pb[0], pb[1], 0.0));
+                                                        }
                                                     }
+                                                    continue;
                                                 }
                                             }
                                         }
-                                        BrushContent::Patch(patch) => {
+
+                                        if let Some((_aabb, polys)) = brush.get_polygons_and_aabb() {
+                                            for (positions, _) in polys {
+                                                if positions.len() < 2 {
+                                                    continue;
+                                                }
+                                                for i in 0..positions.len() {
+                                                    let a = positions[i];
+                                                    let b = positions[(i + 1) % positions.len()];
+                                                    let pa =
+                                                        util::project_to_2d(preview_point(a), axis);
+                                                    let pb =
+                                                        util::project_to_2d(preview_point(b), axis);
+
+                                                    let seg_min_x = pa[0].min(pb[0]);
+                                                    let seg_max_x = pa[0].max(pb[0]);
+                                                    let seg_min_y = pa[1].min(pb[1]);
+                                                    let seg_max_y = pa[1].max(pb[1]);
+                                                    if seg_max_x < view_min_x
+                                                        || seg_min_x > view_max_x
+                                                        || seg_max_y < view_min_y
+                                                        || seg_min_y > view_max_y
+                                                    {
+                                                        continue;
+                                                    }
+
+                                                    self.view2d_selected_vertices
+                                                        .push(Vec3::new(pa[0], pa[1], 0.0));
+                                                    self.view2d_selected_vertices
+                                                        .push(Vec3::new(pb[0], pb[1], 0.0));
+                                                }
+                                            }
+                                        }
+                                    } else if let BrushContent::Patch(patch) = &mut brush.content {
                                             let Some((mesh, patch_aabb, edges)) =
                                                 patch.get_mesh_aabb_wire()
                                             else {
@@ -981,8 +1026,14 @@ impl AppState {
                                                 if ia >= positions.len() || ib >= positions.len() {
                                                     continue;
                                                 }
-                                                let pa = util::project_to_2d(positions[ia], axis);
-                                                let pb = util::project_to_2d(positions[ib], axis);
+                                                let pa = util::project_to_2d(
+                                                    preview_point(positions[ia]),
+                                                    axis,
+                                                );
+                                                let pb = util::project_to_2d(
+                                                    preview_point(positions[ib]),
+                                                    axis,
+                                                );
 
                                                 let seg_min_x = pa[0].min(pb[0]);
                                                 let seg_max_x = pa[0].max(pb[0]);
@@ -1001,7 +1052,6 @@ impl AppState {
                                                 self.view2d_selected_vertices
                                                     .push(Vec3::new(pb[0], pb[1], 0.0));
                                             }
-                                        }
                                     }
                                 }
                             }

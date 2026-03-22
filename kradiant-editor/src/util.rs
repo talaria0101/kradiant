@@ -251,25 +251,39 @@ pub fn save_map(state: &mut EditorState) {
 }
 
 pub fn click_in_selection_aabb(state: &EditorState, pt: IVec2) -> bool {
+    if state.selected_brushes.is_empty() {
+        return false;
+    }
+    let Some(map) = &state.map else {
+        return false;
+    };
+
+    let mut min = IVec3::new(i32::MAX, i32::MAX, i32::MAX);
+    let mut max = IVec3::new(i32::MIN, i32::MIN, i32::MIN);
+    let mut any = false;
+
     for &(entity_idx, brush_idx) in &state.selected_brushes {
-        let Some(map) = &state.map else { continue };
         let Some(entity) = map.entities.get(entity_idx) else {
             continue;
         };
         let Some(brush) = entity.brushes.get(brush_idx) else {
             continue;
         };
-        let aabb = &brush.aabb;
-        let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
-            Ortho::XY => (aabb.min.x, aabb.max.x, aabb.min.y, aabb.max.y),
-            Ortho::XZ => (aabb.min.x, aabb.max.x, -aabb.max.z, -aabb.min.z),
-            Ortho::YZ => (aabb.min.y, aabb.max.y, -aabb.max.z, -aabb.min.z),
-        };
-        if pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y {
-            return true;
-        }
+        min = min.min(brush.aabb.min);
+        max = max.max(brush.aabb.max);
+        any = true;
     }
-    false
+    if !any {
+        return false;
+    }
+
+    let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
+        Ortho::XY => (min.x, max.x, min.y, max.y),
+        Ortho::XZ => (min.x, max.x, -max.z, -min.z),
+        Ortho::YZ => (min.y, max.y, -max.z, -min.z),
+    };
+
+    pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y
 }
 
 pub fn drag_delta_to_3d(d: IVec2, axis: Ortho) -> IVec3 {

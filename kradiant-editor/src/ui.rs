@@ -42,11 +42,30 @@ impl Ortho {
     }
 }
 
-#[derive(Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
 pub enum DragMode {
     #[default]
     NewBrush,
     MoveSelection,
+    StretchSelection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StretchMode {
+    Scale,
+    Faces,
+}
+
+impl Default for StretchMode {
+    fn default() -> Self {
+        Self::Scale
+    }
+}
+
+#[derive(Clone)]
+struct StretchDrag {
+    selection_aabb: Aabb,
+    faces: [Option<editing::StretchFace>; 2],
 }
 
 pub struct LogEntry {
@@ -87,6 +106,9 @@ pub struct EditorState {
     pub view2d_tex_id: Option<TextureId>,
     /// Offset for rendering when we are moving something
     pub view2d_move_offset: IVec3,
+    view2d_stretch: Option<StretchDrag>,
+    view2d_stretch_delta: IVec3,
+    pub stretch_mode: StretchMode,
     pub selection_rgba: [f32; 4],
     pub tex_filter: String,
     pub tex_selected: Option<String>,
@@ -159,6 +181,9 @@ impl Default for EditorState {
             view2d_drag_mode: DragMode::NewBrush,
             view2d_tex_id: None,
             view2d_move_offset: IVec3::ZERO,
+            view2d_stretch: None,
+            view2d_stretch_delta: IVec3::ZERO,
+            stretch_mode: StretchMode::default(),
             selection_rgba: [0.3, 0.6, 1.0, 1.0],
             tex_filter: String::new(),
             tex_selected: None,
@@ -222,6 +247,41 @@ impl EditorState {
             text: string,
         });
         self.console_scroll = true;
+    }
+
+    pub(crate) fn view2d_preview_point(&self, p: Vec3) -> Vec3 {
+        match self.view2d_drag_mode {
+            DragMode::MoveSelection => p + self.view2d_move_offset.as_vec3(),
+            DragMode::StretchSelection => {
+                let Some(stretch) = self.view2d_stretch.as_ref() else {
+                    return p;
+                };
+                let Some((xform, _preview)) = editing::stretch_selection_transform(
+                    &stretch.selection_aabb,
+                    stretch.faces,
+                    self.view2d_stretch_delta,
+                ) else {
+                    return p;
+                };
+                xform.apply_point(p)
+            }
+            DragMode::NewBrush => p,
+        }
+    }
+
+    pub(crate) fn view2d_stretch_preview_xform(&self) -> Option<editing::AffineScale> {
+        let stretch = self.view2d_stretch.as_ref()?;
+        editing::stretch_selection_transform(
+            &stretch.selection_aabb,
+            stretch.faces,
+            self.view2d_stretch_delta,
+        )
+        .map(|(xform, _)| xform)
+    }
+
+    pub(crate) fn view2d_face_stretch_preview(&self) -> Option<([Option<editing::StretchFace>; 2], IVec3)> {
+        let stretch = self.view2d_stretch.as_ref()?;
+        Some((stretch.faces, self.view2d_stretch_delta))
     }
 }
 
@@ -550,6 +610,21 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                 ui.tooltip_text("Switch View");
             }
 
+            ui.same_line();
+            let stretch_label = match state.stretch_mode {
+                StretchMode::Scale => "Stretch: Scale",
+                StretchMode::Faces => "Stretch: Faces",
+            };
+            if ui.small_button(&format!("{stretch_label}##stretch_mode")) {
+                state.stretch_mode = match state.stretch_mode {
+                    StretchMode::Scale => StretchMode::Faces,
+                    StretchMode::Faces => StretchMode::Scale,
+                };
+            }
+            if ui.is_item_hovered() {
+                ui.tooltip_text("Stretch behavior when dragging outside selection");
+            }
+
             let [w, h] = ui.content_region_avail();
             let (w, h) = (w.max(1.0), h.max(1.0));
             let p = ui.cursor_screen_pos();
@@ -593,7 +668,9 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
 
             let step = state.config.grid_minor_step as f32;
             let snapped = [snap(world[0], step), snap(world[1], step)];
-            let snapped_i = IVec2::new(snapped[0] as i32, snapped[1] as i32);
+            // `snap()` returns f32; due to float error this can land just below an integer
+            // (e.g. 23.999998) and truncating would break grid-step alignment.
+            let snapped_i = IVec2::new(snapped[0].round() as i32, snapped[1].round() as i32);
 
             if canvas_interacting
                 && (ui.is_mouse_clicked(dear_imgui_rs::MouseButton::Left)
@@ -643,10 +720,25 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                 && ui.is_mouse_clicked(dear_imgui_rs::MouseButton::Left)
                 && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
             {
+                state.view2d_move_offset = IVec3::ZERO;
+                state.view2d_stretch = None;
+                state.view2d_stretch_delta = IVec3::ZERO;
                 state.view2d_drag_mode = if !state.selected_brushes.is_empty()
                     && util::click_in_selection_aabb(state, snapped_i)
                 {
                     DragMode::MoveSelection
+                } else if !state.selected_brushes.is_empty() {
+                    if let Some(aabb) = selection_aabb(state) {
+                        let faces = stretch_faces_from_start(state.ortho_axis, &aabb, snapped_i);
+                        state.view2d_stretch = Some(StretchDrag {
+                            selection_aabb: aabb,
+                            faces: [faces.get(0).copied(), faces.get(1).copied()],
+                        });
+                        state.view2d_stretch_delta = IVec3::ZERO;
+                        DragMode::StretchSelection
+                    } else {
+                        DragMode::NewBrush
+                    }
                 } else {
                     DragMode::NewBrush
                 };
@@ -666,6 +758,18 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                     if state.view2d_drag_mode == DragMode::MoveSelection {
                         let d = snapped_i - state.view2d_drag_start.unwrap();
                         state.view2d_move_offset = util::drag_delta_to_3d(d, state.ortho_axis);
+                    } else if state.view2d_drag_mode == DragMode::StretchSelection {
+                        let d = snapped_i - state.view2d_drag_start.unwrap();
+                        let mut delta = util::drag_delta_to_3d(d, state.ortho_axis);
+                        if let Some(stretch) = state.view2d_stretch.as_ref() {
+                            delta = clamp_stretch_delta(
+                                &stretch.selection_aabb,
+                                stretch.faces,
+                                delta,
+                                state.config.grid_minor_step as i32,
+                            );
+                        }
+                        state.view2d_stretch_delta = delta;
                     }
 
                     let edge_zone = 20.0;
@@ -730,10 +834,118 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                 }
                             }
                         }
+                        DragMode::StretchSelection => {
+                            if let Some(stretch) = state.view2d_stretch.take() {
+                                let delta = state.view2d_stretch_delta;
+                                if delta != IVec3::ZERO {
+                                    let mut new_sel_aabb: Option<Aabb> = None;
+                                    if let Some(map) = state.map.as_mut() {
+                                        let mut any = false;
+                                        match state.stretch_mode {
+                                            StretchMode::Scale => {
+                                                if let Some((xform, _preview)) =
+                                                    editing::stretch_selection_transform(
+                                                        &stretch.selection_aabb,
+                                                        stretch.faces,
+                                                        delta,
+                                                    )
+                                                {
+                                                    for &(entity_idx, brush_idx) in
+                                                        &state.selected_brushes
+                                                    {
+                                                        let Some(entity) =
+                                                            map.entities.get_mut(entity_idx)
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        let Some(brush) =
+                                                            entity.brushes.get_mut(brush_idx)
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        if editing::apply_affine_scale_to_brush(
+                                                            brush,
+                                                            &mut map.generation,
+                                                            xform,
+                                                        ) {
+                                                            any = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            StretchMode::Faces => {
+                                                let xform_for_patches =
+                                                    editing::stretch_selection_transform(
+                                                        &stretch.selection_aabb,
+                                                        stretch.faces,
+                                                        delta,
+                                                    )
+                                                    .map(|(x, _)| x);
+
+                                                for &(entity_idx, brush_idx) in
+                                                    &state.selected_brushes
+                                                {
+                                                    let Some(entity) =
+                                                        map.entities.get_mut(entity_idx)
+                                                    else {
+                                                        continue;
+                                                    };
+                                                    let Some(brush) =
+                                                        entity.brushes.get_mut(brush_idx)
+                                                    else {
+                                                        continue;
+                                                    };
+                                                    match &brush.content {
+                                                        kradiant::map::BrushContent::Convex(_) => {
+                                                            if editing::stretch_convex_brush_faces(
+                                                                brush,
+                                                                &mut map.generation,
+                                                                stretch.faces,
+                                                                delta,
+                                                                state.config.grid_minor_step as i32,
+                                                            ) {
+                                                                any = true;
+                                                            }
+                                                        }
+                                                        kradiant::map::BrushContent::Patch(_) => {
+                                                            if let Some(xform) = xform_for_patches
+                                                            {
+                                                                if editing::apply_affine_scale_to_brush(
+                                                                    brush,
+                                                                    &mut map.generation,
+                                                                    xform,
+                                                                ) {
+                                                                    any = true;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if any {
+                                            new_sel_aabb = selection_aabb_from_map(
+                                                map,
+                                                &state.selected_brushes,
+                                            );
+                                            editor_log_e!(state, info, "Stretched selection");
+                                        }
+                                    }
+                                    if let Some(aabb) = new_sel_aabb {
+                                        state.last_aabb = Some(aabb.clone());
+                                        update_last_work_from_aabb(state, &aabb);
+                                    }
+                                }
+                            }
+                            state.view2d_stretch_delta = IVec3::ZERO;
+                        }
                     }
                 }
                 state.view2d_drag_start = None;
                 state.view2d_drag_current = None;
+                state.view2d_stretch = None;
+                state.view2d_stretch_delta = IVec3::ZERO;
             }
 
             if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
@@ -742,6 +954,9 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                     update_last_work_from_aabb(state, &aabb);
                 }
                 state.selected_brushes.clear();
+                state.view2d_stretch = None;
+                state.view2d_stretch_delta = IVec3::ZERO;
+                state.view2d_move_offset = IVec3::ZERO;
             }
 
             if ui.is_key_pressed(dear_imgui_rs::Key::Backspace) {
@@ -835,11 +1050,29 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                             p[1] + h * 0.5 + state.view2d_pan[1] + v.y as f32 * state.view2d_zoom,
                         ]
                     };
+                    let to_screen_f = |v: [f32; 2]| -> [f32; 2] {
+                        [
+                            p[0] + w * 0.5 + state.view2d_pan[0] + v[0] * state.view2d_zoom,
+                            p[1] + h * 0.5 + state.view2d_pan[1] + v[1] * state.view2d_zoom,
+                        ]
+                    };
 
                     match state.view2d_drag_mode {
                         DragMode::MoveSelection => {
-                            let a = to_screen(start);
-                            let b = to_screen(end);
+                            let (a, b) = if let Some(sel) = selection_aabb(state) {
+                                let (min2, max2) = project_aabb_to_2d(&sel, state.ortho_axis);
+                                let center = [
+                                    (min2.x as f32 + max2.x as f32) * 0.5,
+                                    (min2.y as f32 + max2.y as f32) * 0.5,
+                                ];
+                                let off2 =
+                                    project_to_2d(state.view2d_move_offset.as_vec3(), state.ortho_axis);
+                                let a = to_screen_f(center);
+                                let b = to_screen_f([center[0] + off2[0], center[1] + off2[1]]);
+                                (a, b)
+                            } else {
+                                (to_screen(start), to_screen(end))
+                            };
 
                             let off = state.view2d_move_offset;
                             let (dx, dy) = match state.ortho_axis {
@@ -860,12 +1093,14 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                             };
                             //let d_info_pos = [mid[0] - tw / 2.0, mid[1] - 18.0];
 
-                            draw.add_line(a, b, util::imgui_color_to_u32(col))
+                            let delta_info_col = util::adjust_color_brightness(util::imgui_color_to_u32(col), 2.0);
+
+                            draw.add_line(a, b, delta_info_col)
                                 .thickness(2.0)
                                 .build();
                             draw.add_text(
                                 d_info_pos,
-                                util::adjust_color_brightness(util::imgui_color_to_u32(col), 2.0),
+                                delta_info_col,
                                 delta_info,
                             );
                         }
@@ -880,26 +1115,87 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                 .thickness(2.0)
                                 .build();
                         }
-                    }
-                }
+                        DragMode::StretchSelection => {
+                            if let Some(stretch) = state.view2d_stretch.as_ref() {
+                                let preview = editing::preview_stretched_aabb(
+                                    &stretch.selection_aabb,
+                                    stretch.faces,
+                                    state.view2d_stretch_delta,
+                                );
+                                let (min2, max2) =
+                                    project_aabb_to_2d(&preview, state.ortho_axis);
+                                let a = to_screen(min2);
+                                let b = to_screen(max2);
 
-                if !state.selected_brushes.is_empty() {
-                    let mut selection_aabb = Aabb {
-                        min: IVec3::new(i32::MAX, i32::MAX, i32::MAX),
-                        max: IVec3::new(i32::MIN, i32::MIN, i32::MIN),
-                    };
-                    for (entity_idx, brush_idx) in &state.selected_brushes {
-                        if let Some(map) = state.map.as_ref() {
-                            if let Some(entity) = map.entities.get(*entity_idx) {
-                                if let Some(brush) = entity.brushes.get(*brush_idx) {
-                                    selection_aabb.min = selection_aabb.min.min(brush.aabb.min);
-                                    selection_aabb.max = selection_aabb.max.max(brush.aabb.max);
+                                if let (Some(p0), Some(p1)) = (
+                                    stretch_handle_point_2d(
+                                        &stretch.selection_aabb,
+                                        state.ortho_axis,
+                                        stretch.faces,
+                                    ),
+                                    stretch_handle_point_2d(&preview, state.ortho_axis, stretch.faces),
+                                ) {
+                                    let a = to_screen_f(p0);
+                                    let b = to_screen_f(p1);
+
+                                    let du = (p1[0] - p0[0]).round() as i32;
+                                    let dv = (p1[1] - p0[1]).round() as i32;
+                                    let delta_info = format!("({}, {})", du, dv);
+
+                                    let tw = text_width(ui, &delta_info);
+                                    let ry = state.view2d_rect[1];
+                                    let text_h = text_height(ui, "1") + 2.0;
+                                    let d_info_pos = if b[1] - text_h > ry {
+                                        [b[0] - tw / 2.0, b[1] - text_h]
+                                    } else {
+                                        [b[0] - tw - 12.0, b[1] + 4.0]
+                                    };
+
+                                    let delta_info_col =
+                                        util::adjust_color_brightness(util::imgui_color_to_u32(col), 2.0);
+
+                                    draw.add_line(a, b, delta_info_col)
+                                        .thickness(2.0)
+                                        .build();
+                                    draw.add_text(
+                                        d_info_pos,
+                                        delta_info_col,
+                                        delta_info,
+                                    );
                                 }
+
+                                draw.add_rect(a, b, util::imgui_color_to_u32(col))
+                                    .thickness(2.0)
+                                    .build();
+                            } else {
+                                let min = start.min(end);
+                                let max = start.max(end);
+                                let a = to_screen(min);
+                                let b = to_screen(max);
+                                draw.add_rect(a, b, util::imgui_color_to_u32(col))
+                                    .thickness(2.0)
+                                    .build();
                             }
                         }
                     }
+                }
 
-                    let off = project_to_2d(state.view2d_move_offset.as_vec3(), state.ortho_axis);
+                if let Some(mut selection_aabb) = selection_aabb(state) {
+                    if state.view2d_drag_mode == DragMode::StretchSelection {
+                        if let Some(stretch) = state.view2d_stretch.as_ref() {
+                            selection_aabb = editing::preview_stretched_aabb(
+                                &stretch.selection_aabb,
+                                stretch.faces,
+                                state.view2d_stretch_delta,
+                            );
+                        }
+                    }
+
+                    let off = if state.view2d_drag_mode == DragMode::MoveSelection {
+                        project_to_2d(state.view2d_move_offset.as_vec3(), state.ortho_axis)
+                    } else {
+                        [0.0, 0.0]
+                    };
 
                     let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
                         Ortho::XY => (
@@ -967,6 +1263,13 @@ fn selection_aabb(state: &EditorState) -> Option<Aabb> {
         return None;
     }
     let map = state.map.as_ref()?;
+    selection_aabb_from_map(map, &state.selected_brushes)
+}
+
+fn selection_aabb_from_map(map: &kradiant::map::Map, selected: &[(usize, usize)]) -> Option<Aabb> {
+    if selected.is_empty() {
+        return None;
+    }
 
     let mut out = Aabb {
         min: IVec3::new(i32::MAX, i32::MAX, i32::MAX),
@@ -974,11 +1277,11 @@ fn selection_aabb(state: &EditorState) -> Option<Aabb> {
     };
 
     let mut any = false;
-    for (entity_idx, brush_idx) in &state.selected_brushes {
-        let Some(entity) = map.entities.get(*entity_idx) else {
+    for &(entity_idx, brush_idx) in selected {
+        let Some(entity) = map.entities.get(entity_idx) else {
             continue;
         };
-        let Some(brush) = entity.brushes.get(*brush_idx) else {
+        let Some(brush) = entity.brushes.get(brush_idx) else {
             continue;
         };
         out.min = out.min.min(brush.aabb.min);
@@ -986,6 +1289,170 @@ fn selection_aabb(state: &EditorState) -> Option<Aabb> {
         any = true;
     }
     any.then_some(out)
+}
+
+fn stretch_faces_from_start(axis: Ortho, aabb: &Aabb, start: IVec2) -> Vec<editing::StretchFace> {
+    let (min_u, max_u, min_v, max_v) = match axis {
+        Ortho::XY => (aabb.min.x, aabb.max.x, aabb.min.y, aabb.max.y),
+        Ortho::XZ => (aabb.min.x, aabb.max.x, -aabb.max.z, -aabb.min.z),
+        Ortho::YZ => (aabb.min.y, aabb.max.y, -aabb.max.z, -aabb.min.z),
+    };
+
+    let mut out = Vec::with_capacity(2);
+
+    if start.x < min_u {
+        out.push(match axis {
+            Ortho::XY | Ortho::XZ => editing::StretchFace::XMin,
+            Ortho::YZ => editing::StretchFace::YMin,
+        });
+    } else if start.x > max_u {
+        out.push(match axis {
+            Ortho::XY | Ortho::XZ => editing::StretchFace::XMax,
+            Ortho::YZ => editing::StretchFace::YMax,
+        });
+    }
+
+    if start.y < min_v {
+        out.push(match axis {
+            Ortho::XY => editing::StretchFace::YMin,
+            Ortho::XZ | Ortho::YZ => editing::StretchFace::ZMax,
+        });
+    } else if start.y > max_v {
+        out.push(match axis {
+            Ortho::XY => editing::StretchFace::YMax,
+            Ortho::XZ | Ortho::YZ => editing::StretchFace::ZMin,
+        });
+    }
+
+    out
+}
+
+fn project_aabb_to_2d(aabb: &Aabb, axis: Ortho) -> (IVec2, IVec2) {
+    match axis {
+        Ortho::XY => (
+            IVec2::new(aabb.min.x, aabb.min.y),
+            IVec2::new(aabb.max.x, aabb.max.y),
+        ),
+        Ortho::XZ => (
+            IVec2::new(aabb.min.x, -aabb.max.z),
+            IVec2::new(aabb.max.x, -aabb.min.z),
+        ),
+        Ortho::YZ => (
+            IVec2::new(aabb.min.y, -aabb.max.z),
+            IVec2::new(aabb.max.y, -aabb.min.z),
+        ),
+    }
+}
+
+fn div_ceil_i32(a: i32, b: i32) -> i32 {
+    debug_assert!(b > 0);
+    -((-a).div_euclid(b))
+}
+
+fn clamp_stretch_delta(
+    aabb: &Aabb,
+    faces: [Option<editing::StretchFace>; 2],
+    delta: IVec3,
+    grid_step: i32,
+) -> IVec3 {
+    let step = grid_step.abs().max(1);
+    let mut out = delta;
+
+    for face in faces.iter().flatten() {
+        match face {
+            editing::StretchFace::XMin => {
+                if out.x > 0 {
+                    let max_delta = (aabb.max.x - 1) - aabb.min.x;
+                    if out.x > max_delta {
+                        out.x = (max_delta.div_euclid(step) * step).max(0);
+                    }
+                }
+            }
+            editing::StretchFace::XMax => {
+                if out.x < 0 {
+                    let min_delta = (aabb.min.x + 1) - aabb.max.x;
+                    if out.x < min_delta {
+                        out.x = div_ceil_i32(min_delta, step) * step;
+                    }
+                }
+            }
+            editing::StretchFace::YMin => {
+                if out.y > 0 {
+                    let max_delta = (aabb.max.y - 1) - aabb.min.y;
+                    if out.y > max_delta {
+                        out.y = (max_delta.div_euclid(step) * step).max(0);
+                    }
+                }
+            }
+            editing::StretchFace::YMax => {
+                if out.y < 0 {
+                    let min_delta = (aabb.min.y + 1) - aabb.max.y;
+                    if out.y < min_delta {
+                        out.y = div_ceil_i32(min_delta, step) * step;
+                    }
+                }
+            }
+            editing::StretchFace::ZMin => {
+                if out.z > 0 {
+                    let max_delta = (aabb.max.z - 1) - aabb.min.z;
+                    if out.z > max_delta {
+                        out.z = (max_delta.div_euclid(step) * step).max(0);
+                    }
+                }
+            }
+            editing::StretchFace::ZMax => {
+                if out.z < 0 {
+                    let min_delta = (aabb.min.z + 1) - aabb.max.z;
+                    if out.z < min_delta {
+                        out.z = div_ceil_i32(min_delta, step) * step;
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn stretch_handle_point_2d(
+    aabb: &Aabb,
+    axis: Ortho,
+    faces: [Option<editing::StretchFace>; 2],
+) -> Option<[f32; 2]> {
+    let (min2, max2) = project_aabb_to_2d(aabb, axis);
+
+    let mut u_side: Option<bool> = None; // false=min, true=max
+    let mut v_side: Option<bool> = None;
+
+    for face in faces.iter().flatten() {
+        match (axis, face) {
+            (Ortho::XY | Ortho::XZ, editing::StretchFace::XMin) => u_side = Some(false),
+            (Ortho::XY | Ortho::XZ, editing::StretchFace::XMax) => u_side = Some(true),
+            (Ortho::YZ, editing::StretchFace::YMin) => u_side = Some(false),
+            (Ortho::YZ, editing::StretchFace::YMax) => u_side = Some(true),
+
+            (Ortho::XY, editing::StretchFace::YMin) => v_side = Some(false),
+            (Ortho::XY, editing::StretchFace::YMax) => v_side = Some(true),
+
+            // In XZ/YZ, projected V is -Z: ZMax maps to min2.y, ZMin maps to max2.y.
+            (Ortho::XZ | Ortho::YZ, editing::StretchFace::ZMax) => v_side = Some(false),
+            (Ortho::XZ | Ortho::YZ, editing::StretchFace::ZMin) => v_side = Some(true),
+            _ => {}
+        }
+    }
+
+    let u = if let Some(max_side) = u_side {
+        if max_side { max2.x as f32 } else { min2.x as f32 }
+    } else {
+        (min2.x as f32 + max2.x as f32) * 0.5
+    };
+    let v = if let Some(max_side) = v_side {
+        if max_side { max2.y as f32 } else { min2.y as f32 }
+    } else {
+        (min2.y as f32 + max2.y as f32) * 0.5
+    };
+
+    Some([u, v])
 }
 
 fn normalize_depth(v: i32, fallback: i32) -> i32 {
