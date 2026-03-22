@@ -236,6 +236,13 @@ pub fn save_map(state: &mut EditorState) {
     }
 
     let path_str = chosen_path.to_str().unwrap();
+    if let Some(map) = state.map.as_mut() {
+        let changed = kradiant::editing::orient_map_convex_brushes_inward(map);
+        if changed > 0 {
+            editor_log_e!(state, info, "Oriented {} brushes for CoD Radiant", changed);
+        }
+    }
+
     match map_loader::save_map(state.map.as_ref().unwrap(), path_str) {
         Ok(_) => editor_log_e!(state, info, "Saved map to {}", path_str),
         Err(e) => {

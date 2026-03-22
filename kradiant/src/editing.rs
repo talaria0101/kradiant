@@ -564,8 +564,8 @@ pub fn convex_brush_from_aabb(id: BrushId, aabb: Aabb, texture: impl Into<String
         Face {
             plane_points: [
                 Vec3::new(max.x, min.y, min.z),
-                Vec3::new(max.x, max.y, max.z),
                 Vec3::new(max.x, min.y, max.z),
+                Vec3::new(max.x, max.y, max.z),
             ],
             texture: texture.clone(),
             params,
@@ -573,8 +573,8 @@ pub fn convex_brush_from_aabb(id: BrushId, aabb: Aabb, texture: impl Into<String
         Face {
             plane_points: [
                 Vec3::new(min.x, min.y, min.z),
-                Vec3::new(min.x, min.y, max.z),
                 Vec3::new(min.x, max.y, max.z),
+                Vec3::new(min.x, min.y, max.z),
             ],
             texture: texture.clone(),
             params,
@@ -582,8 +582,8 @@ pub fn convex_brush_from_aabb(id: BrushId, aabb: Aabb, texture: impl Into<String
         Face {
             plane_points: [
                 Vec3::new(min.x, max.y, min.z),
+                Vec3::new(max.x, max.y, max.z),
                 Vec3::new(min.x, max.y, max.z),
-                Vec3::new(max.x, max.y, max.z),
             ],
             texture: texture.clone(),
             params,
@@ -591,8 +591,8 @@ pub fn convex_brush_from_aabb(id: BrushId, aabb: Aabb, texture: impl Into<String
         Face {
             plane_points: [
                 Vec3::new(min.x, min.y, min.z),
-                Vec3::new(max.x, min.y, max.z),
                 Vec3::new(min.x, min.y, max.z),
+                Vec3::new(max.x, min.y, max.z),
             ],
             texture: texture.clone(),
             params,
@@ -600,8 +600,8 @@ pub fn convex_brush_from_aabb(id: BrushId, aabb: Aabb, texture: impl Into<String
         Face {
             plane_points: [
                 Vec3::new(min.x, min.y, max.z),
-                Vec3::new(max.x, min.y, max.z),
                 Vec3::new(max.x, max.y, max.z),
+                Vec3::new(max.x, min.y, max.z),
             ],
             texture: texture.clone(),
             params,
@@ -609,8 +609,8 @@ pub fn convex_brush_from_aabb(id: BrushId, aabb: Aabb, texture: impl Into<String
         Face {
             plane_points: [
                 Vec3::new(min.x, min.y, min.z),
-                Vec3::new(max.x, max.y, min.z),
                 Vec3::new(max.x, min.y, min.z),
+                Vec3::new(max.x, max.y, min.z),
             ],
             texture,
             params,
@@ -659,6 +659,62 @@ pub fn add_convex_brush_from_aabb(
 
     map.generation = map.generation.wrapping_add(1);
     Ok(brush_id)
+}
+
+pub fn orient_convex_brush_faces_inward(brush: &mut Brush, generation: &mut u64) -> bool {
+    let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
+        return false;
+    };
+
+    let mut sum = Vec3::ZERO;
+    let mut count = 0usize;
+    for (positions, _) in polys {
+        for &p in positions {
+            sum += p;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return false;
+    }
+    let interior = sum / count as f32;
+
+    let BrushContent::Convex(faces) = &mut brush.content else {
+        return false;
+    };
+
+    let mut any = false;
+    for face in faces {
+        let p = face.plane_points;
+        let n = (p[1] - p[0]).cross(p[2] - p[0]);
+        if n.length_squared() < 1.0e-10 {
+            continue;
+        }
+        // CoD Radiant convention: face normals point toward the brush interior.
+        if n.dot(interior - p[0]) < 0.0 {
+            face.plane_points.swap(1, 2);
+            any = true;
+        }
+    }
+
+    if any {
+        // Clear caches (and bump generation) via no-op translate.
+        brush.translate(generation, IVec3::ZERO);
+    }
+
+    any
+}
+
+pub fn orient_map_convex_brushes_inward(map: &mut Map) -> usize {
+    let mut changed = 0usize;
+    for entity in &mut map.entities {
+        for brush in &mut entity.brushes {
+            if orient_convex_brush_faces_inward(brush, &mut map.generation) {
+                changed += 1;
+            }
+        }
+    }
+    changed
 }
 
 pub fn pick_convex_brush_by_ray(

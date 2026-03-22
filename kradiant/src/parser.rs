@@ -835,15 +835,15 @@ common/caulk
     fn aabb_is_stable_for_grid_aligned_brushes() {
         // This map is authored with integer plane points; due to float intersection epsilon,
         // tessellated vertices can land at e.g. `88.00001`, which must not inflate the integer AABB.
-        let map = include_str!("../test/made_with_kradiant.map");
+        let map = include_str!("../test/kradiant_map.map");
         let mut map = parse_map_string(map).unwrap();
 
         let world = &mut map.entities[0];
         let brush = &mut world.brushes[0];
         let (aabb, _polys) = brush.get_polygons_and_aabb().expect("tessellate brush");
 
-        assert_eq!(aabb.max.x - aabb.min.x, 272);
-        assert_eq!(aabb.max.y - aabb.min.y, 212);
-        assert_eq!(aabb.max.z - aabb.min.z, 4);
+        assert_eq!(aabb.max.x - aabb.min.x, 248);
+        assert_eq!(aabb.max.y - aabb.min.y, 172);
+        assert_eq!(aabb.max.z - aabb.min.z, 24);
     }
 }

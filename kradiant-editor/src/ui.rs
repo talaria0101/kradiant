@@ -1086,11 +1086,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                             let tw = text_width(ui, &delta_info);
                             let ry = state.view2d_rect[1];
                             let text_h = text_height(ui, "1") + 2.0;
-                            let d_info_pos = if b[1] - text_h > ry {
-                                [b[0] - tw / 2.0, b[1] - text_h]
-                            } else {
-                                [b[0] - tw - 12.0, b[1] + 4.0]
-                            };
+                            let d_info_pos = [b[0] - tw / 2.0, b[1] - text_h];
                             //let d_info_pos = [mid[0] - tw / 2.0, mid[1] - 18.0];
 
                             let delta_info_col = util::adjust_color_brightness(util::imgui_color_to_u32(col), 2.0);
@@ -1145,11 +1141,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                     let tw = text_width(ui, &delta_info);
                                     let ry = state.view2d_rect[1];
                                     let text_h = text_height(ui, "1") + 2.0;
-                                    let d_info_pos = if b[1] - text_h > ry {
-                                        [b[0] - tw / 2.0, b[1] - text_h]
-                                    } else {
-                                        [b[0] - tw - 12.0, b[1] + 4.0]
-                                    };
+                                    let d_info_pos = [b[0] - tw - 12.0, b[1] + 4.0];
 
                                     let delta_info_col =
                                         util::adjust_color_brightness(util::imgui_color_to_u32(col), 2.0);
