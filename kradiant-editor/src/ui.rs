@@ -12,7 +12,7 @@ use kradiant::map::BrushId;
 //use kradiant::loader::texture_loader;
 use crate::icons::EditorIcons;
 use crate::theme::{EditorPalette, ThemeEntry, theme_from_str};
-use util::{pack_abgr, screen_to_world, snap, text_width};
+use util::{pack_abgr, screen_to_world, snap, text_width, normalize_depth, clamp_stretch_delta, project_aabb_to_2d, stretch_handle_point_2d};
 
 // State types
 
@@ -25,7 +25,8 @@ pub enum Ortho {
 }
 
 impl Ortho {
-    fn label(self) -> &'static str {
+    fn label(self) -> &'static str
+    {
         match self {
             Ortho::XY => "XY (top)",
             Ortho::XZ => "XZ (front)",
@@ -33,7 +34,8 @@ impl Ortho {
         }
     }
 
-    fn next(self) -> Self {
+    fn next(self) -> Self
+    {
         match self {
             Self::XY => Self::XZ,
             Self::XZ => Self::YZ,
@@ -81,7 +83,8 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    fn prefix(self) -> &'static str {
+    fn prefix(self) -> &'static str
+    {
         match self {
             LogLevel::Info => "   ",
             LogLevel::Warn => "[W]",
@@ -154,7 +157,8 @@ macro_rules! editor_log_e {
 }
 
 impl Default for EditorState {
-    fn default() -> Self {
+    fn default() -> Self
+    {
         let themes: Vec<ThemeEntry> = EDITOR_THEMES
             .iter()
             .map(|theme_decl| {
@@ -221,7 +225,8 @@ impl Default for EditorState {
 }
 
 impl EditorState {
-    pub fn log_info(&mut self, msg: impl Into<String>) {
+    pub fn log_info(&mut self, msg: impl Into<String>)
+    {
         let string: String = msg.into();
         println!("{}", &string);
         self.log.push(LogEntry {
@@ -230,7 +235,8 @@ impl EditorState {
         });
         self.console_scroll = true;
     }
-    pub fn log_warn(&mut self, msg: impl Into<String>) {
+    pub fn log_warn(&mut self, msg: impl Into<String>)
+    {
         let string: String = msg.into();
         println!("{}", &string);
         self.log.push(LogEntry {
@@ -239,7 +245,8 @@ impl EditorState {
         });
         self.console_scroll = true;
     }
-    pub fn log_error(&mut self, msg: impl Into<String>) {
+    pub fn log_error(&mut self, msg: impl Into<String>)
+    {
         let string: String = msg.into();
         eprintln!("{}", &string);
         self.log.push(LogEntry {
@@ -248,8 +255,9 @@ impl EditorState {
         });
         self.console_scroll = true;
     }
-
-    pub(crate) fn view2d_preview_point(&self, p: Vec3) -> Vec3 {
+/*
+    pub(crate) fn view2d_preview_point(&self, p: Vec3) -> Vec3
+    {
         match self.view2d_drag_mode {
             DragMode::MoveSelection => p + self.view2d_move_offset.as_vec3(),
             DragMode::StretchSelection => {
@@ -268,8 +276,9 @@ impl EditorState {
             DragMode::NewBrush => p,
         }
     }
-
-    pub(crate) fn view2d_stretch_preview_xform(&self) -> Option<editing::AffineScale> {
+*/
+    pub(crate) fn view2d_stretch_preview_xform(&self) -> Option<editing::AffineScale>
+    {
         let stretch = self.view2d_stretch.as_ref()?;
         editing::stretch_selection_transform(
             &stretch.selection_aabb,
@@ -279,7 +288,8 @@ impl EditorState {
         .map(|(xform, _)| xform)
     }
 
-    pub(crate) fn view2d_face_stretch_preview(&self) -> Option<([Option<editing::StretchFace>; 2], IVec3)> {
+    pub(crate) fn view2d_face_stretch_preview(&self) -> Option<([Option<editing::StretchFace>; 2], IVec3)>
+    {
         let stretch = self.view2d_stretch.as_ref()?;
         Some((stretch.faces, self.view2d_stretch_delta))
     }
@@ -1084,19 +1094,19 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
 
                             //let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
                             let tw = text_width(ui, &delta_info);
-                            let ry = state.view2d_rect[1];
+                            //let ry = state.view2d_rect[1];
                             let text_h = text_height(ui, "1") + 2.0;
                             let d_info_pos = [b[0] - tw / 2.0, b[1] - text_h];
                             //let d_info_pos = [mid[0] - tw / 2.0, mid[1] - 18.0];
 
-                            let delta_info_col = util::adjust_color_brightness(util::imgui_color_to_u32(col), 2.0);
+                            let delta_info_col = util::imgui_color_to_u32(col);
 
-                            draw.add_line(a, b, delta_info_col)
+                            draw.add_line(a, b, util::adjust_color_brightness(delta_info_col, 1.5))
                                 .thickness(2.0)
                                 .build();
                             draw.add_text(
                                 d_info_pos,
-                                delta_info_col,
+                                util::adjust_color_brightness(delta_info_col, 2.0),
                                 delta_info,
                             );
                         }
@@ -1139,19 +1149,18 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                     let delta_info = format!("({}, {})", du, dv);
 
                                     let tw = text_width(ui, &delta_info);
-                                    let ry = state.view2d_rect[1];
-                                    let text_h = text_height(ui, "1") + 2.0;
+                                    //let ry = state.view2d_rect[1];
+                                    //let text_h = text_height(ui, "1") + 2.0;
                                     let d_info_pos = [b[0] - tw - 12.0, b[1] + 4.0];
 
-                                    let delta_info_col =
-                                        util::adjust_color_brightness(util::imgui_color_to_u32(col), 2.0);
+                                    let delta_info_col = util::imgui_color_to_u32(col);
 
-                                    draw.add_line(a, b, delta_info_col)
-                                        .thickness(2.0)
-                                        .build();
+                                    draw.add_line(a, b, util::adjust_color_brightness(delta_info_col, 1.5))
+                                    .thickness(2.0)
+                                    .build();
                                     draw.add_text(
                                         d_info_pos,
-                                        delta_info_col,
+                                        util::adjust_color_brightness(delta_info_col, 2.0),
                                         delta_info,
                                     );
                                 }
@@ -1317,139 +1326,6 @@ fn stretch_faces_from_start(axis: Ortho, aabb: &Aabb, start: IVec2) -> Vec<editi
     }
 
     out
-}
-
-fn project_aabb_to_2d(aabb: &Aabb, axis: Ortho) -> (IVec2, IVec2) {
-    match axis {
-        Ortho::XY => (
-            IVec2::new(aabb.min.x, aabb.min.y),
-            IVec2::new(aabb.max.x, aabb.max.y),
-        ),
-        Ortho::XZ => (
-            IVec2::new(aabb.min.x, -aabb.max.z),
-            IVec2::new(aabb.max.x, -aabb.min.z),
-        ),
-        Ortho::YZ => (
-            IVec2::new(aabb.min.y, -aabb.max.z),
-            IVec2::new(aabb.max.y, -aabb.min.z),
-        ),
-    }
-}
-
-fn div_ceil_i32(a: i32, b: i32) -> i32 {
-    debug_assert!(b > 0);
-    -((-a).div_euclid(b))
-}
-
-fn clamp_stretch_delta(
-    aabb: &Aabb,
-    faces: [Option<editing::StretchFace>; 2],
-    delta: IVec3,
-    grid_step: i32,
-) -> IVec3 {
-    let step = grid_step.abs().max(1);
-    let mut out = delta;
-
-    for face in faces.iter().flatten() {
-        match face {
-            editing::StretchFace::XMin => {
-                if out.x > 0 {
-                    let max_delta = (aabb.max.x - 1) - aabb.min.x;
-                    if out.x > max_delta {
-                        out.x = (max_delta.div_euclid(step) * step).max(0);
-                    }
-                }
-            }
-            editing::StretchFace::XMax => {
-                if out.x < 0 {
-                    let min_delta = (aabb.min.x + 1) - aabb.max.x;
-                    if out.x < min_delta {
-                        out.x = div_ceil_i32(min_delta, step) * step;
-                    }
-                }
-            }
-            editing::StretchFace::YMin => {
-                if out.y > 0 {
-                    let max_delta = (aabb.max.y - 1) - aabb.min.y;
-                    if out.y > max_delta {
-                        out.y = (max_delta.div_euclid(step) * step).max(0);
-                    }
-                }
-            }
-            editing::StretchFace::YMax => {
-                if out.y < 0 {
-                    let min_delta = (aabb.min.y + 1) - aabb.max.y;
-                    if out.y < min_delta {
-                        out.y = div_ceil_i32(min_delta, step) * step;
-                    }
-                }
-            }
-            editing::StretchFace::ZMin => {
-                if out.z > 0 {
-                    let max_delta = (aabb.max.z - 1) - aabb.min.z;
-                    if out.z > max_delta {
-                        out.z = (max_delta.div_euclid(step) * step).max(0);
-                    }
-                }
-            }
-            editing::StretchFace::ZMax => {
-                if out.z < 0 {
-                    let min_delta = (aabb.min.z + 1) - aabb.max.z;
-                    if out.z < min_delta {
-                        out.z = div_ceil_i32(min_delta, step) * step;
-                    }
-                }
-            }
-        }
-    }
-
-    out
-}
-
-fn stretch_handle_point_2d(
-    aabb: &Aabb,
-    axis: Ortho,
-    faces: [Option<editing::StretchFace>; 2],
-) -> Option<[f32; 2]> {
-    let (min2, max2) = project_aabb_to_2d(aabb, axis);
-
-    let mut u_side: Option<bool> = None; // false=min, true=max
-    let mut v_side: Option<bool> = None;
-
-    for face in faces.iter().flatten() {
-        match (axis, face) {
-            (Ortho::XY | Ortho::XZ, editing::StretchFace::XMin) => u_side = Some(false),
-            (Ortho::XY | Ortho::XZ, editing::StretchFace::XMax) => u_side = Some(true),
-            (Ortho::YZ, editing::StretchFace::YMin) => u_side = Some(false),
-            (Ortho::YZ, editing::StretchFace::YMax) => u_side = Some(true),
-
-            (Ortho::XY, editing::StretchFace::YMin) => v_side = Some(false),
-            (Ortho::XY, editing::StretchFace::YMax) => v_side = Some(true),
-
-            // In XZ/YZ, projected V is -Z: ZMax maps to min2.y, ZMin maps to max2.y.
-            (Ortho::XZ | Ortho::YZ, editing::StretchFace::ZMax) => v_side = Some(false),
-            (Ortho::XZ | Ortho::YZ, editing::StretchFace::ZMin) => v_side = Some(true),
-            _ => {}
-        }
-    }
-
-    let u = if let Some(max_side) = u_side {
-        if max_side { max2.x as f32 } else { min2.x as f32 }
-    } else {
-        (min2.x as f32 + max2.x as f32) * 0.5
-    };
-    let v = if let Some(max_side) = v_side {
-        if max_side { max2.y as f32 } else { min2.y as f32 }
-    } else {
-        (min2.y as f32 + max2.y as f32) * 0.5
-    };
-
-    Some([u, v])
-}
-
-fn normalize_depth(v: i32, fallback: i32) -> i32 {
-    let v = v.abs();
-    if v == 0 { fallback.max(1) } else { v }
 }
 
 fn update_last_work_from_aabb(state: &mut EditorState, aabb: &Aabb) {

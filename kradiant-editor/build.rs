@@ -4,7 +4,8 @@ use std::{
     path::Path,
 };
 
-fn icon_ident(s: &str) -> String {
+fn icon_ident(s: &str) -> String
+{
     let mut id = String::from("ICON_");
     for c in s.chars() {
         match c {
@@ -29,32 +30,8 @@ fn icon_ident(s: &str) -> String {
     out
 }
 
-fn theme_ident(s: &str) -> String {
-    let mut id = String::from("THEME_");
-    for c in s.chars() {
-        match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' => id.push(c.to_ascii_uppercase()),
-            _ => id.push('_'),
-        }
-    }
-    // collapse consecutive '_'
-    let mut out = String::new();
-    let mut prev_underscore = false;
-    for ch in id.chars() {
-        if ch == '_' {
-            if prev_underscore {
-                continue;
-            }
-            prev_underscore = true;
-        } else {
-            prev_underscore = false;
-        }
-        out.push(ch);
-    }
-    out
-}
-
-fn main() {
+fn main()
+{
     let icons_dir = Path::new("assets/icons");
     let themes_dir = Path::new("assets/themes");
     let out_dir = std::env::var("OUT_DIR").unwrap();

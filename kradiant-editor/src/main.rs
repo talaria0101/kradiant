@@ -339,7 +339,7 @@ impl AppState {
         let mut editor = ui::EditorState::default();
         editor.log_info(gl_info);
 
-        // Apply configured theme on startup.
+        // Apply configured theme on startup
         if !editor.themes.is_empty() {
             let idx = editor
                 .config
@@ -358,8 +358,7 @@ impl AppState {
                 .map(|e| &e.data),
         );
 
-        let view2d_imgui_tex =
-            renderer
+        let view2d_imgui_tex = renderer
                 .texture_map_mut()
                 .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
         editor.view2d_tex_id = Some(view2d_imgui_tex);
@@ -402,7 +401,6 @@ impl AppState {
         self.last_frame = now;
         self.imgui.io_mut().set_delta_time(delta);
 
-        // Dynamic title
         let new_title = if !self.editor.map_path.is_empty() {
             format!("{} — Kradiant Editor", &self.editor.map_path)
         } else {
@@ -525,8 +523,23 @@ impl AppState {
                 let axis = self.editor.ortho_axis;
 
                 // Draw grid under map lines.
-                let major_world = 64.0f32;
-                let minor_world = self.editor.config.grid_minor_step.max(1) as f32;
+                const MIN_MINOR_STEP_PX: f32 = 1.0;
+                const MIN_MAJOR_STEP_PX: f32 = 8.0;
+                const MAJOR_PROMOTE_FACTOR: f32 = 64.0;
+
+                let base_minor_world = self.editor.config.grid_minor_step.max(1) as f32;
+                let mut minor_world = base_minor_world;
+                let mut major_world = 64.0f32.max(minor_world);
+
+                // Promote major grid levels while it would draw "minor dense".
+                for _ in 0..16 {
+                    if major_world * zoom >= MIN_MAJOR_STEP_PX {
+                        break;
+                    }
+                    minor_world = major_world;
+                    major_world *= MAJOR_PROMOTE_FACTOR;
+                }
+
                 let major_step_px = major_world * zoom;
                 let minor_step_px = minor_world * zoom;
 
@@ -548,7 +561,7 @@ impl AppState {
                     self.gl.draw_arrays(glow::LINES, 0, verts.len() as i32);
                 };
 
-                if major_step_px >= 3.0 {
+                if major_step_px >= MIN_MINOR_STEP_PX {
                     // Major grid
                     self.view2d_grid_vertices.clear();
 
@@ -576,12 +589,16 @@ impl AppState {
                     );
                 }
 
-                if major_step_px >= 3.0 && minor_step_px >= 3.0 && (minor_world < major_world) {
+                if major_step_px >= MIN_MINOR_STEP_PX
+                    && minor_step_px >= MIN_MINOR_STEP_PX
+                    && (minor_world < major_world)
+                {
                     // Minor grid (skip where major grid will draw, when aligned)
                     self.view2d_grid_vertices.clear();
 
-                    let major_factor = if (major_world % minor_world).abs() < f32::EPSILON {
-                        Some((major_world / minor_world) as i32)
+                    let ratio = major_world / minor_world;
+                    let major_factor = if (ratio - ratio.round()).abs() < 1.0e-4 && ratio >= 1.0 {
+                        Some(ratio.round() as i32)
                     } else {
                         None
                     };
