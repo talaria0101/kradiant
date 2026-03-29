@@ -342,6 +342,16 @@ impl AppState {
             )
             .expect("register editor icon");
 
+        let img_mouse_rotate = EditorIcons::get_image(editor_icons::ICON_SELECT_MOUSEROTATE_DDS);
+        let id_mouse_rotate = renderer.register_texture(img_mouse_rotate.width, img_mouse_rotate.height, TextureFormat::RGBA32, &img_mouse_rotate.rgba8).expect("register editor icon");
+
+        let img_open = EditorIcons::get_image(editor_icons::ICON_FILE_OPEN_DDS);
+        let id_open = renderer.register_texture(img_open.width, img_open.height, TextureFormat::RGBA32, &img_open.rgba8).expect("register editor icon");
+
+
+        let img_save = EditorIcons::get_image(editor_icons::ICON_FILE_SAVE_DDS);
+        let id_save = renderer.register_texture(img_save.width, img_save.height, TextureFormat::RGBA32, &img_save.rgba8).expect("register editor icon");
+
         let mut editor = ui::EditorState::default();
         editor.log_info(gl_info);
 
@@ -370,7 +380,10 @@ impl AppState {
                 .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
         editor.view2d_tex_id = Some(view2d_imgui_tex);
         editor.images.splash = Some(id_splash_img);
+        editor.icons.open = Some(id_open);
+        editor.icons.save = Some(id_save);
         editor.icons.view_cycle = Some(id_icon_view_cycle);
+        editor.icons.mouse_rotate = Some(id_mouse_rotate);
 
         Self {
             window,
@@ -910,11 +923,17 @@ impl AppState {
                     let view_max_x = view_left.max(view_right);
                     let view_min_y = view_top.min(view_bottom);
                     let view_max_y = view_top.max(view_bottom);
+                    let view_dir = match axis {
+                        ui::Ortho::XY => glam::Vec3::new(0.0, 0.0, -1.0),
+                        ui::Ortho::XZ => glam::Vec3::new(0.0, -1.0, 0.0),
+                        ui::Ortho::YZ => glam::Vec3::new(-1.0, 0.0, 0.0),
+                    };
 
                     let preview_drag_mode = self.editor.view2d_drag_mode;
                     let preview_stretch_mode = self.editor.stretch_mode;
                     let preview_move_offset = self.editor.view2d_move_offset.as_vec3();
                     let preview_stretch = self.editor.view2d_stretch_preview_xform();
+                    let preview_rotate = self.editor.view2d_rotate_preview_xform();
                     let preview_face = self.editor.view2d_face_stretch_preview();
                     let preview_point = |p: Vec3| -> Vec3 {
                         match preview_drag_mode {
@@ -927,6 +946,9 @@ impl AppState {
                                 }
                             }
                             ui::DragMode::NewBrush => p,
+                            ui::DragMode::RotateSelection => {
+                                preview_rotate.map(|r| r.apply_point(p)).unwrap_or(p)
+                            }
                         }
                     };
 
@@ -948,6 +970,17 @@ impl AppState {
                                                     for (positions, _) in polys {
                                                         if positions.len() < 2 {
                                                             continue;
+                                                        }
+                                                        if positions.len() >= 3 {
+                                                            let n = (positions[1] - positions[0])
+                                                                .cross(positions[2] - positions[0]);
+                                                            let n_len = n.length();
+                                                            if n_len.is_finite() && n_len > 1e-6 {
+                                                                let dot = (n / n_len).dot(view_dir);
+                                                                if dot > 1e-4 {
+                                                                    continue;
+                                                                }
+                                                            }
                                                         }
                                                         for i in 0..positions.len() {
                                                             let a = positions[i];
@@ -981,6 +1014,19 @@ impl AppState {
                                             for (positions, _) in polys {
                                                 if positions.len() < 2 {
                                                     continue;
+                                                }
+                                                if positions.len() >= 3 {
+                                                    let p0 = preview_point(positions[0]);
+                                                    let p1 = preview_point(positions[1]);
+                                                    let p2 = preview_point(positions[2]);
+                                                    let n = (p1 - p0).cross(p2 - p0);
+                                                    let n_len = n.length();
+                                                    if n_len.is_finite() && n_len > 1e-6 {
+                                                        let dot = (n / n_len).dot(view_dir);
+                                                        if dot > 1e-4 {
+                                                            continue;
+                                                        }
+                                                    }
                                                 }
                                                 for i in 0..positions.len() {
                                                     let a = positions[i];
