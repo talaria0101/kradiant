@@ -1,5 +1,7 @@
 use dear_imgui_rs::Ui;
+use kradiant::editing::{self, Aabb};
 use kradiant::loader::map_loader;
+use num_traits::{Num, NumCast, ToPrimitive};
 use std::fs::create_dir_all;
 use std::io;
 use std::path::PathBuf;
@@ -18,8 +20,6 @@ pub(crate) fn get_config_dir() -> io::Result<PathBuf> {
     Ok(base)
 }
 
-// Helpers
-
 /// Measure text width via the imgui sys layer (calc_text_size is not on &Ui in 0.10).
 pub fn text_width(ui: &Ui, text: &str) -> f32 {
     let _ = ui; // keep signature symmetric with the rest
@@ -32,7 +32,7 @@ pub fn text_width(ui: &Ui, text: &str) -> f32 {
     }
 }
 
-/// Measure text width via the imgui sys layer (calc_text_size is not on &Ui in 0.10).
+/// Measure text height via the imgui sys layer (calc_text_size is not on &Ui in 0.10).
 pub fn text_height(ui: &Ui, text: &str) -> f32 {
     let _ = ui; // keep signature symmetric with the rest
     let c = std::ffi::CString::new(text).unwrap_or_default();
@@ -166,6 +166,12 @@ pub fn screen_to_world_ortho(
 }
 */
 
+pub fn new_map(state: &mut EditorState) {
+    state.map_path = String::new();
+    state.map = None;
+    editor_log_e!(state, info, "New map");
+}
+
 pub fn open_map(state: &mut EditorState) {
     let cwd = std::env::current_dir().unwrap();
     let p = rfd::FileDialog::new()
@@ -194,6 +200,30 @@ pub fn open_map(state: &mut EditorState) {
                     e.to_string()
                 );
             }
+        }
+    }
+}
+
+pub fn save_map_as(state: &mut EditorState) {
+    if state.map.is_none() {
+        editor_log_e!(state, info, "Not allowed to save empty map!");
+        return;
+    }
+
+    let cwd = std::env::current_dir().unwrap();
+    match rfd::FileDialog::new()
+        .set_title("Save map as")
+        .add_filter("CoD Map", &["map", "bak"])
+        .set_directory(cwd)
+        .save_file()
+    {
+        Some(p) => {
+            state.map_path = p.to_str().unwrap().to_string();
+            save_map(state);
+        }
+        None => {
+            editor_log_e!(state, info, "Save map cancelled by user");
+            return;
         }
     }
 }
@@ -236,6 +266,13 @@ pub fn save_map(state: &mut EditorState) {
     }
 
     let path_str = chosen_path.to_str().unwrap();
+    if let Some(map) = state.map.as_mut() {
+        let changed = kradiant::editing::orient_map_convex_brushes_inward(map);
+        if changed > 0 {
+            editor_log_e!(state, info, "Oriented {} brushes", changed);
+        }
+    }
+
     match map_loader::save_map(state.map.as_ref().unwrap(), path_str) {
         Ok(_) => editor_log_e!(state, info, "Saved map to {}", path_str),
         Err(e) => {
@@ -251,25 +288,39 @@ pub fn save_map(state: &mut EditorState) {
 }
 
 pub fn click_in_selection_aabb(state: &EditorState, pt: IVec2) -> bool {
+    if state.selected_brushes.is_empty() {
+        return false;
+    }
+    let Some(map) = &state.map else {
+        return false;
+    };
+
+    let mut min = IVec3::new(i32::MAX, i32::MAX, i32::MAX);
+    let mut max = IVec3::new(i32::MIN, i32::MIN, i32::MIN);
+    let mut any = false;
+
     for &(entity_idx, brush_idx) in &state.selected_brushes {
-        let Some(map) = &state.map else { continue };
         let Some(entity) = map.entities.get(entity_idx) else {
             continue;
         };
         let Some(brush) = entity.brushes.get(brush_idx) else {
             continue;
         };
-        let aabb = &brush.aabb;
-        let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
-            Ortho::XY => (aabb.min.x, aabb.max.x, aabb.min.y, aabb.max.y),
-            Ortho::XZ => (aabb.min.x, aabb.max.x, -aabb.max.z, -aabb.min.z),
-            Ortho::YZ => (aabb.min.y, aabb.max.y, -aabb.max.z, -aabb.min.z),
-        };
-        if pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y {
-            return true;
-        }
+        min = min.min(brush.aabb.min);
+        max = max.max(brush.aabb.max);
+        any = true;
     }
-    false
+    if !any {
+        return false;
+    }
+
+    let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
+        Ortho::XY => (min.x, max.x, min.y, max.y),
+        Ortho::XZ => (min.x, max.x, -max.z, -min.z),
+        Ortho::YZ => (min.y, max.y, -max.z, -min.z),
+    };
+
+    pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y
 }
 
 pub fn drag_delta_to_3d(d: IVec2, axis: Ortho) -> IVec3 {
@@ -277,5 +328,173 @@ pub fn drag_delta_to_3d(d: IVec2, axis: Ortho) -> IVec3 {
         Ortho::XY => IVec3::new(d.x, d.y, 0),
         Ortho::XZ => IVec3::new(d.x, 0, -d.y),
         Ortho::YZ => IVec3::new(0, d.x, -d.y),
+    }
+}
+
+pub fn div_ceil_i32(a: i32, b: i32) -> i32 {
+    debug_assert!(b > 0);
+    -((-a).div_euclid(b))
+}
+
+pub fn normalize_depth(v: i32, fallback: i32) -> i32 {
+    let v = v.abs();
+    if v == 0 { fallback.max(1) } else { v }
+}
+
+pub fn project_aabb_to_2d(aabb: &Aabb, axis: Ortho) -> (IVec2, IVec2) {
+    match axis {
+        Ortho::XY => (
+            IVec2::new(aabb.min.x, aabb.min.y),
+            IVec2::new(aabb.max.x, aabb.max.y),
+        ),
+        Ortho::XZ => (
+            IVec2::new(aabb.min.x, -aabb.max.z),
+            IVec2::new(aabb.max.x, -aabb.min.z),
+        ),
+        Ortho::YZ => (
+            IVec2::new(aabb.min.y, -aabb.max.z),
+            IVec2::new(aabb.max.y, -aabb.min.z),
+        ),
+    }
+}
+
+pub fn clamp_stretch_delta(
+    aabb: &Aabb,
+    faces: [Option<editing::StretchFace>; 2],
+    delta: IVec3,
+    grid_step: i32,
+) -> IVec3 {
+    let step = grid_step.abs().max(1);
+    let mut out = delta;
+
+    for face in faces.iter().flatten() {
+        match face {
+            editing::StretchFace::XMin => {
+                if out.x > 0 {
+                    let max_delta = (aabb.max.x - 1) - aabb.min.x;
+                    if out.x > max_delta {
+                        out.x = (max_delta.div_euclid(step) * step).max(0);
+                    }
+                }
+            }
+            editing::StretchFace::XMax => {
+                if out.x < 0 {
+                    let min_delta = (aabb.min.x + 1) - aabb.max.x;
+                    if out.x < min_delta {
+                        out.x = div_ceil_i32(min_delta, step) * step;
+                    }
+                }
+            }
+            editing::StretchFace::YMin => {
+                if out.y > 0 {
+                    let max_delta = (aabb.max.y - 1) - aabb.min.y;
+                    if out.y > max_delta {
+                        out.y = (max_delta.div_euclid(step) * step).max(0);
+                    }
+                }
+            }
+            editing::StretchFace::YMax => {
+                if out.y < 0 {
+                    let min_delta = (aabb.min.y + 1) - aabb.max.y;
+                    if out.y < min_delta {
+                        out.y = div_ceil_i32(min_delta, step) * step;
+                    }
+                }
+            }
+            editing::StretchFace::ZMin => {
+                if out.z > 0 {
+                    let max_delta = (aabb.max.z - 1) - aabb.min.z;
+                    if out.z > max_delta {
+                        out.z = (max_delta.div_euclid(step) * step).max(0);
+                    }
+                }
+            }
+            editing::StretchFace::ZMax => {
+                if out.z < 0 {
+                    let min_delta = (aabb.min.z + 1) - aabb.max.z;
+                    if out.z < min_delta {
+                        out.z = div_ceil_i32(min_delta, step) * step;
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+pub fn stretch_handle_point_2d(
+    aabb: &Aabb,
+    axis: Ortho,
+    faces: [Option<editing::StretchFace>; 2],
+) -> Option<[f32; 2]> {
+    let (min2, max2) = project_aabb_to_2d(aabb, axis);
+
+    let mut u_side: Option<bool> = None; // false=min, true=max
+    let mut v_side: Option<bool> = None;
+
+    for face in faces.iter().flatten() {
+        match (axis, face) {
+            (Ortho::XY | Ortho::XZ, editing::StretchFace::XMin) => u_side = Some(false),
+            (Ortho::XY | Ortho::XZ, editing::StretchFace::XMax) => u_side = Some(true),
+            (Ortho::YZ, editing::StretchFace::YMin) => u_side = Some(false),
+            (Ortho::YZ, editing::StretchFace::YMax) => u_side = Some(true),
+
+            (Ortho::XY, editing::StretchFace::YMin) => v_side = Some(false),
+            (Ortho::XY, editing::StretchFace::YMax) => v_side = Some(true),
+
+            // In XZ/YZ, projected V is -Z: ZMax maps to min2.y, ZMin maps to max2.y.
+            (Ortho::XZ | Ortho::YZ, editing::StretchFace::ZMax) => v_side = Some(false),
+            (Ortho::XZ | Ortho::YZ, editing::StretchFace::ZMin) => v_side = Some(true),
+            _ => {}
+        }
+    }
+
+    let u = if let Some(max_side) = u_side {
+        if max_side {
+            max2.x as f32
+        } else {
+            min2.x as f32
+        }
+    } else {
+        (min2.x as f32 + max2.x as f32) * 0.5
+    };
+    let v = if let Some(max_side) = v_side {
+        if max_side {
+            max2.y as f32
+        } else {
+            min2.y as f32
+        }
+    } else {
+        (min2.y as f32 + max2.y as f32) * 0.5
+    };
+
+    Some([u, v])
+}
+
+pub fn num_from_str<T: std::str::FromStr + std::default::Default + Num>(s: &str) -> T
+where
+    <T as std::str::FromStr>::Err: std::fmt::Display,
+{
+    match s.parse::<T>() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to parse string for numeric value: {}", e);
+            T::default()
+        }
+    }
+}
+
+pub fn to_num<T, U>(n: U) -> T
+where
+    T: NumCast + Default,
+    U: ToPrimitive,
+{
+    match NumCast::from(n) {
+        Some(r) => r,
+        None => {
+            eprintln!("Failed to cast numeric value to desired type");
+            T::default()
+        }
     }
 }

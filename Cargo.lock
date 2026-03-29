@@ -875,6 +875,7 @@ dependencies = [
  "glutin",
  "glutin-winit",
  "kradiant",
+ "num-traits",
  "raw-window-handle",
  "rfd",
  "rust-ini",

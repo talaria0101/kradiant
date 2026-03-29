@@ -697,7 +697,7 @@ pub fn save_map(map: &Map, path: &str) -> Result<(), ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::Vec3;
+    use glam::{IVec3, Vec3};
 
     const SIMPLE_BOX_MAP: &str = include_str!("../test/simple_box.map");
 
@@ -829,5 +829,24 @@ common/caulk
             eprintln!("{}", res.as_ref().unwrap_err());
         }*/
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn aabb_is_stable_for_grid_aligned_brushes() {
+        // This map is authored with integer plane points; due to float intersection epsilon,
+        // tessellated vertices can land at e.g. `88.00001`, which must not inflate the integer AABB.
+        let map = include_str!("../test/kradiant_map.map");
+        let mut map = parse_map_string(map).unwrap();
+
+        let world = &mut map.entities[0];
+        let brush = &mut world.brushes[0];
+        let (aabb, _polys) = brush.get_polygons_and_aabb().expect("tessellate brush");
+
+        assert_eq!(aabb.min, IVec3::new(16, -76, 0));
+        assert_eq!(aabb.max, IVec3::new(68, 0, 128));
+
+        assert_eq!(aabb.max.x - aabb.min.x, 52);
+        assert_eq!(aabb.max.y - aabb.min.y, 76);
+        assert_eq!(aabb.max.z - aabb.min.z, 128);
     }
 }
