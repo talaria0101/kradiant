@@ -184,9 +184,24 @@ pub fn apply_affine_scale_to_brush(
         }
     }
 
-    let (min_x, max_x) = transform_interval(old_aabb.min.x, old_aabb.max.x, xform.anchor.x, xform.scale.x);
-    let (min_y, max_y) = transform_interval(old_aabb.min.y, old_aabb.max.y, xform.anchor.y, xform.scale.y);
-    let (min_z, max_z) = transform_interval(old_aabb.min.z, old_aabb.max.z, xform.anchor.z, xform.scale.z);
+    let (min_x, max_x) = transform_interval(
+        old_aabb.min.x,
+        old_aabb.max.x,
+        xform.anchor.x,
+        xform.scale.x,
+    );
+    let (min_y, max_y) = transform_interval(
+        old_aabb.min.y,
+        old_aabb.max.y,
+        xform.anchor.y,
+        xform.scale.y,
+    );
+    let (min_z, max_z) = transform_interval(
+        old_aabb.min.z,
+        old_aabb.max.z,
+        xform.anchor.z,
+        xform.scale.z,
+    );
     brush.aabb.min = IVec3::new(min_x, min_y, min_z);
     brush.aabb.max = IVec3::new(max_x, max_y, max_z);
 
@@ -487,8 +502,16 @@ pub fn aabb_from_polys(polys: &[(Vec<Vec3>, Vec<u32>)]) -> Aabb {
     }
 
     Aabb {
-        min: IVec3::new(aabb_floor_eps(min.x), aabb_floor_eps(min.y), aabb_floor_eps(min.z)),
-        max: IVec3::new(aabb_ceil_eps(max.x), aabb_ceil_eps(max.y), aabb_ceil_eps(max.z)),
+        min: IVec3::new(
+            aabb_floor_eps(min.x),
+            aabb_floor_eps(min.y),
+            aabb_floor_eps(min.z),
+        ),
+        max: IVec3::new(
+            aabb_ceil_eps(max.x),
+            aabb_ceil_eps(max.y),
+            aabb_ceil_eps(max.z),
+        ),
     }
 }
 
@@ -502,8 +525,16 @@ pub fn aabb_from_positions(positions: &[Vec3]) -> Aabb {
     }
 
     Aabb {
-        min: IVec3::new(aabb_floor_eps(min.x), aabb_floor_eps(min.y), aabb_floor_eps(min.z)),
-        max: IVec3::new(aabb_ceil_eps(max.x), aabb_ceil_eps(max.y), aabb_ceil_eps(max.z)),
+        min: IVec3::new(
+            aabb_floor_eps(min.x),
+            aabb_floor_eps(min.y),
+            aabb_floor_eps(min.z),
+        ),
+        max: IVec3::new(
+            aabb_ceil_eps(max.x),
+            aabb_ceil_eps(max.y),
+            aabb_ceil_eps(max.z),
+        ),
     }
 }
 

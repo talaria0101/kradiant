@@ -12,7 +12,10 @@ use kradiant::map::BrushId;
 //use kradiant::loader::texture_loader;
 use crate::icons::EditorIcons;
 use crate::theme::{EditorPalette, ThemeEntry, theme_from_str};
-use util::{pack_abgr, screen_to_world, snap, text_width, normalize_depth, clamp_stretch_delta, project_aabb_to_2d, stretch_handle_point_2d};
+use util::{
+    clamp_stretch_delta, normalize_depth, pack_abgr, project_aabb_to_2d, screen_to_world, snap,
+    stretch_handle_point_2d, text_width,
+};
 
 // State types
 
@@ -25,8 +28,7 @@ pub enum Ortho {
 }
 
 impl Ortho {
-    fn label(self) -> &'static str
-    {
+    fn label(self) -> &'static str {
         match self {
             Ortho::XY => "XY (top)",
             Ortho::XZ => "XZ (front)",
@@ -34,8 +36,7 @@ impl Ortho {
         }
     }
 
-    fn next(self) -> Self
-    {
+    fn next(self) -> Self {
         match self {
             Self::XY => Self::XZ,
             Self::XZ => Self::YZ,
@@ -83,8 +84,7 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    fn prefix(self) -> &'static str
-    {
+    fn prefix(self) -> &'static str {
         match self {
             LogLevel::Info => "   ",
             LogLevel::Warn => "[W]",
@@ -157,8 +157,7 @@ macro_rules! editor_log_e {
 }
 
 impl Default for EditorState {
-    fn default() -> Self
-    {
+    fn default() -> Self {
         let themes: Vec<ThemeEntry> = EDITOR_THEMES
             .iter()
             .map(|theme_decl| {
@@ -225,8 +224,7 @@ impl Default for EditorState {
 }
 
 impl EditorState {
-    pub fn log_info(&mut self, msg: impl Into<String>)
-    {
+    pub fn log_info(&mut self, msg: impl Into<String>) {
         let string: String = msg.into();
         println!("{}", &string);
         self.log.push(LogEntry {
@@ -235,8 +233,7 @@ impl EditorState {
         });
         self.console_scroll = true;
     }
-    pub fn log_warn(&mut self, msg: impl Into<String>)
-    {
+    pub fn log_warn(&mut self, msg: impl Into<String>) {
         let string: String = msg.into();
         println!("{}", &string);
         self.log.push(LogEntry {
@@ -245,8 +242,7 @@ impl EditorState {
         });
         self.console_scroll = true;
     }
-    pub fn log_error(&mut self, msg: impl Into<String>)
-    {
+    pub fn log_error(&mut self, msg: impl Into<String>) {
         let string: String = msg.into();
         eprintln!("{}", &string);
         self.log.push(LogEntry {
@@ -255,30 +251,29 @@ impl EditorState {
         });
         self.console_scroll = true;
     }
-/*
-    pub(crate) fn view2d_preview_point(&self, p: Vec3) -> Vec3
-    {
-        match self.view2d_drag_mode {
-            DragMode::MoveSelection => p + self.view2d_move_offset.as_vec3(),
-            DragMode::StretchSelection => {
-                let Some(stretch) = self.view2d_stretch.as_ref() else {
-                    return p;
-                };
-                let Some((xform, _preview)) = editing::stretch_selection_transform(
-                    &stretch.selection_aabb,
-                    stretch.faces,
-                    self.view2d_stretch_delta,
-                ) else {
-                    return p;
-                };
-                xform.apply_point(p)
+    /*
+        pub(crate) fn view2d_preview_point(&self, p: Vec3) -> Vec3
+        {
+            match self.view2d_drag_mode {
+                DragMode::MoveSelection => p + self.view2d_move_offset.as_vec3(),
+                DragMode::StretchSelection => {
+                    let Some(stretch) = self.view2d_stretch.as_ref() else {
+                        return p;
+                    };
+                    let Some((xform, _preview)) = editing::stretch_selection_transform(
+                        &stretch.selection_aabb,
+                        stretch.faces,
+                        self.view2d_stretch_delta,
+                    ) else {
+                        return p;
+                    };
+                    xform.apply_point(p)
+                }
+                DragMode::NewBrush => p,
             }
-            DragMode::NewBrush => p,
         }
-    }
-*/
-    pub(crate) fn view2d_stretch_preview_xform(&self) -> Option<editing::AffineScale>
-    {
+    */
+    pub(crate) fn view2d_stretch_preview_xform(&self) -> Option<editing::AffineScale> {
         let stretch = self.view2d_stretch.as_ref()?;
         editing::stretch_selection_transform(
             &stretch.selection_aabb,
@@ -288,8 +283,9 @@ impl EditorState {
         .map(|(xform, _)| xform)
     }
 
-    pub(crate) fn view2d_face_stretch_preview(&self) -> Option<([Option<editing::StretchFace>; 2], IVec3)>
-    {
+    pub(crate) fn view2d_face_stretch_preview(
+        &self,
+    ) -> Option<([Option<editing::StretchFace>; 2], IVec3)> {
         let stretch = self.view2d_stretch.as_ref()?;
         Some((stretch.faces, self.view2d_stretch_delta))
     }
@@ -425,11 +421,18 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
     // begin_main_menu_bar returns Option<MainMenuBarToken>; the bar is active while token lives.
     if let Some(_bar) = ui.begin_main_menu_bar() {
         ui.menu("File", || {
-            if ui.menu_item("Open map…") {
+            if ui.menu_item_with_shortcut("New", "Ctrl + N") {
+                util::new_map(state);
+            }
+            ui.separator();
+            if ui.menu_item_with_shortcut("Open…", "Ctrl + O") {
                 util::open_map(state);
             }
-            if ui.menu_item("Save map") {
+            if ui.menu_item_with_shortcut("Save", "Ctrl + S") {
                 util::save_map(state);
+            }
+            if ui.menu_item_with_shortcut("Save as…", "Ctrl + Shift + S") {
+                util::save_map_as(state);
             }
             ui.separator();
             if ui.menu_item("Quit") {
@@ -443,22 +446,58 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                 demo = !demo;
             }
             state.show_demo = demo;
+
+            ui.menu("Grid", || {
+                let grid_steps = ["1", "2", "4", "8", "16", "32", "64", "128"];
+
+                for (i, step) in grid_steps.iter().enumerate() {
+                    let step_u8: u8 = step.parse().unwrap();
+                    let mut selected = state.config.grid_minor_step == step_u8;
+                    let active = !selected;
+                    if ui.menu_item_toggle_with_shortcut(
+                        step,
+                        (i + 1).to_string(),
+                        &mut selected,
+                        active,
+                    ) {
+                        //state.config.grid_minor_step = step_u8;
+                        EditorConfig::update(state, "grid_minor_step", step_u8);
+                    }
+                }
+            });
         });
 
         ui.menu("Misc", || {
-            ui.text_disabled("Theme");
-            ui.separator();
-            for (i, entry) in state.themes.iter().enumerate() {
-                //let active = state.config.active_theme == i;
-                if ui.menu_item(&entry.name) {
-                    state.pending_theme = Some(i);
+            ui.menu("Theme", || {
+                for (i, entry) in state.themes.iter().enumerate() {
+                    let mut selected = state.config.active_theme == i;
+                    let active = !selected;
+                    if ui.menu_item_toggle_no_shortcut(&entry.name, &mut selected, active) {
+                        state.pending_theme = Some(i);
+                    }
                 }
-            }
+            });
         });
 
         ui.menu("Help", || {
             if ui.menu_item("About kradiant") { /* TODO */ }
         });
+    }
+
+    if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) && ui.is_key_pressed(dear_imgui_rs::Key::N) {
+        util::new_map(state);
+    }
+    if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) && ui.is_key_pressed(dear_imgui_rs::Key::O) {
+        util::open_map(state);
+    }
+    if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) && ui.is_key_pressed(dear_imgui_rs::Key::S) {
+        util::save_map(state);
+    }
+    if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl)
+        && ui.is_key_down(dear_imgui_rs::Key::LeftShift)
+        && ui.is_key_pressed(dear_imgui_rs::Key::S)
+    {
+        util::save_map_as(state);
     }
 }
 
@@ -1044,6 +1083,33 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                     util::imgui_color_to_u32(state.palette.hud_text_dim),
                     format!("{:.2} FPS (average)", ui.io().framerate()),
                 );
+
+                if ui.is_window_hovered() {
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Key1) {
+                        EditorConfig::update(state, "grid_minor_step", 1);
+                    }
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Key2) {
+                        EditorConfig::update(state, "grid_minor_step", 2);
+                    }
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Key3) {
+                        EditorConfig::update(state, "grid_minor_step", 4);
+                    }
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Key4) {
+                        EditorConfig::update(state, "grid_minor_step", 8);
+                    }
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Key5) {
+                        EditorConfig::update(state, "grid_minor_step", 16);
+                    }
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Key6) {
+                        EditorConfig::update(state, "grid_minor_step", 32);
+                    }
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Key7) {
+                        EditorConfig::update(state, "grid_minor_step", 64);
+                    }
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Key8) {
+                        EditorConfig::update(state, "grid_minor_step", 128);
+                    }
+                }
 
                 if let Some((pos, col)) = snapped_marker {
                     draw.add_circle(pos, 4.0, col).filled(true).build();

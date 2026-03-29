@@ -22,4 +22,5 @@ rust-ini = { version = "0.21.3", features = ["inline-comment"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
 toml = "1.0.7"
 serde = { version = "1.0.228", features = ["derive"] }
+num-traits = "0.2.19"
 #image = { version = "0.25.10", features = ["dds"], default-features = false }

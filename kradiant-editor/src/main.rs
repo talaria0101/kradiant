@@ -347,7 +347,7 @@ impl AppState {
                 .min(editor.themes.len().saturating_sub(1));
             if let Some(entry) = editor.themes.get(idx) {
                 theme::apply_theme(&mut imgui, &entry.data);
-                editor.config.active_theme = idx;
+                EditorConfig::update(&mut editor, "active_theme", idx);
             }
         }
         editor.palette = theme::palette_from_theme(
@@ -358,7 +358,8 @@ impl AppState {
                 .map(|e| &e.data),
         );
 
-        let view2d_imgui_tex = renderer
+        let view2d_imgui_tex =
+            renderer
                 .texture_map_mut()
                 .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
         editor.view2d_tex_id = Some(view2d_imgui_tex);
@@ -414,7 +415,7 @@ impl AppState {
         if let Some(idx) = self.editor.pending_theme.take() {
             if let Some(entry) = self.editor.themes.get(idx) {
                 theme::apply_theme(&mut self.imgui, &entry.data);
-                self.editor.config.active_theme = idx;
+                EditorConfig::update(&mut self.editor, "active_theme", idx);
             }
         }
 
@@ -968,7 +969,8 @@ impl AppState {
                                             }
                                         }
 
-                                        if let Some((_aabb, polys)) = brush.get_polygons_and_aabb() {
+                                        if let Some((_aabb, polys)) = brush.get_polygons_and_aabb()
+                                        {
                                             for (positions, _) in polys {
                                                 if positions.len() < 2 {
                                                     continue;
@@ -1001,74 +1003,74 @@ impl AppState {
                                             }
                                         }
                                     } else if let BrushContent::Patch(patch) = &mut brush.content {
-                                            let Some((mesh, patch_aabb, edges)) =
-                                                patch.get_mesh_aabb_wire()
-                                            else {
-                                                continue;
-                                            };
-                                            brush.aabb = patch_aabb.clone();
+                                        let Some((mesh, patch_aabb, edges)) =
+                                            patch.get_mesh_aabb_wire()
+                                        else {
+                                            continue;
+                                        };
+                                        brush.aabb = patch_aabb.clone();
 
-                                            let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
-                                                ui::Ortho::XY => (
-                                                    patch_aabb.min.x as f32,
-                                                    patch_aabb.max.x as f32,
-                                                    patch_aabb.min.y as f32,
-                                                    patch_aabb.max.y as f32,
-                                                ),
-                                                ui::Ortho::XZ => (
-                                                    patch_aabb.min.x as f32,
-                                                    patch_aabb.max.x as f32,
-                                                    -(patch_aabb.max.z as f32),
-                                                    -(patch_aabb.min.z as f32),
-                                                ),
-                                                ui::Ortho::YZ => (
-                                                    patch_aabb.min.y as f32,
-                                                    patch_aabb.max.y as f32,
-                                                    -(patch_aabb.max.z as f32),
-                                                    -(patch_aabb.min.z as f32),
-                                                ),
-                                            };
-                                            if a_max_x < view_min_x
-                                                || a_min_x > view_max_x
-                                                || a_max_y < view_min_y
-                                                || a_min_y > view_max_y
+                                        let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
+                                            ui::Ortho::XY => (
+                                                patch_aabb.min.x as f32,
+                                                patch_aabb.max.x as f32,
+                                                patch_aabb.min.y as f32,
+                                                patch_aabb.max.y as f32,
+                                            ),
+                                            ui::Ortho::XZ => (
+                                                patch_aabb.min.x as f32,
+                                                patch_aabb.max.x as f32,
+                                                -(patch_aabb.max.z as f32),
+                                                -(patch_aabb.min.z as f32),
+                                            ),
+                                            ui::Ortho::YZ => (
+                                                patch_aabb.min.y as f32,
+                                                patch_aabb.max.y as f32,
+                                                -(patch_aabb.max.z as f32),
+                                                -(patch_aabb.min.z as f32),
+                                            ),
+                                        };
+                                        if a_max_x < view_min_x
+                                            || a_min_x > view_max_x
+                                            || a_max_y < view_min_y
+                                            || a_min_y > view_max_y
+                                        {
+                                            continue;
+                                        }
+
+                                        let positions = mesh.positions.as_slice();
+                                        for &(a, b) in edges {
+                                            let ia = a as usize;
+                                            let ib = b as usize;
+                                            if ia >= positions.len() || ib >= positions.len() {
+                                                continue;
+                                            }
+                                            let pa = util::project_to_2d(
+                                                preview_point(positions[ia]),
+                                                axis,
+                                            );
+                                            let pb = util::project_to_2d(
+                                                preview_point(positions[ib]),
+                                                axis,
+                                            );
+
+                                            let seg_min_x = pa[0].min(pb[0]);
+                                            let seg_max_x = pa[0].max(pb[0]);
+                                            let seg_min_y = pa[1].min(pb[1]);
+                                            let seg_max_y = pa[1].max(pb[1]);
+                                            if seg_max_x < view_min_x
+                                                || seg_min_x > view_max_x
+                                                || seg_max_y < view_min_y
+                                                || seg_min_y > view_max_y
                                             {
                                                 continue;
                                             }
 
-                                            let positions = mesh.positions.as_slice();
-                                            for &(a, b) in edges {
-                                                let ia = a as usize;
-                                                let ib = b as usize;
-                                                if ia >= positions.len() || ib >= positions.len() {
-                                                    continue;
-                                                }
-                                                let pa = util::project_to_2d(
-                                                    preview_point(positions[ia]),
-                                                    axis,
-                                                );
-                                                let pb = util::project_to_2d(
-                                                    preview_point(positions[ib]),
-                                                    axis,
-                                                );
-
-                                                let seg_min_x = pa[0].min(pb[0]);
-                                                let seg_max_x = pa[0].max(pb[0]);
-                                                let seg_min_y = pa[1].min(pb[1]);
-                                                let seg_max_y = pa[1].max(pb[1]);
-                                                if seg_max_x < view_min_x
-                                                    || seg_min_x > view_max_x
-                                                    || seg_max_y < view_min_y
-                                                    || seg_min_y > view_max_y
-                                                {
-                                                    continue;
-                                                }
-
-                                                self.view2d_selected_vertices
-                                                    .push(Vec3::new(pa[0], pa[1], 0.0));
-                                                self.view2d_selected_vertices
-                                                    .push(Vec3::new(pb[0], pb[1], 0.0));
-                                            }
+                                            self.view2d_selected_vertices
+                                                .push(Vec3::new(pa[0], pa[1], 0.0));
+                                            self.view2d_selected_vertices
+                                                .push(Vec3::new(pb[0], pb[1], 0.0));
+                                        }
                                     }
                                 }
                             }

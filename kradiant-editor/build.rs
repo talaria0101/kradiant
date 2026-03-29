@@ -4,8 +4,7 @@ use std::{
     path::Path,
 };
 
-fn icon_ident(s: &str) -> String
-{
+fn icon_ident(s: &str) -> String {
     let mut id = String::from("ICON_");
     for c in s.chars() {
         match c {
@@ -30,8 +29,7 @@ fn icon_ident(s: &str) -> String
     out
 }
 
-fn main()
-{
+fn main() {
     let icons_dir = Path::new("assets/icons");
     let themes_dir = Path::new("assets/themes");
     let out_dir = std::env::var("OUT_DIR").unwrap();

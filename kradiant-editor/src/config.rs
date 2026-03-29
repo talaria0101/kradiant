@@ -1,5 +1,6 @@
-use crate::util;
+use crate::{ui::EditorState, util};
 use ini::Ini;
+use num_traits::NumCast;
 
 #[derive(Clone)]
 pub struct EditorConfig {
@@ -30,6 +31,72 @@ impl EditorConfig {
                 cfg_file.display(),
                 e.to_string()
             ),
+        }
+    }
+
+    pub fn update_str(state: &mut EditorState, key: &str, value: &str) {
+        match key {
+            "grid_minor_step" => {
+                state.config.grid_minor_step = util::num_from_str(value);
+                editor_log_e!(
+                    state,
+                    info,
+                    "Set grid step to {}",
+                    state.config.grid_minor_step
+                );
+            }
+            "view3d_fov" => {
+                state.config.view3d_fov = util::num_from_str(value);
+                editor_log_e!(
+                    state,
+                    info,
+                    "Set 3d view fov to {}",
+                    state.config.view3d_fov
+                );
+            }
+            "active_theme" => {
+                state.config.active_theme = util::num_from_str(value);
+                editor_log_e!(
+                    state,
+                    info,
+                    "Set active theme index to {}",
+                    state.config.active_theme
+                );
+            }
+            _ => (),
+        }
+    }
+
+    pub fn update(state: &mut EditorState, key: &str, value: impl NumCast) {
+        match key {
+            "grid_minor_step" => {
+                state.config.grid_minor_step = util::to_num(value);
+                editor_log_e!(
+                    state,
+                    info,
+                    "Set grid step to {}",
+                    state.config.grid_minor_step
+                );
+            }
+            "view3d_fov" => {
+                state.config.view3d_fov = util::to_num(value);
+                editor_log_e!(
+                    state,
+                    info,
+                    "Set 3d view fov to {}",
+                    state.config.view3d_fov
+                );
+            }
+            "active_theme" => {
+                state.config.active_theme = util::to_num(value);
+                editor_log_e!(
+                    state,
+                    info,
+                    "Set active theme index to {}",
+                    state.config.active_theme
+                );
+            }
+            _ => (),
         }
     }
 }
