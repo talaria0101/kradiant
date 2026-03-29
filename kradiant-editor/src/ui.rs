@@ -5,12 +5,13 @@ use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 
 use crate::config::EditorConfig;
 use crate::util::{project_to_2d, text_height};
-use crate::{EDITOR_THEMES, util};
+use crate::{EDITOR_THEMES, editor_icons, util};
 use glam::{IVec2, IVec3, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::BrushId;
 //use kradiant::loader::texture_loader;
 use crate::icons::EditorIcons;
+use crate::images::EditorImages;
 use crate::theme::{EditorPalette, ThemeEntry, theme_from_str};
 use util::{
     clamp_stretch_delta, normalize_depth, pack_abgr, project_aabb_to_2d, screen_to_world, snap,
@@ -96,6 +97,7 @@ impl LogLevel {
 pub struct EditorState {
     pub config: EditorConfig,
     pub show_demo: bool,
+    pub show_about: bool,
     pub map_path: String,
     pub ortho_axis: Ortho,
     pub work_pos: IVec3,
@@ -127,6 +129,7 @@ pub struct EditorState {
     pub new_prop_key: String,
     pub new_prop_val: String,
     pub icons: EditorIcons,
+    pub images: EditorImages,
     pub themes: Vec<ThemeEntry>,
     pub pending_theme: Option<usize>,
     pub palette: EditorPalette,
@@ -172,6 +175,7 @@ impl Default for EditorState {
         let mut s = Self {
             config: EditorConfig::default(),
             show_demo: false,
+            show_about: false,
             map_path: String::new(),
             ortho_axis: Ortho::default(),
             work_pos: IVec3::new(0, 0, 0),
@@ -202,6 +206,7 @@ impl Default for EditorState {
             new_prop_key: String::new(),
             new_prop_val: String::new(),
             icons: EditorIcons::default(),
+            images: EditorImages::default(),
             themes,
             pending_theme: None,
             palette: EditorPalette::default(),
@@ -306,6 +311,27 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
     if state.show_demo {
         ui.show_demo_window(&mut state.show_demo);
     }
+
+    // About dialog
+    if state.show_about && !ui.is_popup_open("About Kradiant") {
+        ui.open_popup("About Kradiant");
+    }
+
+    if let Some(_popup) = ui
+        .begin_modal_popup_config("About Kradiant")
+        .opened(&mut state.show_about)
+        .flags(WindowFlags::ALWAYS_AUTO_RESIZE | WindowFlags::NO_COLLAPSE)
+        .begin()
+    {
+        // image
+        let logo_w = 256.0;
+        util::center_next(ui, logo_w);
+        if let Some(logo_tid) = state.images.splash {
+            ui.image(logo_tid, [logo_w, 64.0]);
+        }
+        draw_about_dialog(ui);
+    }
+
 }
 
 // Dockspace
@@ -480,7 +506,9 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
         });
 
         ui.menu("Help", || {
-            if ui.menu_item("About kradiant") { /* TODO */ }
+            if ui.menu_item("About Kradiant") {
+                state.show_about = true;
+            }
         });
     }
 
@@ -1706,4 +1734,73 @@ fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
             ui.same_line_with_spacing(0.0, 4.0);
         }
     }
+}
+
+fn draw_about_dialog(ui: &Ui)
+{
+    // title line — measure combined width first
+    let title = "Kradiant Editor";
+    let version = format!("v{}", crate::EDITOR_VERSION);
+    let title_w = text_width(ui, title);
+    let ver_w = text_width(ui, &version);
+    let spacing = ui.clone_style().item_spacing()[0];
+    util::center_next(ui, title_w + spacing + ver_w);
+    ui.text_colored([0.95, 0.85, 0.3, 1.0], title);
+    ui.same_line();
+    ui.text_colored([0.6, 0.6, 0.6, 1.0], &version);
+
+    // body text
+    let body = "A modern map editor for CoD written in Rust";
+    util::center_next(ui, text_width(ui, body));
+    ui.text(body);
+
+    ui.spacing();
+    ui.separator();
+    ui.spacing();
+
+    let pb = "Powered by:";
+    util::center_next(ui, text_width(ui, pb));
+    ui.text(pb);
+    let libs_ver = format!(
+        "Dear ImGui v{}\nKradiant Library v{}",
+        dear_imgui_rs::dear_imgui_version(),
+                           kradiant::KRADIANT_VERSION
+    );
+    util::center_next(ui, text_width(ui, &libs_ver));
+    ui.text_colored([0.8, 0.8, 0.8, 1.0], libs_ver);
+
+    ui.spacing();
+    ui.separator();
+    ui.spacing();
+
+    let dn = "Donate";
+    let gl = "GitLab";
+    let sep = "|";
+    let links_w = text_width(ui, dn) + text_width(ui, gl) + text_width(ui, sep) + 16.0;
+    util::center_next(ui, links_w);
+    ui.text_link_open_url(dn, "https://kazam.pages.dev/donate.html");
+    ui.same_line();
+    ui.text(sep);
+    ui.same_line();
+    ui.text_link_open_url(gl, "https://gitlab.com/kazam0180/kradiant");
+
+    ui.spacing();
+    ui.separator();
+    ui.spacing();
+
+    let cr1 = "© 2025 Kazam";
+    util::center_next(ui, text_width(ui, cr1));
+    ui.text_disabled(cr1);
+
+    let cr2 = "This program comes with";
+    util::center_next(ui, text_width(ui, cr2));
+    ui.text_disabled(cr2);
+
+    let cr3 = "absolutely no warranty.";
+    util::center_next(ui, text_width(ui, cr3));
+    ui.text_disabled(cr3);
+
+    let lic = "GNU GPLv3";
+    util::center_next(ui, text_width(ui, lic));
+    ui.text_link_open_url(lic, "https://gitlab.com/kazam0180/kradiant/-/blob/main/LICENSE");
 }

@@ -498,3 +498,12 @@ where
         }
     }
 }
+
+/// Center the next widget horizontally within the available width.
+pub fn center_next(ui: &Ui, item_width: f32) {
+    let avail = ui.content_region_avail()[0];
+    let offset = (avail - item_width) * 0.5;
+    if offset > 0.0 {
+        ui.set_cursor_pos([ui.cursor_pos()[0] + offset, ui.cursor_pos()[1]]);
+    }
+}

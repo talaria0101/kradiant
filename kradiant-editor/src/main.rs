@@ -1,6 +1,9 @@
 include!(concat!(env!("OUT_DIR"), "/generated_icons.rs"));
+include!(concat!(env!("OUT_DIR"), "/generated_images.rs"));
 include!(concat!(env!("OUT_DIR"), "/generated_themes.rs"));
 //use editor_icons;
+
+pub const EDITOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use std::num::NonZeroU32;
 use std::time::Instant;
@@ -26,11 +29,13 @@ use winit::window::{Window, WindowId};
 
 use crate::config::EditorConfig;
 use crate::icons::EditorIcons;
+use crate::images::EditorImages;
 
 #[macro_use]
 mod ui;
 mod config;
 mod icons;
+mod images;
 mod theme;
 mod util;
 
@@ -119,8 +124,7 @@ impl AppState {
 
         let window = window.expect("window creation failed");
         window.set_maximized(true);
-        let icon_img =
-            kradiant::texture::decode_texture_rgba8(editor_icons::ICON_LOGO_DDS, "dds").unwrap();
+        let icon_img = EditorIcons::get_image(&editor_icons::ICON_LOGO_DDS);
         let icon = winit::window::Icon::from_rgba(icon_img.rgba8, icon_img.width, icon_img.height)
             .unwrap();
         window.set_window_icon(Some(icon));
@@ -326,6 +330,8 @@ impl AppState {
         let mut renderer =
             GlowRenderer::new(gl_for_renderer, &mut imgui).expect("GlowRenderer::new failed");
 
+        let editor_splash = EditorImages::get_image(editor_images::IMG_SPLASH_DDS);
+        let id_splash_img = renderer.register_texture(editor_splash.width, editor_splash.height, TextureFormat::RGBA32, &editor_splash.rgba8).expect("register editor image");
         let img_view_cycle = EditorIcons::get_image(editor_icons::ICON_VIEW_CHANGE_DDS);
         let id_icon_view_cycle = renderer
             .register_texture(
@@ -363,6 +369,7 @@ impl AppState {
                 .texture_map_mut()
                 .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
         editor.view2d_tex_id = Some(view2d_imgui_tex);
+        editor.images.splash = Some(id_splash_img);
         editor.icons.view_cycle = Some(id_icon_view_cycle);
 
         Self {

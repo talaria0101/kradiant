@@ -6,6 +6,8 @@
 //! - resolving textures and shader metadata needed for editing and preview
 //! - providing loader facades ([`loader`]) that are independent of any UI or renderer
 
+pub const KRADIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod assets;
 pub mod editing;
 pub mod geometry;
