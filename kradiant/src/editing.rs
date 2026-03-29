@@ -1,7 +1,7 @@
 use crate::map::{
     Brush, BrushContent, BrushId, Entity, EntityId, Face, Map, SurfaceFlags, TextureParams,
 };
-use crate::{IVec3, Vec3};
+use crate::{IVec3, Quat, Vec3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AffineScale {
@@ -12,6 +12,30 @@ pub struct AffineScale {
 impl AffineScale {
     pub fn apply_point(self, p: Vec3) -> Vec3 {
         self.anchor + (p - self.anchor) * self.scale
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AffineRotate {
+    pub pivot: Vec3,
+    pub rot: Quat,
+}
+
+impl AffineRotate {
+    pub fn from_axis_angle(pivot: Vec3, axis: Vec3, angle_rad: f32) -> Option<Self> {
+        let len2 = axis.length_squared();
+        if len2 <= f32::EPSILON {
+            return None;
+        }
+        let axis_n = axis / len2.sqrt();
+        Some(Self {
+            pivot,
+            rot: Quat::from_axis_angle(axis_n, angle_rad),
+        })
+    }
+
+    pub fn apply_point(self, p: Vec3) -> Vec3 {
+        self.pivot + self.rot * (p - self.pivot)
     }
 }
 
@@ -204,6 +228,91 @@ pub fn apply_affine_scale_to_brush(
     );
     brush.aabb.min = IVec3::new(min_x, min_y, min_z);
     brush.aabb.max = IVec3::new(max_x, max_y, max_z);
+
+    // Bump generation and clear caches (via no-op translate).
+    brush.translate(generation, IVec3::ZERO);
+    true
+}
+
+pub fn rotate_selection_transform(
+    selection_aabb: &Aabb,
+    axis: Vec3,
+    angle_rad: f32,
+) -> Option<(AffineRotate, Aabb)> {
+    let pivot = (selection_aabb.min.as_vec3() + selection_aabb.max.as_vec3()) * 0.5;
+    let xform = AffineRotate::from_axis_angle(pivot, axis, angle_rad)?;
+    let preview = preview_rotated_aabb(selection_aabb, xform);
+    Some((xform, preview))
+}
+
+pub fn preview_rotated_aabb(selection_aabb: &Aabb, xform: AffineRotate) -> Aabb {
+    let min = selection_aabb.min.as_vec3();
+    let max = selection_aabb.max.as_vec3();
+    let corners = [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+        Vec3::new(max.x, max.y, max.z),
+    ];
+
+    let mut out_min = Vec3::splat(f32::INFINITY);
+    let mut out_max = Vec3::splat(f32::NEG_INFINITY);
+    for &c in &corners {
+        let p = xform.apply_point(c);
+        out_min = out_min.min(p);
+        out_max = out_max.max(p);
+    }
+
+    Aabb {
+        min: IVec3::new(
+            aabb_floor_eps(out_min.x),
+            aabb_floor_eps(out_min.y),
+            aabb_floor_eps(out_min.z),
+        ),
+        max: IVec3::new(
+            aabb_ceil_eps(out_max.x),
+            aabb_ceil_eps(out_max.y),
+            aabb_ceil_eps(out_max.z),
+        ),
+    }
+}
+
+pub fn apply_affine_rotate_to_brush(
+    brush: &mut Brush,
+    generation: &mut u64,
+    xform: AffineRotate,
+) -> bool {
+    if xform.rot == Quat::IDENTITY {
+        return false;
+    }
+
+    match &mut brush.content {
+        BrushContent::Convex(faces) => {
+            for face in faces {
+                for p in &mut face.plane_points {
+                    *p = xform.apply_point(*p);
+                }
+            }
+
+            if let Ok(polys) = crate::geometry::brush_to_polygons(&*brush) {
+                brush.aabb = aabb_from_polys(&polys);
+            }
+        }
+        BrushContent::Patch(patch) => {
+            let mut positions = Vec::new();
+            for row in &mut patch.vertices {
+                for v in row {
+                    v.position = xform.apply_point(v.position);
+                    positions.push(v.position);
+                }
+            }
+            brush.aabb = aabb_from_positions(positions.as_slice());
+        }
+    }
 
     // Bump generation and clear caches (via no-op translate).
     brush.translate(generation, IVec3::ZERO);
@@ -1011,15 +1120,6 @@ fn ray_triangle_intersection(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Ve
     }
     let t = e2.dot(q) * inv_det;
     Some(t)
-}
-
-pub struct BrushEditor;
-
-impl BrushEditor {
-    pub fn stretch_x(brush: &mut Brush, length: i32) // brush sizes are always integers
-    {
-        //brush.update_brush_plane(, , );
-    }
 }
 
 #[cfg(test)]

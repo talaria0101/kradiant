@@ -5,17 +5,19 @@ use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 
 use crate::config::EditorConfig;
 use crate::util::{project_to_2d, text_height};
-use crate::{EDITOR_THEMES, util};
+use crate::{EDITOR_THEMES, editor_icons, util};
 use glam::{IVec2, IVec3, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::BrushId;
 //use kradiant::loader::texture_loader;
 use crate::icons::EditorIcons;
+use crate::images::EditorImages;
 use crate::theme::{EditorPalette, ThemeEntry, theme_from_str};
 use util::{
     clamp_stretch_delta, normalize_depth, pack_abgr, project_aabb_to_2d, screen_to_world, snap,
     stretch_handle_point_2d, text_width,
 };
+use num_traits::ToPrimitive;
 
 // State types
 
@@ -51,6 +53,7 @@ pub enum DragMode {
     NewBrush,
     MoveSelection,
     StretchSelection,
+    RotateSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +72,13 @@ impl Default for StretchMode {
 struct StretchDrag {
     selection_aabb: Aabb,
     faces: [Option<editing::StretchFace>; 2],
+}
+
+#[derive(Clone)]
+struct RotateDrag {
+    selection_aabb: Aabb,
+    pivot_uv: [f32; 2],
+    start_uv: [f32; 2],
 }
 
 pub struct LogEntry {
@@ -96,6 +106,8 @@ impl LogLevel {
 pub struct EditorState {
     pub config: EditorConfig,
     pub show_demo: bool,
+    pub show_about: bool,
+    pub toolbar_height: f32,
     pub map_path: String,
     pub ortho_axis: Ortho,
     pub work_pos: IVec3,
@@ -111,7 +123,10 @@ pub struct EditorState {
     pub view2d_move_offset: IVec3,
     view2d_stretch: Option<StretchDrag>,
     view2d_stretch_delta: IVec3,
+    view2d_rotate: Option<RotateDrag>,
+    view2d_rotate_angle: f32,
     pub stretch_mode: StretchMode,
+    pub rotate_mode: bool,
     pub selection_rgba: [f32; 4],
     pub tex_filter: String,
     pub tex_selected: Option<String>,
@@ -127,6 +142,7 @@ pub struct EditorState {
     pub new_prop_key: String,
     pub new_prop_val: String,
     pub icons: EditorIcons,
+    pub images: EditorImages,
     pub themes: Vec<ThemeEntry>,
     pub pending_theme: Option<usize>,
     pub palette: EditorPalette,
@@ -172,6 +188,8 @@ impl Default for EditorState {
         let mut s = Self {
             config: EditorConfig::default(),
             show_demo: false,
+            show_about: false,
+            toolbar_height: 0.0,
             map_path: String::new(),
             ortho_axis: Ortho::default(),
             work_pos: IVec3::new(0, 0, 0),
@@ -186,7 +204,10 @@ impl Default for EditorState {
             view2d_move_offset: IVec3::ZERO,
             view2d_stretch: None,
             view2d_stretch_delta: IVec3::ZERO,
+            view2d_rotate: None,
+            view2d_rotate_angle: 0.0,
             stretch_mode: StretchMode::default(),
+            rotate_mode: false,
             selection_rgba: [0.3, 0.6, 1.0, 1.0],
             tex_filter: String::new(),
             tex_selected: None,
@@ -202,6 +223,7 @@ impl Default for EditorState {
             new_prop_key: String::new(),
             new_prop_val: String::new(),
             icons: EditorIcons::default(),
+            images: EditorImages::default(),
             themes,
             pending_theme: None,
             palette: EditorPalette::default(),
@@ -289,13 +311,29 @@ impl EditorState {
         let stretch = self.view2d_stretch.as_ref()?;
         Some((stretch.faces, self.view2d_stretch_delta))
     }
+
+    pub(crate) fn view2d_rotate_preview_xform(&self) -> Option<editing::AffineRotate> {
+        let rotate = self.view2d_rotate.as_ref()?;
+        let axis = match self.ortho_axis {
+            Ortho::XY => Vec3::Z,
+            Ortho::XZ => Vec3::Y,
+            Ortho::YZ => Vec3::X,
+        };
+        editing::rotate_selection_transform(
+            &rotate.selection_aabb,
+            axis,
+            self.view2d_rotate_angle,
+        )
+        .map(|(xform, _)| xform)
+    }
 }
 
 // Top-level draw call
 
 pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
-    draw_dockspace(ui);
+    draw_dockspace(ui, state);
     draw_main_menu(ui, state);
+    draw_toolbar(ui, state);
     draw_entity_list(ui, state);
     draw_properties(ui, state);
     draw_view3d(ui, state);
@@ -306,20 +344,39 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
     if state.show_demo {
         ui.show_demo_window(&mut state.show_demo);
     }
+
+    // About dialog
+    if state.show_about && !ui.is_popup_open("About Kradiant") {
+        ui.open_popup("About Kradiant");
+    }
+
+    if let Some(_popup) = ui
+        .begin_modal_popup_config("About Kradiant")
+        .opened(&mut state.show_about)
+        .flags(WindowFlags::ALWAYS_AUTO_RESIZE | WindowFlags::NO_COLLAPSE)
+        .begin()
+    {
+        // image
+        let logo_w = 256.0;
+        util::center_next(ui, logo_w);
+        if let Some(logo_tid) = state.images.splash {
+            ui.image(logo_tid, [logo_w, 64.0]);
+        }
+        draw_about_dialog(ui);
+    }
+
 }
 
 // Dockspace
 
-fn draw_dockspace(ui: &Ui) {
+fn draw_dockspace(ui: &Ui, state: &mut EditorState) {
     unsafe {
-        let vp = dear_imgui_rs::sys::igGetMainViewport();
-        let pos = (*vp).WorkPos;
-        let size = (*vp).WorkSize;
-        dear_imgui_rs::sys::igSetNextWindowPos(
-            pos,
-            dear_imgui_rs::sys::ImGuiCond_Always as i32,
-            dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 },
-        );
+        let vp = dear_imgui_rs::sys::igGetMainViewport().as_ref().unwrap();
+        //let menu_h = dear_imgui_rs::sys::igGetFrameHeight();
+        let offset_y = state.toolbar_height - 12.0;
+        let pos  = dear_imgui_rs::sys::ImVec2 { x: vp.WorkPos.x, y: vp.WorkPos.y + offset_y };
+        let size = dear_imgui_rs::sys::ImVec2 { x: vp.WorkSize.x, y: vp.WorkSize.y - offset_y };
+        dear_imgui_rs::sys::igSetNextWindowPos(pos,  dear_imgui_rs::sys::ImGuiCond_Always as i32, dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 });
         dear_imgui_rs::sys::igSetNextWindowSize(size, dear_imgui_rs::sys::ImGuiCond_Always as i32);
         dear_imgui_rs::sys::igSetNextWindowBgAlpha(0.0);
     }
@@ -480,7 +537,9 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
         });
 
         ui.menu("Help", || {
-            if ui.menu_item("About kradiant") { /* TODO */ }
+            if ui.menu_item("About Kradiant") {
+                state.show_about = true;
+            }
         });
     }
 
@@ -499,6 +558,128 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
     {
         util::save_map_as(state);
     }
+}
+
+fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
+    let vp = unsafe { dear_imgui_rs::sys::igGetMainViewport().as_ref().unwrap() };
+    let vp_pos  = vp.WorkPos;
+    let vp_size = vp.WorkSize;
+
+    unsafe {
+        dear_imgui_rs::sys::igSetNextWindowPos(
+            dear_imgui_rs::sys::ImVec2 { x: vp_pos.x, y: vp_pos.y },
+            dear_imgui_rs::sys::ImGuiCond_Always as i32,
+            dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 },
+        );
+        dear_imgui_rs::sys::igSetNextWindowSize(
+            dear_imgui_rs::sys::ImVec2 { x: vp_size.x, y: 0.0 }, // height = auto
+            dear_imgui_rs::sys::ImGuiCond_Always as i32,
+        );
+        dear_imgui_rs::sys::igSetNextWindowBgAlpha(1.0);
+    }
+
+    let flags = WindowFlags::NO_DECORATION
+    | WindowFlags::NO_MOVE
+    | WindowFlags::NO_SCROLL_WITH_MOUSE
+    | WindowFlags::NO_SAVED_SETTINGS
+    | WindowFlags::from_bits_truncate(1 << 13); // NoBringToDisplayFront
+
+    ui.window("##toolbar")
+    .flags(flags)
+    .build(|| {
+        // File operations
+        let open_map = if let Some(tid) = state.icons.open {
+            // image_button(id, texture_id, size) — the str id disambiguates multiple image buttons
+            //ui.image_button("##switch_view", tid, [24.0, 24.0])
+            ui.image_button_config("##open_map", tid, [24.0, 24.0])
+            .build()
+        } else {
+            ui.small_button("Open") // fallback if texture didn't load
+        };
+        if open_map {
+            util::open_map(state);
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Open Map");
+        }
+
+        ui.same_line();
+
+        let save_map = if let Some(tid) = state.icons.save {
+            // image_button(id, texture_id, size) — the str id disambiguates multiple image buttons
+            //ui.image_button("##switch_view", tid, [24.0, 24.0])
+            ui.image_button_config("##save_map", tid, [24.0, 24.0])
+            .build()
+        } else {
+            ui.small_button("Open") // fallback if texture didn't load
+        };
+        if save_map {
+            util::save_map(state);
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Save Map");
+        }
+
+        ui.same_line();
+        ui.separator_vertical(); // vertical separator
+        ui.same_line();
+
+        // Ortho axis
+        let view_switched = if let Some(tid) = state.icons.view_cycle {
+            ui.image_button_config("##switch_view", tid, [24.0, 24.0])
+            .build()
+        } else {
+            ui.small_button("Switch") // fallback if texture didn't load
+        };
+        if view_switched {
+            state.ortho_axis = state.ortho_axis.next();
+            if let Some(aabb) = state.last_aabb.clone() {
+                update_last_work_from_aabb(state, &aabb);
+            }
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Switch View");
+        }
+
+        ui.same_line();
+        ui.separator_vertical(); // vertical separator
+        ui.same_line();
+
+        let stretch_label = match state.stretch_mode {
+            StretchMode::Scale => "Stretch: Scale",
+            StretchMode::Faces => "Stretch: Faces",
+        };
+        if ui.small_button(&format!("{stretch_label}##stretch_mode")) {
+            state.stretch_mode = match state.stretch_mode {
+                StretchMode::Scale => StretchMode::Faces,
+                StretchMode::Faces => StretchMode::Scale,
+            };
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Stretch behavior when dragging outside selection");
+        }
+
+        ui.same_line();
+
+        let toggle_rotate = if let Some(tid) = state.icons.mouse_rotate {
+            let tint_col = match state.rotate_mode {
+                true => [1.0, 1.0, 1.0, 1.0],
+                false => [1.0, 1.0, 1.0, 0.5]
+            };
+            ui.image_button_config("##rotate_mode", tid, [24.0, 24.0])
+            .tint_color(tint_col).build()
+        }
+        else {
+            ui.button("Rotate")
+        };
+
+        if toggle_rotate {
+            state.rotate_mode = !state.rotate_mode;
+        }
+
+        // Store the toolbar height so the dockspace can offset below it.
+        state.toolbar_height = ui.window_size()[1];
+    });
 }
 
 // Entity list
@@ -641,39 +822,6 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                 }
             }*/
 
-            let view_switched = if let Some(tid) = state.icons.view_cycle {
-                // image_button(id, texture_id, size) — the str id disambiguates multiple image buttons
-                //ui.image_button("##switch_view", tid, [24.0, 24.0])
-                ui.image_button_config("##switch_view", tid, [24.0, 24.0])
-                    .build()
-            } else {
-                ui.small_button("Switch") // fallback if texture didn't load
-            };
-            if view_switched {
-                state.ortho_axis = state.ortho_axis.next();
-                if let Some(aabb) = state.last_aabb.clone() {
-                    update_last_work_from_aabb(state, &aabb);
-                }
-            }
-            if ui.is_item_hovered() {
-                ui.tooltip_text("Switch View");
-            }
-
-            ui.same_line();
-            let stretch_label = match state.stretch_mode {
-                StretchMode::Scale => "Stretch: Scale",
-                StretchMode::Faces => "Stretch: Faces",
-            };
-            if ui.small_button(&format!("{stretch_label}##stretch_mode")) {
-                state.stretch_mode = match state.stretch_mode {
-                    StretchMode::Scale => StretchMode::Faces,
-                    StretchMode::Faces => StretchMode::Scale,
-                };
-            }
-            if ui.is_item_hovered() {
-                ui.tooltip_text("Stretch behavior when dragging outside selection");
-            }
-
             let [w, h] = ui.content_region_avail();
             let (w, h) = (w.max(1.0), h.max(1.0));
             let p = ui.cursor_screen_pos();
@@ -772,12 +920,29 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                 state.view2d_move_offset = IVec3::ZERO;
                 state.view2d_stretch = None;
                 state.view2d_stretch_delta = IVec3::ZERO;
+                state.view2d_rotate = None;
+                state.view2d_rotate_angle = 0.0;
                 state.view2d_drag_mode = if !state.selected_brushes.is_empty()
-                    && util::click_in_selection_aabb(state, snapped_i)
                 {
-                    DragMode::MoveSelection
-                } else if !state.selected_brushes.is_empty() {
-                    if let Some(aabb) = selection_aabb(state) {
+                    if util::click_in_selection_aabb(state, snapped_i) {
+                        if state.rotate_mode {
+                            if let Some(aabb) = selection_aabb(state) {
+                                let center =
+                                    (aabb.min.as_vec3() + aabb.max.as_vec3()) * 0.5;
+                                let pivot_uv = project_to_2d(center, state.ortho_axis);
+                                state.view2d_rotate = Some(RotateDrag {
+                                    selection_aabb: aabb,
+                                    pivot_uv,
+                                    start_uv: world,
+                                });
+                                DragMode::RotateSelection
+                            } else {
+                                DragMode::MoveSelection
+                            }
+                        } else {
+                            DragMode::MoveSelection
+                        }
+                    } else if let Some(aabb) = selection_aabb(state) {
                         let faces = stretch_faces_from_start(state.ortho_axis, &aabb, snapped_i);
                         state.view2d_stretch = Some(StretchDrag {
                             selection_aabb: aabb,
@@ -819,6 +984,26 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                             );
                         }
                         state.view2d_stretch_delta = delta;
+                    } else if state.view2d_drag_mode == DragMode::RotateSelection {
+                        if let Some(rot) = state.view2d_rotate.as_ref() {
+                            let v0 = [
+                                rot.start_uv[0] - rot.pivot_uv[0],
+                                rot.start_uv[1] - rot.pivot_uv[1],
+                            ];
+                            let v1 = [world[0] - rot.pivot_uv[0], world[1] - rot.pivot_uv[1]];
+                            let dot = v0[0] * v1[0] + v0[1] * v1[1];
+                            let cross = v0[0] * v1[1] - v0[1] * v1[0];
+                            let mut angle = cross.atan2(dot);
+                            // `world` is in "screen" coordinates (V grows down). For XY/YZ this
+                            // flips handedness vs. the 3D right-handed axis we rotate about.
+                            if matches!(state.ortho_axis, Ortho::XY | Ortho::YZ) {
+                                angle = -angle;
+                            }
+                            if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) {
+                                angle = angle.to_degrees().round().to_radians();
+                            }
+                            state.view2d_rotate_angle = angle;
+                        }
                     }
 
                     let edge_zone = 20.0;
@@ -989,12 +1174,64 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                             }
                             state.view2d_stretch_delta = IVec3::ZERO;
                         }
+                        DragMode::RotateSelection => {
+                            if let Some(rot) = state.view2d_rotate.take() {
+                                let angle = state.view2d_rotate_angle;
+                                if angle.abs() > 1.0e-6 {
+                                    let axis = match state.ortho_axis {
+                                        Ortho::XY => Vec3::Z,
+                                        Ortho::XZ => Vec3::Y,
+                                        Ortho::YZ => Vec3::X,
+                                    };
+                                    if let Some((xform, _preview)) = editing::rotate_selection_transform(
+                                        &rot.selection_aabb,
+                                        axis,
+                                        angle,
+                                    ) {
+                                        let mut new_sel_aabb: Option<Aabb> = None;
+                                        if let Some(map) = state.map.as_mut() {
+                                            let mut any = false;
+                                            for &(entity_idx, brush_idx) in &state.selected_brushes {
+                                                let Some(entity) = map.entities.get_mut(entity_idx) else {
+                                                    continue;
+                                                };
+                                                let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+                                                    continue;
+                                                };
+                                                if editing::apply_affine_rotate_to_brush(
+                                                    brush,
+                                                    &mut map.generation,
+                                                    xform,
+                                                ) {
+                                                    any = true;
+                                                }
+                                            }
+
+                                            if any {
+                                                new_sel_aabb = selection_aabb_from_map(
+                                                    map,
+                                                    &state.selected_brushes,
+                                                );
+                                                editor_log_e!(state, info, "Rotated selection");
+                                            }
+                                        }
+                                        if let Some(aabb) = new_sel_aabb {
+                                            state.last_aabb = Some(aabb.clone());
+                                            update_last_work_from_aabb(state, &aabb);
+                                        }
+                                    }
+                                }
+                            }
+                            state.view2d_rotate_angle = 0.0;
+                        }
                     }
                 }
                 state.view2d_drag_start = None;
                 state.view2d_drag_current = None;
                 state.view2d_stretch = None;
                 state.view2d_stretch_delta = IVec3::ZERO;
+                state.view2d_rotate = None;
+                state.view2d_rotate_angle = 0.0;
             }
 
             if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
@@ -1005,6 +1242,8 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                 state.selected_brushes.clear();
                 state.view2d_stretch = None;
                 state.view2d_stretch_delta = IVec3::ZERO;
+                state.view2d_rotate = None;
+                state.view2d_rotate_angle = 0.0;
                 state.view2d_move_offset = IVec3::ZERO;
             }
 
@@ -1244,6 +1483,32 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                     .build();
                             }
                         }
+                        DragMode::RotateSelection => {
+                            if let Some(rot) = state.view2d_rotate.as_ref() {
+                                let a = to_screen_f(rot.pivot_uv);
+                                let b = to_screen(end);
+
+                                let deg = state.view2d_rotate_angle.to_degrees();
+                                let delta_info = format!("{deg:.1}°");
+                                let tw = text_width(ui, &delta_info);
+                                let text_h = text_height(ui, "1") + 2.0;
+                                let d_info_pos = [b[0] - tw / 2.0, b[1] - text_h];
+
+                                let delta_info_col = util::imgui_color_to_u32(col);
+                                draw.add_line(
+                                    a,
+                                    b,
+                                    util::adjust_color_brightness(delta_info_col, 1.5),
+                                )
+                                .thickness(2.0)
+                                .build();
+                                draw.add_text(
+                                    d_info_pos,
+                                    util::adjust_color_brightness(delta_info_col, 2.0),
+                                    delta_info,
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -1255,6 +1520,21 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                 stretch.faces,
                                 state.view2d_stretch_delta,
                             );
+                        }
+                    } else if state.view2d_drag_mode == DragMode::RotateSelection {
+                        if let Some(rot) = state.view2d_rotate.as_ref() {
+                            let axis = match state.ortho_axis {
+                                Ortho::XY => Vec3::Z,
+                                Ortho::XZ => Vec3::Y,
+                                Ortho::YZ => Vec3::X,
+                            };
+                            if let Some((_xform, preview)) = editing::rotate_selection_transform(
+                                &rot.selection_aabb,
+                                axis,
+                                state.view2d_rotate_angle,
+                            ) {
+                                selection_aabb = preview;
+                            }
                         }
                     }
 
@@ -1706,4 +1986,73 @@ fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
             ui.same_line_with_spacing(0.0, 4.0);
         }
     }
+}
+
+fn draw_about_dialog(ui: &Ui)
+{
+    // title line — measure combined width first
+    let title = "Kradiant Editor";
+    let version = format!("v{}", crate::EDITOR_VERSION);
+    let title_w = text_width(ui, title);
+    let ver_w = text_width(ui, &version);
+    let spacing = ui.clone_style().item_spacing()[0];
+    util::center_next(ui, title_w + spacing + ver_w);
+    ui.text_colored([0.95, 0.85, 0.3, 1.0], title);
+    ui.same_line();
+    ui.text_colored([0.6, 0.6, 0.6, 1.0], &version);
+
+    // body text
+    let body = "A modern map editor for CoD written in Rust";
+    util::center_next(ui, text_width(ui, body));
+    ui.text(body);
+
+    ui.spacing();
+    ui.separator();
+    ui.spacing();
+
+    let pb = "Powered by:";
+    util::center_next(ui, text_width(ui, pb));
+    ui.text(pb);
+    let libs_ver = format!(
+        "Dear ImGui v{}\nKradiant Library v{}",
+        dear_imgui_rs::dear_imgui_version(),
+                           kradiant::KRADIANT_VERSION
+    );
+    util::center_next(ui, text_width(ui, &libs_ver));
+    ui.text_colored([0.8, 0.8, 0.8, 1.0], libs_ver);
+
+    ui.spacing();
+    ui.separator();
+    ui.spacing();
+
+    let dn = "Donate";
+    let gl = "GitLab";
+    let sep = "|";
+    let links_w = text_width(ui, dn) + text_width(ui, gl) + text_width(ui, sep) + 16.0;
+    util::center_next(ui, links_w);
+    ui.text_link_open_url(dn, "https://kazam.pages.dev/donate.html");
+    ui.same_line();
+    ui.text(sep);
+    ui.same_line();
+    ui.text_link_open_url(gl, "https://gitlab.com/kazam0180/kradiant");
+
+    ui.spacing();
+    ui.separator();
+    ui.spacing();
+
+    let cr1 = "© 2025 Kazam";
+    util::center_next(ui, text_width(ui, cr1));
+    ui.text_disabled(cr1);
+
+    let cr2 = "This program comes with";
+    util::center_next(ui, text_width(ui, cr2));
+    ui.text_disabled(cr2);
+
+    let cr3 = "absolutely no warranty.";
+    util::center_next(ui, text_width(ui, cr3));
+    ui.text_disabled(cr3);
+
+    let lic = "GNU GPLv3";
+    util::center_next(ui, text_width(ui, lic));
+    ui.text_link_open_url(lic, "https://gitlab.com/kazam0180/kradiant/-/blob/main/LICENSE");
 }
