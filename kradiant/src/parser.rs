@@ -697,7 +697,7 @@ pub fn save_map(map: &Map, path: &str) -> Result<(), ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::Vec3;
+    use glam::{IVec3, Vec3};
 
     const SIMPLE_BOX_MAP: &str = include_str!("../test/simple_box.map");
 
@@ -842,8 +842,11 @@ common/caulk
         let brush = &mut world.brushes[0];
         let (aabb, _polys) = brush.get_polygons_and_aabb().expect("tessellate brush");
 
-        assert_eq!(aabb.max.x - aabb.min.x, 248);
-        assert_eq!(aabb.max.y - aabb.min.y, 172);
-        assert_eq!(aabb.max.z - aabb.min.z, 24);
+        assert_eq!(aabb.min, IVec3::new(16, -76, 0));
+        assert_eq!(aabb.max, IVec3::new(68, 0, 128));
+
+        assert_eq!(aabb.max.x - aabb.min.x, 52);
+        assert_eq!(aabb.max.y - aabb.min.y, 76);
+        assert_eq!(aabb.max.z - aabb.min.z, 128);
     }
 }

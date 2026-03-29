@@ -585,13 +585,30 @@ pub fn default_texture_params() -> TextureParams {
     }
 }
 
+fn orient_faces_inward_toward_point(faces: &mut [Face], interior: Vec3) -> bool {
+    let mut any = false;
+    for face in faces {
+        let p = face.plane_points;
+        let n = (p[1] - p[0]).cross(p[2] - p[0]);
+        if n.length_squared() < 1.0e-10 {
+            continue;
+        }
+        // CoD Radiant convention: face normals point toward the brush interior.
+        if n.dot(interior - p[0]) < 0.0 {
+            face.plane_points.swap(1, 2);
+            any = true;
+        }
+    }
+    any
+}
+
 pub fn convex_brush_from_aabb(id: BrushId, aabb: Aabb, texture: impl Into<String>) -> Brush {
     let min = aabb.min.as_vec3();
     let max = aabb.max.as_vec3();
     let texture = texture.into();
     let params = default_texture_params();
 
-    let faces = vec![
+    let mut faces = vec![
         Face {
             plane_points: [
                 Vec3::new(max.x, min.y, min.z),
@@ -647,6 +664,11 @@ pub fn convex_brush_from_aabb(id: BrushId, aabb: Aabb, texture: impl Into<String
             params,
         },
     ];
+
+    // Ensure the plane-point winding produces inward-pointing face normals.
+    // This avoids a save-time "fixup" (and texture axis flips) for newly created brushes.
+    let interior = (min + max) * 0.5;
+    orient_faces_inward_toward_point(&mut faces, interior);
 
     let mut brush = Brush::new(id, BrushContent::Convex(faces));
     brush.aabb = aabb;
@@ -997,5 +1019,33 @@ impl BrushEditor {
     pub fn stretch_x(brush: &mut Brush, length: i32) // brush sizes are always integers
     {
         //brush.update_brush_plane(, , );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convex_brush_from_aabb_is_inward_by_default() {
+        let aabb = Aabb::from_points(IVec3::new(-16, -32, 0), IVec3::new(48, 64, 128));
+        let mut brush = convex_brush_from_aabb(BrushId(0), aabb.clone(), "common/caulk");
+
+        let center = (aabb.min.as_vec3() + aabb.max.as_vec3()) * 0.5;
+        let BrushContent::Convex(faces) = &brush.content else {
+            panic!("expected convex brush");
+        };
+        for face in faces {
+            let p = face.plane_points;
+            let n = (p[1] - p[0]).cross(p[2] - p[0]);
+            assert!(n.length_squared() > 1.0e-6);
+            assert!(n.dot(center - p[0]) > 0.0);
+        }
+
+        let mut generation = 0u64;
+        assert!(!orient_convex_brush_faces_inward(
+            &mut brush,
+            &mut generation
+        ));
     }
 }
