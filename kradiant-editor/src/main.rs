@@ -331,7 +331,14 @@ impl AppState {
             GlowRenderer::new(gl_for_renderer, &mut imgui).expect("GlowRenderer::new failed");
 
         let editor_splash = EditorImages::get_image(editor_images::IMG_SPLASH_DDS);
-        let id_splash_img = renderer.register_texture(editor_splash.width, editor_splash.height, TextureFormat::RGBA32, &editor_splash.rgba8).expect("register editor image");
+        let id_splash_img = renderer
+            .register_texture(
+                editor_splash.width,
+                editor_splash.height,
+                TextureFormat::RGBA32,
+                &editor_splash.rgba8,
+            )
+            .expect("register editor image");
         let img_view_cycle = EditorIcons::get_image(editor_icons::ICON_VIEW_CHANGE_DDS);
         let id_icon_view_cycle = renderer
             .register_texture(
@@ -343,14 +350,84 @@ impl AppState {
             .expect("register editor icon");
 
         let img_mouse_rotate = EditorIcons::get_image(editor_icons::ICON_SELECT_MOUSEROTATE_DDS);
-        let id_mouse_rotate = renderer.register_texture(img_mouse_rotate.width, img_mouse_rotate.height, TextureFormat::RGBA32, &img_mouse_rotate.rgba8).expect("register editor icon");
+        let id_mouse_rotate = renderer
+            .register_texture(
+                img_mouse_rotate.width,
+                img_mouse_rotate.height,
+                TextureFormat::RGBA32,
+                &img_mouse_rotate.rgba8,
+            )
+            .expect("register editor icon");
+
+        let img_free_scale = EditorIcons::get_image(editor_icons::ICON_SELECT_MOUSESCALE_DDS);
+        let id_free_scale = renderer
+            .register_texture(
+                img_free_scale.width,
+                img_free_scale.height,
+                TextureFormat::RGBA32,
+                &img_free_scale.rgba8,
+            )
+            .expect("register editor icon");
+
+        let img_resize = EditorIcons::get_image(editor_icons::ICON_SELECT_MOUSERESIZE_DDS);
+        let id_resize = renderer
+            .register_texture(
+                img_resize.width,
+                img_resize.height,
+                TextureFormat::RGBA32,
+                &img_resize.rgba8,
+            )
+            .expect("register editor icon");
 
         let img_open = EditorIcons::get_image(editor_icons::ICON_FILE_OPEN_DDS);
-        let id_open = renderer.register_texture(img_open.width, img_open.height, TextureFormat::RGBA32, &img_open.rgba8).expect("register editor icon");
-
+        let id_open = renderer
+            .register_texture(
+                img_open.width,
+                img_open.height,
+                TextureFormat::RGBA32,
+                &img_open.rgba8,
+            )
+            .expect("register editor icon");
 
         let img_save = EditorIcons::get_image(editor_icons::ICON_FILE_SAVE_DDS);
-        let id_save = renderer.register_texture(img_save.width, img_save.height, TextureFormat::RGBA32, &img_save.rgba8).expect("register editor icon");
+        let id_save = renderer
+            .register_texture(
+                img_save.width,
+                img_save.height,
+                TextureFormat::RGBA32,
+                &img_save.rgba8,
+            )
+            .expect("register editor icon");
+
+        let img_lock_x = EditorIcons::get_image(editor_icons::ICON_LOCK_X_DDS);
+        let id_lock_x = renderer
+            .register_texture(
+                img_lock_x.width,
+                img_lock_x.height,
+                TextureFormat::RGBA32,
+                &img_lock_x.rgba8,
+            )
+            .expect("register editor icon");
+
+        let img_lock_y = EditorIcons::get_image(editor_icons::ICON_LOCK_Y_DDS);
+        let id_lock_y = renderer
+            .register_texture(
+                img_lock_y.width,
+                img_lock_y.height,
+                TextureFormat::RGBA32,
+                &img_lock_y.rgba8,
+            )
+            .expect("register editor icon");
+
+        let img_lock_z = EditorIcons::get_image(editor_icons::ICON_LOCK_Z_DDS);
+        let id_lock_z = renderer
+            .register_texture(
+                img_lock_z.width,
+                img_lock_z.height,
+                TextureFormat::RGBA32,
+                &img_lock_z.rgba8,
+            )
+            .expect("register editor icon");
 
         let mut editor = ui::EditorState::default();
         editor.log_info(gl_info);
@@ -383,7 +460,12 @@ impl AppState {
         editor.icons.open = Some(id_open);
         editor.icons.save = Some(id_save);
         editor.icons.view_cycle = Some(id_icon_view_cycle);
-        editor.icons.mouse_rotate = Some(id_mouse_rotate);
+        editor.icons.free_rotate = Some(id_mouse_rotate);
+        editor.icons.free_scale = Some(id_free_scale);
+        editor.icons.resize = Some(id_resize);
+        editor.icons.lock_x = Some(id_lock_x);
+        editor.icons.lock_y = Some(id_lock_y);
+        editor.icons.lock_z = Some(id_lock_z);
 
         Self {
             window,
@@ -958,7 +1040,7 @@ impl AppState {
                                 if let Some(brush) = entity.brushes.get_mut(*brush_index) {
                                     if matches!(&brush.content, BrushContent::Convex(_)) {
                                         if preview_drag_mode == ui::DragMode::StretchSelection
-                                            && preview_stretch_mode == ui::StretchMode::Faces
+                                            && preview_stretch_mode == ui::StretchMode::Resize
                                         {
                                             if let Some((faces, delta)) = preview_face {
                                                 if let Some(polys) = kradiant::editing::preview_convex_face_stretch_polys(

@@ -5,7 +5,12 @@ pub struct EditorIcons {
     pub open: Option<TextureId>,
     pub save: Option<TextureId>,
     pub view_cycle: Option<TextureId>,
-    pub mouse_rotate: Option<TextureId>
+    pub free_rotate: Option<TextureId>,
+    pub free_scale: Option<TextureId>,
+    pub resize: Option<TextureId>,
+    pub lock_x: Option<TextureId>,
+    pub lock_y: Option<TextureId>,
+    pub lock_z: Option<TextureId>,
 }
 
 impl EditorIcons {
@@ -16,6 +21,16 @@ impl EditorIcons {
 
 impl Default for EditorIcons {
     fn default() -> Self {
-        Self { open: None, save: None, view_cycle: None, mouse_rotate: None }
+        Self {
+            open: None,
+            save: None,
+            view_cycle: None,
+            free_rotate: None,
+            free_scale: None,
+            resize: None,
+            lock_x: None,
+            lock_y: None,
+            lock_z: None,
+        }
     }
 }

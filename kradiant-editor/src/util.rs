@@ -169,7 +169,7 @@ pub fn screen_to_world_ortho(
 pub fn new_map(state: &mut EditorState) {
     state.map_path = String::new();
     state.map = None;
-    editor_log_e!(state, info, "New map");
+    editor_log!(state, info, "New map");
 }
 
 pub fn open_map(state: &mut EditorState) {
@@ -189,10 +189,10 @@ pub fn open_map(state: &mut EditorState) {
                 state.selected_entity = None;
                 state.map_path = path_str.to_string();
                 state.map = Some(map);
-                editor_log_e!(state, info, "Loaded map: {}", path_str);
+                editor_log!(state, info, "Loaded map: {}", path_str);
             }
             Err(e) => {
-                editor_log_e!(
+                editor_log!(
                     state,
                     error,
                     "Failed to load {}: {}",
@@ -206,7 +206,7 @@ pub fn open_map(state: &mut EditorState) {
 
 pub fn save_map_as(state: &mut EditorState) {
     if state.map.is_none() {
-        editor_log_e!(state, info, "Not allowed to save empty map!");
+        editor_log!(state, info, "Not allowed to save empty map!");
         return;
     }
 
@@ -222,7 +222,7 @@ pub fn save_map_as(state: &mut EditorState) {
             save_map(state);
         }
         None => {
-            editor_log_e!(state, info, "Save map cancelled by user");
+            editor_log!(state, info, "Save map cancelled by user");
             return;
         }
     }
@@ -230,7 +230,7 @@ pub fn save_map_as(state: &mut EditorState) {
 
 pub fn save_map(state: &mut EditorState) {
     if state.map.is_none() {
-        editor_log_e!(state, info, "Not allowed to save empty map!");
+        editor_log!(state, info, "Not allowed to save empty map!");
         return;
     }
     let mut chosen_path = PathBuf::new();
@@ -259,7 +259,7 @@ pub fn save_map(state: &mut EditorState) {
                 choose_new_file = false;
             }
             None => {
-                editor_log_e!(state, info, "Save map cancelled by user");
+                editor_log!(state, info, "Save map cancelled by user");
                 return;
             }
         }
@@ -269,14 +269,14 @@ pub fn save_map(state: &mut EditorState) {
     if let Some(map) = state.map.as_mut() {
         let changed = kradiant::editing::orient_map_convex_brushes_inward(map);
         if changed > 0 {
-            editor_log_e!(state, info, "Oriented {} brushes", changed);
+            editor_log!(state, info, "Oriented {} brushes", changed);
         }
     }
 
     match map_loader::save_map(state.map.as_ref().unwrap(), path_str) {
-        Ok(_) => editor_log_e!(state, info, "Saved map to {}", path_str),
+        Ok(_) => editor_log!(state, info, "Saved map to {}", path_str),
         Err(e) => {
-            editor_log_e!(
+            editor_log!(
                 state,
                 error,
                 "Failed to save map to {}: {}",

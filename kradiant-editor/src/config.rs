@@ -38,7 +38,7 @@ impl EditorConfig {
         match key {
             "grid_minor_step" => {
                 state.config.grid_minor_step = util::num_from_str(value);
-                editor_log_e!(
+                editor_log!(
                     state,
                     info,
                     "Set grid step to {}",
@@ -47,7 +47,7 @@ impl EditorConfig {
             }
             "view3d_fov" => {
                 state.config.view3d_fov = util::num_from_str(value);
-                editor_log_e!(
+                editor_log!(
                     state,
                     info,
                     "Set 3d view fov to {}",
@@ -56,7 +56,7 @@ impl EditorConfig {
             }
             "active_theme" => {
                 state.config.active_theme = util::num_from_str(value);
-                editor_log_e!(
+                editor_log!(
                     state,
                     info,
                     "Set active theme index to {}",
@@ -71,7 +71,7 @@ impl EditorConfig {
         match key {
             "grid_minor_step" => {
                 state.config.grid_minor_step = util::to_num(value);
-                editor_log_e!(
+                editor_log!(
                     state,
                     info,
                     "Set grid step to {}",
@@ -80,7 +80,7 @@ impl EditorConfig {
             }
             "view3d_fov" => {
                 state.config.view3d_fov = util::to_num(value);
-                editor_log_e!(
+                editor_log!(
                     state,
                     info,
                     "Set 3d view fov to {}",
@@ -89,7 +89,7 @@ impl EditorConfig {
             }
             "active_theme" => {
                 state.config.active_theme = util::to_num(value);
-                editor_log_e!(
+                editor_log!(
                     state,
                     info,
                     "Set active theme index to {}",

@@ -5,7 +5,7 @@ use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 
 use crate::config::EditorConfig;
 use crate::util::{project_to_2d, text_height};
-use crate::{EDITOR_THEMES, editor_icons, util};
+use crate::{EDITOR_THEMES, util};
 use glam::{IVec2, IVec3, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::BrushId;
@@ -17,7 +17,6 @@ use util::{
     clamp_stretch_delta, normalize_depth, pack_abgr, project_aabb_to_2d, screen_to_world, snap,
     stretch_handle_point_2d, text_width,
 };
-use num_traits::ToPrimitive;
 
 // State types
 
@@ -59,7 +58,7 @@ pub enum DragMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StretchMode {
     Scale,
-    Faces,
+    Resize,
 }
 
 impl Default for StretchMode {
@@ -127,6 +126,9 @@ pub struct EditorState {
     view2d_rotate_angle: f32,
     pub stretch_mode: StretchMode,
     pub rotate_mode: bool,
+    pub lock_x: bool,
+    pub lock_y: bool,
+    pub lock_z: bool,
     pub selection_rgba: [f32; 4],
     pub tex_filter: String,
     pub tex_selected: Option<String>,
@@ -148,7 +150,7 @@ pub struct EditorState {
     pub palette: EditorPalette,
 }
 
-macro_rules! editor_log {
+/*macro_rules! editor_log {
     (info, $($arg:tt)+) => {
         self.log_info(format!($($arg)+))
     };
@@ -158,9 +160,9 @@ macro_rules! editor_log {
     (error, $($arg:tt)+) => {
         self.log_error(format!($($arg)+))
     };
-}
+}*/
 
-macro_rules! editor_log_e {
+macro_rules! editor_log {
     ($state:expr, info, $($arg:tt)+) => {
         $state.log_info(format!($($arg)+))
     };
@@ -208,6 +210,9 @@ impl Default for EditorState {
             view2d_rotate_angle: 0.0,
             stretch_mode: StretchMode::default(),
             rotate_mode: false,
+            lock_x: false,
+            lock_y: false,
+            lock_z: false,
             selection_rgba: [0.3, 0.6, 1.0, 1.0],
             tex_filter: String::new(),
             tex_selected: None,
@@ -232,7 +237,7 @@ impl Default for EditorState {
 
         match EditorConfig::load() {
             Ok(c) => s.config = c,
-            Err(e) => editor_log_e!(
+            Err(e) => editor_log!(
                 &mut s,
                 error,
                 "Failed to load configuration: {}",
@@ -319,12 +324,8 @@ impl EditorState {
             Ortho::XZ => Vec3::Y,
             Ortho::YZ => Vec3::X,
         };
-        editing::rotate_selection_transform(
-            &rotate.selection_aabb,
-            axis,
-            self.view2d_rotate_angle,
-        )
-        .map(|(xform, _)| xform)
+        editing::rotate_selection_transform(&rotate.selection_aabb, axis, self.view2d_rotate_angle)
+            .map(|(xform, _)| xform)
     }
 }
 
@@ -364,7 +365,6 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         }
         draw_about_dialog(ui);
     }
-
 }
 
 // Dockspace
@@ -373,10 +373,20 @@ fn draw_dockspace(ui: &Ui, state: &mut EditorState) {
     unsafe {
         let vp = dear_imgui_rs::sys::igGetMainViewport().as_ref().unwrap();
         //let menu_h = dear_imgui_rs::sys::igGetFrameHeight();
-        let offset_y = state.toolbar_height - 12.0;
-        let pos  = dear_imgui_rs::sys::ImVec2 { x: vp.WorkPos.x, y: vp.WorkPos.y + offset_y };
-        let size = dear_imgui_rs::sys::ImVec2 { x: vp.WorkSize.x, y: vp.WorkSize.y - offset_y };
-        dear_imgui_rs::sys::igSetNextWindowPos(pos,  dear_imgui_rs::sys::ImGuiCond_Always as i32, dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 });
+        let offset_y = state.toolbar_height;
+        let pos = dear_imgui_rs::sys::ImVec2 {
+            x: vp.WorkPos.x,
+            y: vp.WorkPos.y + offset_y,
+        };
+        let size = dear_imgui_rs::sys::ImVec2 {
+            x: vp.WorkSize.x,
+            y: vp.WorkSize.y - offset_y,
+        };
+        dear_imgui_rs::sys::igSetNextWindowPos(
+            pos,
+            dear_imgui_rs::sys::ImGuiCond_Always as i32,
+            dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 },
+        );
         dear_imgui_rs::sys::igSetNextWindowSize(size, dear_imgui_rs::sys::ImGuiCond_Always as i32);
         dear_imgui_rs::sys::igSetNextWindowBgAlpha(0.0);
     }
@@ -562,37 +572,41 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
 
 fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
     let vp = unsafe { dear_imgui_rs::sys::igGetMainViewport().as_ref().unwrap() };
-    let vp_pos  = vp.WorkPos;
+    let vp_pos = vp.WorkPos;
     let vp_size = vp.WorkSize;
 
     unsafe {
         dear_imgui_rs::sys::igSetNextWindowPos(
-            dear_imgui_rs::sys::ImVec2 { x: vp_pos.x, y: vp_pos.y },
+            dear_imgui_rs::sys::ImVec2 {
+                x: vp_pos.x,
+                y: vp_pos.y,
+            },
             dear_imgui_rs::sys::ImGuiCond_Always as i32,
             dear_imgui_rs::sys::ImVec2 { x: 0.0, y: 0.0 },
         );
         dear_imgui_rs::sys::igSetNextWindowSize(
-            dear_imgui_rs::sys::ImVec2 { x: vp_size.x, y: 0.0 }, // height = auto
+            dear_imgui_rs::sys::ImVec2 {
+                x: vp_size.x,
+                y: 0.0,
+            }, // height = auto
             dear_imgui_rs::sys::ImGuiCond_Always as i32,
         );
         dear_imgui_rs::sys::igSetNextWindowBgAlpha(1.0);
     }
 
     let flags = WindowFlags::NO_DECORATION
-    | WindowFlags::NO_MOVE
-    | WindowFlags::NO_SCROLL_WITH_MOUSE
-    | WindowFlags::NO_SAVED_SETTINGS
-    | WindowFlags::from_bits_truncate(1 << 13); // NoBringToDisplayFront
+        | WindowFlags::NO_MOVE
+        | WindowFlags::NO_SCROLL_WITH_MOUSE
+        | WindowFlags::NO_SAVED_SETTINGS
+        | WindowFlags::from_bits_truncate(1 << 13); // NoBringToDisplayFront
 
-    ui.window("##toolbar")
-    .flags(flags)
-    .build(|| {
+    ui.window("##toolbar").flags(flags).build(|| {
         // File operations
         let open_map = if let Some(tid) = state.icons.open {
             // image_button(id, texture_id, size) — the str id disambiguates multiple image buttons
             //ui.image_button("##switch_view", tid, [24.0, 24.0])
             ui.image_button_config("##open_map", tid, [24.0, 24.0])
-            .build()
+                .build()
         } else {
             ui.small_button("Open") // fallback if texture didn't load
         };
@@ -609,7 +623,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             // image_button(id, texture_id, size) — the str id disambiguates multiple image buttons
             //ui.image_button("##switch_view", tid, [24.0, 24.0])
             ui.image_button_config("##save_map", tid, [24.0, 24.0])
-            .build()
+                .build()
         } else {
             ui.small_button("Open") // fallback if texture didn't load
         };
@@ -627,7 +641,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         // Ortho axis
         let view_switched = if let Some(tid) = state.icons.view_cycle {
             ui.image_button_config("##switch_view", tid, [24.0, 24.0])
-            .build()
+                .build()
         } else {
             ui.small_button("Switch") // fallback if texture didn't load
         };
@@ -645,14 +659,21 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         ui.separator_vertical(); // vertical separator
         ui.same_line();
 
-        let stretch_label = match state.stretch_mode {
-            StretchMode::Scale => "Stretch: Scale",
-            StretchMode::Faces => "Stretch: Faces",
+        let stretch_icon = match state.stretch_mode {
+            StretchMode::Scale => state.icons.free_scale,
+            StretchMode::Resize => state.icons.resize,
         };
-        if ui.small_button(&format!("{stretch_label}##stretch_mode")) {
+        if ui
+            .image_button_config(
+                &format!("##stretch_mode"),
+                stretch_icon.unwrap(),
+                [24.0, 24.0],
+            )
+            .build()
+        {
             state.stretch_mode = match state.stretch_mode {
-                StretchMode::Scale => StretchMode::Faces,
-                StretchMode::Faces => StretchMode::Scale,
+                StretchMode::Scale => StretchMode::Resize,
+                StretchMode::Resize => StretchMode::Scale,
             };
         }
         if ui.is_item_hovered() {
@@ -661,15 +682,15 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
 
         ui.same_line();
 
-        let toggle_rotate = if let Some(tid) = state.icons.mouse_rotate {
+        let toggle_rotate = if let Some(tid) = state.icons.free_rotate {
             let tint_col = match state.rotate_mode {
                 true => [1.0, 1.0, 1.0, 1.0],
-                false => [1.0, 1.0, 1.0, 0.5]
+                false => [1.0, 1.0, 1.0, 0.5],
             };
             ui.image_button_config("##rotate_mode", tid, [24.0, 24.0])
-            .tint_color(tint_col).build()
-        }
-        else {
+                .tint_color(tint_col)
+                .build()
+        } else {
             ui.button("Rotate")
         };
 
@@ -1055,7 +1076,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                             }
 
                             state.view2d_move_offset = IVec3::ZERO;
-                            editor_log_e!(state, info, "Dragged selection");
+                            editor_log!(state, info, "Dragged selection");
                         }
                         DragMode::NewBrush => {
                             if state.selected_brushes.is_empty() {
@@ -1107,7 +1128,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                                     }
                                                 }
                                             }
-                                            StretchMode::Faces => {
+                                            StretchMode::Resize => {
                                                 let xform_for_patches =
                                                     editing::stretch_selection_transform(
                                                         &stretch.selection_aabb,
@@ -1163,7 +1184,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                                 map,
                                                 &state.selected_brushes,
                                             );
-                                            editor_log_e!(state, info, "Stretched selection");
+                                            editor_log!(state, info, "Stretched selection");
                                         }
                                     }
                                     if let Some(aabb) = new_sel_aabb {
@@ -1212,7 +1233,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                                     map,
                                                     &state.selected_brushes,
                                                 );
-                                                editor_log_e!(state, info, "Rotated selection");
+                                                editor_log!(state, info, "Rotated selection");
                                             }
                                         }
                                         if let Some(aabb) = new_sel_aabb {
@@ -1988,8 +2009,7 @@ fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
     }
 }
 
-fn draw_about_dialog(ui: &Ui)
-{
+fn draw_about_dialog(ui: &Ui) {
     // title line — measure combined width first
     let title = "Kradiant Editor";
     let version = format!("v{}", crate::EDITOR_VERSION);
@@ -2016,7 +2036,7 @@ fn draw_about_dialog(ui: &Ui)
     let libs_ver = format!(
         "Dear ImGui v{}\nKradiant Library v{}",
         dear_imgui_rs::dear_imgui_version(),
-                           kradiant::KRADIANT_VERSION
+        kradiant::KRADIANT_VERSION
     );
     util::center_next(ui, text_width(ui, &libs_ver));
     ui.text_colored([0.8, 0.8, 0.8, 1.0], libs_ver);
@@ -2054,5 +2074,8 @@ fn draw_about_dialog(ui: &Ui)
 
     let lic = "GNU GPLv3";
     util::center_next(ui, text_width(ui, lic));
-    ui.text_link_open_url(lic, "https://gitlab.com/kazam0180/kradiant/-/blob/main/LICENSE");
+    ui.text_link_open_url(
+        lic,
+        "https://gitlab.com/kazam0180/kradiant/-/blob/main/LICENSE",
+    );
 }
