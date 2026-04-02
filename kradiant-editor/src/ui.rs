@@ -105,9 +105,9 @@ impl LogLevel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AxisLock {
-    x: bool,
-    y: bool,
-    z: bool
+    pub x: bool,
+    pub y: bool,
+    pub z: bool
 }
 /*
 impl Default for AxisLock {
@@ -339,6 +339,13 @@ impl EditorState {
         };
         editing::rotate_selection_transform(&rotate.selection_aabb, axis, self.view2d_rotate_angle)
             .map(|(xform, _)| xform)
+    }
+
+    pub fn is_rotation_locked(&self) -> bool {
+        match self.ortho_axis {
+            Ortho::XY => self.axis_lock.y,
+            Ortho::XZ | Ortho::YZ => self.axis_lock.z,
+        }
     }
 }
 
@@ -1098,10 +1105,10 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
 
                     if state.view2d_drag_mode == DragMode::MoveSelection {
                         let d = snapped_i - state.view2d_drag_start.unwrap();
-                        state.view2d_move_offset = util::drag_delta_to_3d(d, state.ortho_axis);
+                        state.view2d_move_offset = util::drag_delta_to_3d(d, state.ortho_axis, state.axis_lock);
                     } else if state.view2d_drag_mode == DragMode::StretchSelection {
                         let d = snapped_i - state.view2d_drag_start.unwrap();
-                        let mut delta = util::drag_delta_to_3d(d, state.ortho_axis);
+                        let mut delta = util::drag_delta_to_3d(d, state.ortho_axis, state.axis_lock);
                         if let Some(stretch) = state.view2d_stretch.as_ref() {
                             delta = clamp_stretch_delta(
                                 &stretch.selection_aabb,
@@ -1114,22 +1121,27 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                         state.view2d_stretch_delta = delta;
                     } else if state.view2d_drag_mode == DragMode::RotateSelection {
                         if let Some(rot) = state.view2d_rotate.as_ref() {
-                            let v0 = [
-                                rot.start_uv[0] - rot.pivot_uv[0],
-                                rot.start_uv[1] - rot.pivot_uv[1],
-                            ];
-                            let v1 = [world[0] - rot.pivot_uv[0], world[1] - rot.pivot_uv[1]];
-                            let dot = v0[0] * v1[0] + v0[1] * v1[1];
-                            let cross = v0[0] * v1[1] - v0[1] * v1[0];
-                            let mut angle = cross.atan2(dot);
-                            // `world` is in "screen" coordinates (V grows down). For XY/YZ this
-                            // flips handedness vs. the 3D right-handed axis we rotate about.
-                            if matches!(state.ortho_axis, Ortho::XY | Ortho::YZ) {
-                                angle = -angle;
-                            }
-                            if my_snapping {
-                                angle = angle.to_degrees().round().to_radians();
-                            }
+                            let angle = if state.is_rotation_locked() {
+                                0.0
+                            } else {
+                                let v0 = [
+                                    rot.start_uv[0] - rot.pivot_uv[0], rot.start_uv[1] - rot.pivot_uv[1],
+                                ];
+                                let v1 = [world[0] - rot.pivot_uv[0], world[1] - rot.pivot_uv[1]];
+                                let dot = v0[0] * v1[0] + v0[1] * v1[1];
+                                let cross = v0[0] * v1[1] - v0[1] * v1[0];
+                                let mut angle = cross.atan2(dot);
+                                // `world` is in "screen" coordinates (V grows down). For XY/YZ this
+                                // flips handedness vs. the 3D right-handed axis we rotate about.
+                                if matches!(state.ortho_axis, Ortho::XY | Ortho::YZ) {
+                                    angle = -angle;
+                                }
+                                if my_snapping {
+                                    angle = angle.to_degrees().round().to_radians();
+                                }
+
+                                angle
+                            };
                             state.view2d_rotate_angle = angle;
                         }
                     }
@@ -1164,7 +1176,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                         DragMode::MoveSelection => {
                             let d = end - start;
                             if d != Vec2::ZERO {
-                                let delta = util::drag_delta_to_3d(d, state.ortho_axis);
+                                let delta = util::drag_delta_to_3d(d, state.ortho_axis, state.axis_lock);
                                 if let Some(map) = state.map.as_mut() {
                                     let gen_ = &mut map.generation;
                                     for &(entity_idx, brush_idx) in &state.selected_brushes {
@@ -1309,7 +1321,11 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                         }
                         DragMode::RotateSelection => {
                             if let Some(rot) = state.view2d_rotate.take() {
-                                let angle = state.view2d_rotate_angle;
+
+                                let angle = if state.is_rotation_locked() {
+                                    0.0
+                                } else { state.view2d_rotate_angle };
+
                                 if angle.abs() > 1.0e-6 {
                                     let axis = match state.ortho_axis {
                                         Ortho::XY => Vec3::Z,

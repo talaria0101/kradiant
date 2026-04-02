@@ -323,11 +323,24 @@ pub fn click_in_selection_aabb(state: &EditorState, pt: Vec2) -> bool {
     pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y
 }
 
-pub fn drag_delta_to_3d(d: Vec2, axis: Ortho) -> Vec3 {
+use crate::ui::AxisLock;
+pub fn drag_delta_to_3d(d: Vec2, axis: Ortho, lock: AxisLock) -> Vec3 {
     match axis {
-        Ortho::XY => Vec3::new(d.x, d.y, 0.0),
-        Ortho::XZ => Vec3::new(d.x, 0.0, -d.y),
-        Ortho::YZ => Vec3::new(0.0, d.x, -d.y),
+        Ortho::XY => {
+            let x = if lock.x { 0.0 } else { d.x };
+            let y = if lock.y { 0.0 } else { d.y };
+            Vec3 { x, y, z: 0.0 }
+        }
+        Ortho::XZ => {
+            let x = if lock.x { 0.0 } else { d.x };
+            let z = if lock.z { 0.0 } else { -d.y };
+            Vec3 { x, y: 0.0, z }
+        }
+        Ortho::YZ => {
+            let y = if lock.y { 0.0 } else { d.x };
+            let z = if lock.z { 0.0 } else { -d.y };
+            Vec3 { x: 0.0, y, z }
+        },
     }
 }
 
