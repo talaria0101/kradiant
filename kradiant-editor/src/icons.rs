@@ -11,6 +11,7 @@ pub struct EditorIcons {
     pub lock_x: Option<TextureId>,
     pub lock_y: Option<TextureId>,
     pub lock_z: Option<TextureId>,
+    pub grid_snap: Option<TextureId>,
 }
 
 impl EditorIcons {
@@ -31,6 +32,7 @@ impl Default for EditorIcons {
             lock_x: None,
             lock_y: None,
             lock_z: None,
+            grid_snap: None,
         }
     }
 }

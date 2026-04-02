@@ -9,6 +9,7 @@ use crate::map::{
     Brush, BrushContent, BrushId, Entity, EntityId, Face, Map, Patch, PatchParams, PatchType,
     PatchVertex, SurfaceFlags, TextureParams,
 };
+use crate::map_utils::format_float;
 use crate::{IVec2, Vec2, Vec3};
 use log::debug;
 use std::collections::HashMap;
@@ -600,26 +601,22 @@ impl Face {
         let f = self.params;
 
         format!(
-            "( {:.0} {:.0} {:.0} ) ( {:.0} {:.0} {:.0} ) ( {:.0} {:.0} {:.0} ) {} {shift_x} {shift_y} {rot} {scale_x} {scale_y} {s_flags} {idk} {value} {sample_size}",
-            p[0].x,
-            p[0].y,
-            p[0].z,
-            p[1].x,
-            p[1].y,
-            p[1].z,
-            p[2].x,
-            p[2].y,
-            p[2].z,
+            "( {} {} {} ) ( {} {} {} ) ( {} {} {} ) {} {shift_x} {shift_y} {rot} {scale_x} {scale_y} {s_flags} {idk} {value} {sample_size}",
+            format_float(p[0].x, 4),
+            format_float(p[0].y, 4),
+            format_float(p[0].z, 4),
+            format_float(p[1].x, 4),
+            format_float(p[1].y, 4),
+            format_float(p[1].z, 4),
+            format_float(p[2].x, 4),
+            format_float(p[2].y, 4),
+            format_float(p[2].z, 4),
             self.texture,
             shift_x = f.shift.x,
             shift_y = f.shift.y,
             rot = f.rotate,
-            scale_x = format!("{:.6}", f.scale.x)
-                .trim_end_matches("0")
-                .trim_end_matches("."),
-            scale_y = format!("{:.6}", f.scale.y)
-                .trim_end_matches("0")
-                .trim_end_matches("."),
+            scale_x = format_float(f.scale.x, 2),
+            scale_y = format_float(f.scale.y, 2),
             s_flags = f.surface_flags.as_u32(),
             idk = f.idk,
             value = f.value,
@@ -653,12 +650,12 @@ impl Patch {
                 let turned = if v.turned_edge { 1 } else { 0 };
                 write!(
                     out,
-                    "( {:.0} {:.0} {:.0} {:.6} {:.6} {} {} {} {} {} ) ",
-                    v.position.x,
-                    v.position.y,
-                    v.position.z,
-                    v.uv.x,
-                    v.uv.y,
+                    "( {} {} {} {} {} {} {} {} {} {} ) ",
+                    format_float(v.position.x, 4),
+                    format_float(v.position.y, 4),
+                    format_float(v.position.z, 4),
+                    format_float(v.uv.x, 4),
+                    format_float(v.uv.y, 4),
                     v.color[0],
                     v.color[1],
                     v.color[2],
@@ -697,7 +694,7 @@ pub fn save_map(map: &Map, path: &str) -> Result<(), ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::{IVec3, Vec3};
+    use glam::Vec3;
 
     const SIMPLE_BOX_MAP: &str = include_str!("../test/simple_box.map");
 
@@ -842,11 +839,11 @@ common/caulk
         let brush = &mut world.brushes[0];
         let (aabb, _polys) = brush.get_polygons_and_aabb().expect("tessellate brush");
 
-        assert_eq!(aabb.min, IVec3::new(16, -76, 0));
-        assert_eq!(aabb.max, IVec3::new(68, 0, 128));
+        assert_eq!(aabb.min, Vec3::new(16.0, -76.0, 0.0));
+        assert_eq!(aabb.max, Vec3::new(68.0, 0.0, 128.0));
 
-        assert_eq!(aabb.max.x - aabb.min.x, 52);
-        assert_eq!(aabb.max.y - aabb.min.y, 76);
-        assert_eq!(aabb.max.z - aabb.min.z, 128);
+        assert_eq!(aabb.max.x - aabb.min.x, 52.0);
+        assert_eq!(aabb.max.y - aabb.min.y, 76.0);
+        assert_eq!(aabb.max.z - aabb.min.z, 128.0);
     }
 }

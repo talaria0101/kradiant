@@ -429,6 +429,16 @@ impl AppState {
             )
             .expect("register editor icon");
 
+        let img_grid_snap = EditorIcons::get_image(editor_icons::ICON_SNAP_TO_GRID_DDS);
+        let id_grid_snap = renderer
+            .register_texture(
+                img_grid_snap.width,
+                img_grid_snap.height,
+                TextureFormat::RGBA32,
+                &img_grid_snap.rgba8,
+            )
+            .expect("register editor icon");
+
         let mut editor = ui::EditorState::default();
         editor.log_info(gl_info);
 
@@ -466,6 +476,7 @@ impl AppState {
         editor.icons.lock_x = Some(id_lock_x);
         editor.icons.lock_y = Some(id_lock_y);
         editor.icons.lock_z = Some(id_lock_z);
+        editor.icons.grid_snap = Some(id_grid_snap);
 
         Self {
             window,
@@ -1013,7 +1024,7 @@ impl AppState {
 
                     let preview_drag_mode = self.editor.view2d_drag_mode;
                     let preview_stretch_mode = self.editor.stretch_mode;
-                    let preview_move_offset = self.editor.view2d_move_offset.as_vec3();
+                    let preview_move_offset = self.editor.view2d_move_offset;
                     let preview_stretch = self.editor.view2d_stretch_preview_xform();
                     let preview_rotate = self.editor.view2d_rotate_preview_xform();
                     let preview_face = self.editor.view2d_face_stretch_preview();

@@ -857,6 +857,7 @@ dependencies = [
  "glam",
  "image",
  "log",
+ "num-traits",
  "thiserror 2.0.18",
  "zip",
 ]

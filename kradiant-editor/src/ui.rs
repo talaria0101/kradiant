@@ -6,9 +6,10 @@ use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 use crate::config::EditorConfig;
 use crate::util::{project_to_2d, text_height};
 use crate::{EDITOR_THEMES, util};
-use glam::{IVec2, IVec3, Vec3};
+use glam::{Vec2, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::BrushId;
+use kradiant::map_utils::format_float;
 //use kradiant::loader::texture_loader;
 use crate::icons::EditorIcons;
 use crate::images::EditorImages;
@@ -102,33 +103,46 @@ impl LogLevel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AxisLock {
+    x: bool,
+    y: bool,
+    z: bool
+}
+/*
+impl Default for AxisLock {
+    fn default() -> Self
+    {
+        Self { x: false, y: false, z: false }
+    }
+}
+*/
 pub struct EditorState {
     pub config: EditorConfig,
     pub show_demo: bool,
     pub show_about: bool,
     pub toolbar_height: f32,
     pub map_path: String,
+    pub grid_snapping: bool,
     pub ortho_axis: Ortho,
-    pub work_pos: IVec3,
-    pub work_depth: IVec3,
+    pub work_pos: Vec3,
+    pub work_depth: Vec3,
     pub view2d_rect: [f32; 4],
     pub view2d_zoom: f32,
     pub view2d_pan: [f32; 2],
-    pub view2d_drag_start: Option<IVec2>,
-    pub view2d_drag_current: Option<IVec2>,
+    pub view2d_drag_start: Option<Vec2>,
+    pub view2d_drag_current: Option<Vec2>,
     pub view2d_drag_mode: DragMode,
     pub view2d_tex_id: Option<TextureId>,
     /// Offset for rendering when we are moving something
-    pub view2d_move_offset: IVec3,
+    pub view2d_move_offset: Vec3,
     view2d_stretch: Option<StretchDrag>,
-    view2d_stretch_delta: IVec3,
+    view2d_stretch_delta: Vec3,
     view2d_rotate: Option<RotateDrag>,
     view2d_rotate_angle: f32,
     pub stretch_mode: StretchMode,
     pub rotate_mode: bool,
-    pub lock_x: bool,
-    pub lock_y: bool,
-    pub lock_z: bool,
+    pub axis_lock: AxisLock,
     pub selection_rgba: [f32; 4],
     pub tex_filter: String,
     pub tex_selected: Option<String>,
@@ -193,9 +207,10 @@ impl Default for EditorState {
             show_about: false,
             toolbar_height: 0.0,
             map_path: String::new(),
+            grid_snapping: true,
             ortho_axis: Ortho::default(),
-            work_pos: IVec3::new(0, 0, 0),
-            work_depth: IVec3::ZERO,
+            work_pos: Vec3::ZERO,
+            work_depth: Vec3::ZERO,
             view2d_rect: [0.0; 4],
             view2d_zoom: 1.0,
             view2d_pan: [0.0, 0.0],
@@ -203,16 +218,14 @@ impl Default for EditorState {
             view2d_drag_current: None,
             view2d_drag_mode: DragMode::NewBrush,
             view2d_tex_id: None,
-            view2d_move_offset: IVec3::ZERO,
+            view2d_move_offset: Vec3::ZERO,
             view2d_stretch: None,
-            view2d_stretch_delta: IVec3::ZERO,
+            view2d_stretch_delta: Vec3::ZERO,
             view2d_rotate: None,
             view2d_rotate_angle: 0.0,
             stretch_mode: StretchMode::default(),
             rotate_mode: false,
-            lock_x: false,
-            lock_y: false,
-            lock_z: false,
+            axis_lock: AxisLock::default(),
             selection_rgba: [0.3, 0.6, 1.0, 1.0],
             tex_filter: String::new(),
             tex_selected: None,
@@ -312,7 +325,7 @@ impl EditorState {
 
     pub(crate) fn view2d_face_stretch_preview(
         &self,
-    ) -> Option<([Option<editing::StretchFace>; 2], IVec3)> {
+    ) -> Option<([Option<editing::StretchFace>; 2], Vec3)> {
         let stretch = self.view2d_stretch.as_ref()?;
         Some((stretch.faces, self.view2d_stretch_delta))
     }
@@ -638,10 +651,29 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         ui.separator_vertical(); // vertical separator
         ui.same_line();
 
-        // Ortho axis
+        let toggle_snap = if let Some(tid) = state.icons.grid_snap {
+            let tint_col = match state.grid_snapping {
+                true => [1.0, 1.0, 1.0, 1.0],
+                false => [1.0, 1.0, 1.0, 0.5],
+            };
+            ui.image_button_config("##grid_snapping", tid, [24.0, 24.0])
+            .tint_color(tint_col)
+            .build()
+        } else {
+            ui.button("Grid Snap")
+        };
+        if toggle_snap {
+            state.grid_snapping = !state.grid_snapping;
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Toggle Grid Snapping");
+        }
+
+        ui.same_line();
+
         let view_switched = if let Some(tid) = state.icons.view_cycle {
             ui.image_button_config("##switch_view", tid, [24.0, 24.0])
-                .build()
+            .build()
         } else {
             ui.small_button("Switch") // fallback if texture didn't load
         };
@@ -656,7 +688,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         }
 
         ui.same_line();
-        ui.separator_vertical(); // vertical separator
+        ui.separator_vertical();
         ui.same_line();
 
         let stretch_icon = match state.stretch_mode {
@@ -693,9 +725,73 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         } else {
             ui.button("Rotate")
         };
-
         if toggle_rotate {
             state.rotate_mode = !state.rotate_mode;
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Free Rotation");
+        }
+
+        ui.same_line();
+        ui.separator_vertical();
+        ui.same_line();
+
+        let lock_x = if let Some(tid) = state.icons.lock_x {
+            let tint_col = match state.axis_lock.x {
+                true => [1.0, 1.0, 1.0, 1.0],
+                false => [1.0, 1.0, 1.0, 0.5],
+            };
+            ui.image_button_config("##lock_x", tid, [24.0, 24.0])
+            .tint_color(tint_col)
+            .build()
+        } else {
+            ui.button("Lock X")
+        };
+        if lock_x {
+            state.axis_lock.x = !state.axis_lock.x;
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Lock all transformations on X-axis");
+        }
+
+        ui.same_line();
+
+        let lock_y = if let Some(tid) = state.icons.lock_y {
+            let tint_col = match state.axis_lock.y {
+                true => [1.0, 1.0, 1.0, 1.0],
+                false => [1.0, 1.0, 1.0, 0.5],
+            };
+            ui.image_button_config("##lock_y", tid, [24.0, 24.0])
+            .tint_color(tint_col)
+            .build()
+        } else {
+            ui.button("Lock Y")
+        };
+        if lock_y {
+            state.axis_lock.y = !state.axis_lock.y;
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Lock all transformations on Y-axis");
+        }
+
+        ui.same_line();
+
+        let lock_z = if let Some(tid) = state.icons.lock_z {
+            let tint_col = match state.axis_lock.z {
+                true => [1.0, 1.0, 1.0, 1.0],
+                false => [1.0, 1.0, 1.0, 0.5],
+            };
+            ui.image_button_config("##lock_z", tid, [24.0, 24.0])
+            .tint_color(tint_col)
+            .build()
+        } else {
+            ui.button("Lock Z")
+        };
+        if lock_z {
+            state.axis_lock.z = !state.axis_lock.z;
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Lock all transformations on Z-axis");
         }
 
         // Store the toolbar height so the dockspace can offset below it.
@@ -885,10 +981,20 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
             };
 
             let step = state.config.grid_minor_step as f32;
-            let snapped = [snap(world[0], step), snap(world[1], step)];
+            let my_snapping = if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) {
+                !state.grid_snapping
+            } else { state.grid_snapping };
             // `snap()` returns f32; due to float error this can land just below an integer
             // (e.g. 23.999998) and truncating would break grid-step alignment.
-            let snapped_i = IVec2::new(snapped[0].round() as i32, snapped[1].round() as i32);
+            let (snapped, snapped_i) = if my_snapping {
+                let snapped = [snap(world[0], step), snap(world[1], step)];
+                let snapped_i = Vec2::new(snapped[0].round(), snapped[1].round());
+
+                (snapped, snapped_i)
+            }
+            else {
+                (world, world.into())
+            };
 
             if canvas_interacting
                 && (ui.is_mouse_clicked(dear_imgui_rs::MouseButton::Left)
@@ -938,9 +1044,9 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                 && ui.is_mouse_clicked(dear_imgui_rs::MouseButton::Left)
                 && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
             {
-                state.view2d_move_offset = IVec3::ZERO;
+                state.view2d_move_offset = Vec3::ZERO;
                 state.view2d_stretch = None;
-                state.view2d_stretch_delta = IVec3::ZERO;
+                state.view2d_stretch_delta = Vec3::ZERO;
                 state.view2d_rotate = None;
                 state.view2d_rotate_angle = 0.0;
                 state.view2d_drag_mode = if !state.selected_brushes.is_empty()
@@ -949,7 +1055,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                         if state.rotate_mode {
                             if let Some(aabb) = selection_aabb(state) {
                                 let center =
-                                    (aabb.min.as_vec3() + aabb.max.as_vec3()) * 0.5;
+                                    (aabb.min + aabb.max) * 0.5;
                                 let pivot_uv = project_to_2d(center, state.ortho_axis);
                                 state.view2d_rotate = Some(RotateDrag {
                                     selection_aabb: aabb,
@@ -969,7 +1075,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                             selection_aabb: aabb,
                             faces: [faces.get(0).copied(), faces.get(1).copied()],
                         });
-                        state.view2d_stretch_delta = IVec3::ZERO;
+                        state.view2d_stretch_delta = Vec3::ZERO;
                         DragMode::StretchSelection
                     } else {
                         DragMode::NewBrush
@@ -1002,6 +1108,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                 stretch.faces,
                                 delta,
                                 state.config.grid_minor_step as i32,
+                                my_snapping,
                             );
                         }
                         state.view2d_stretch_delta = delta;
@@ -1020,7 +1127,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                             if matches!(state.ortho_axis, Ortho::XY | Ortho::YZ) {
                                 angle = -angle;
                             }
-                            if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) {
+                            if my_snapping {
                                 angle = angle.to_degrees().round().to_radians();
                             }
                             state.view2d_rotate_angle = angle;
@@ -1056,7 +1163,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                     match state.view2d_drag_mode {
                         DragMode::MoveSelection => {
                             let d = end - start;
-                            if d != IVec2::ZERO {
+                            if d != Vec2::ZERO {
                                 let delta = util::drag_delta_to_3d(d, state.ortho_axis);
                                 if let Some(map) = state.map.as_mut() {
                                     let gen_ = &mut map.generation;
@@ -1075,12 +1182,17 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                 }
                             }
 
-                            state.view2d_move_offset = IVec3::ZERO;
+                            state.view2d_move_offset = Vec3::ZERO;
                             editor_log!(state, info, "Dragged selection");
                         }
                         DragMode::NewBrush => {
                             if state.selected_brushes.is_empty() {
                                 if let Some(created) = create_brush_from_drag(state, start, end) {
+                                    let diff = start - end;
+                                    let diff = (diff * diff).sqrt();
+                                    if diff.x < 1.0 || diff.y < 1.0 {
+                                        editor_log!(state, warn, "Brush planes smaller than `1` not recommended");
+                                    }
                                     state.selected_brushes.push((0, created.0 as usize));
                                     if let Some(aabb) = selection_aabb(state) {
                                         state.last_aabb = Some(aabb.clone());
@@ -1092,7 +1204,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                         DragMode::StretchSelection => {
                             if let Some(stretch) = state.view2d_stretch.take() {
                                 let delta = state.view2d_stretch_delta;
-                                if delta != IVec3::ZERO {
+                                if delta != Vec3::ZERO {
                                     let mut new_sel_aabb: Option<Aabb> = None;
                                     if let Some(map) = state.map.as_mut() {
                                         let mut any = false;
@@ -1193,7 +1305,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                     }
                                 }
                             }
-                            state.view2d_stretch_delta = IVec3::ZERO;
+                            state.view2d_stretch_delta = Vec3::ZERO;
                         }
                         DragMode::RotateSelection => {
                             if let Some(rot) = state.view2d_rotate.take() {
@@ -1250,7 +1362,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                 state.view2d_drag_start = None;
                 state.view2d_drag_current = None;
                 state.view2d_stretch = None;
-                state.view2d_stretch_delta = IVec3::ZERO;
+                state.view2d_stretch_delta = Vec3::ZERO;
                 state.view2d_rotate = None;
                 state.view2d_rotate_angle = 0.0;
             }
@@ -1262,10 +1374,10 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                 }
                 state.selected_brushes.clear();
                 state.view2d_stretch = None;
-                state.view2d_stretch_delta = IVec3::ZERO;
+                state.view2d_stretch_delta = Vec3::ZERO;
                 state.view2d_rotate = None;
                 state.view2d_rotate_angle = 0.0;
-                state.view2d_move_offset = IVec3::ZERO;
+                state.view2d_move_offset = Vec3::ZERO;
             }
 
             if ui.is_key_pressed(dear_imgui_rs::Key::Backspace) {
@@ -1380,10 +1492,10 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                 {
                     let col = ui.style_color(StyleColor::TabSelectedOverline);
 
-                    let to_screen = |v: IVec2| -> [f32; 2] {
+                    let to_screen = |v: Vec2| -> [f32; 2] {
                         [
-                            p[0] + w * 0.5 + state.view2d_pan[0] + v.x as f32 * state.view2d_zoom,
-                            p[1] + h * 0.5 + state.view2d_pan[1] + v.y as f32 * state.view2d_zoom,
+                            p[0] + w * 0.5 + state.view2d_pan[0] + v.x * state.view2d_zoom,
+                            p[1] + h * 0.5 + state.view2d_pan[1] + v.y * state.view2d_zoom,
                         ]
                     };
                     let to_screen_f = |v: [f32; 2]| -> [f32; 2] {
@@ -1402,7 +1514,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                     (min2.y as f32 + max2.y as f32) * 0.5,
                                 ];
                                 let off2 =
-                                    project_to_2d(state.view2d_move_offset.as_vec3(), state.ortho_axis);
+                                    project_to_2d(state.view2d_move_offset, state.ortho_axis);
                                 let a = to_screen_f(center);
                                 let b = to_screen_f([center[0] + off2[0], center[1] + off2[1]]);
                                 (a, b)
@@ -1416,7 +1528,7 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                 Ortho::XZ => (off.x, -off.z),
                                 Ortho::YZ => (off.y, -off.z),
                             };
-                            let delta_info = format!("({}, {})", dx, dy);
+                            let delta_info = format!("({}, {})", format_float(dx, 2), format_float(dy, 2));
 
                             //let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
                             let tw = text_width(ui, &delta_info);
@@ -1470,8 +1582,8 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                                     let a = to_screen_f(p0);
                                     let b = to_screen_f(p1);
 
-                                    let du = (p1[0] - p0[0]).round() as i32;
-                                    let dv = (p1[1] - p0[1]).round() as i32;
+                                    let du = format_float(p1[0] - p0[0], 2);
+                                    let dv = format_float(p1[1] - p0[1], 2);
                                     let delta_info = format!("({}, {})", du, dv);
 
                                     let tw = text_width(ui, &delta_info);
@@ -1560,29 +1672,29 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                     }
 
                     let off = if state.view2d_drag_mode == DragMode::MoveSelection {
-                        project_to_2d(state.view2d_move_offset.as_vec3(), state.ortho_axis)
+                        project_to_2d(state.view2d_move_offset, state.ortho_axis)
                     } else {
                         [0.0, 0.0]
                     };
 
                     let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
                         Ortho::XY => (
-                            selection_aabb.min.x as f32 + off[0],
-                            selection_aabb.max.x as f32 + off[0],
-                            selection_aabb.min.y as f32 + off[1],
-                            selection_aabb.max.y as f32 + off[1],
+                            selection_aabb.min.x + off[0],
+                            selection_aabb.max.x + off[0],
+                            selection_aabb.min.y + off[1],
+                            selection_aabb.max.y + off[1],
                         ),
                         Ortho::XZ => (
-                            selection_aabb.min.x as f32 + off[0],
-                            selection_aabb.max.x as f32 + off[0],
-                            -(selection_aabb.max.z as f32) + off[1],
-                            -(selection_aabb.min.z as f32) + off[1],
+                            selection_aabb.min.x + off[0],
+                            selection_aabb.max.x + off[0],
+                            -selection_aabb.max.z + off[1],
+                            -selection_aabb.min.z + off[1],
                         ),
                         Ortho::YZ => (
-                            selection_aabb.min.y as f32 + off[0],
-                            selection_aabb.max.y as f32 + off[0],
-                            -(selection_aabb.max.z as f32) + off[1],
-                            -(selection_aabb.min.z as f32) + off[1],
+                            selection_aabb.min.y + off[0],
+                            selection_aabb.max.y + off[0],
+                            -selection_aabb.max.z + off[1],
+                            -selection_aabb.min.z + off[1],
                         ),
                     };
 
@@ -1601,8 +1713,8 @@ fn draw_view2d(ui: &Ui, state: &mut EditorState, dt: f32) {
                     let bottom = to_screen_f([(min_x + max_x) * 0.5, max_y]);
                     let right = to_screen_f([max_x, (min_y + max_y) * 0.5]);
 
-                    let w_text = format!("{width:.0}");
-                    let h_text = format!("{height:.0}");
+                    let w_text = format_float(width, 2);
+                    let h_text = format_float(height, 2);
                     let w_tw = text_width(ui, &w_text);
                     //let h_tw = text_width(ui, &h_text);
 
@@ -1640,8 +1752,8 @@ fn selection_aabb_from_map(map: &kradiant::map::Map, selected: &[(usize, usize)]
     }
 
     let mut out = Aabb {
-        min: IVec3::new(i32::MAX, i32::MAX, i32::MAX),
-        max: IVec3::new(i32::MIN, i32::MIN, i32::MIN),
+        min: Vec3::new(f32::MAX, f32::MAX, f32::MAX),
+        max: Vec3::new(f32::MIN, f32::MIN, f32::MIN),
     };
 
     let mut any = false;
@@ -1659,7 +1771,7 @@ fn selection_aabb_from_map(map: &kradiant::map::Map, selected: &[(usize, usize)]
     any.then_some(out)
 }
 
-fn stretch_faces_from_start(axis: Ortho, aabb: &Aabb, start: IVec2) -> Vec<editing::StretchFace> {
+fn stretch_faces_from_start(axis: Ortho, aabb: &Aabb, start: Vec2) -> Vec<editing::StretchFace> {
     let (min_u, max_u, min_v, max_v) = match axis {
         Ortho::XY => (aabb.min.x, aabb.max.x, aabb.min.y, aabb.max.y),
         Ortho::XZ => (aabb.min.x, aabb.max.x, -aabb.max.z, -aabb.min.z),
@@ -1696,45 +1808,45 @@ fn stretch_faces_from_start(axis: Ortho, aabb: &Aabb, start: IVec2) -> Vec<editi
 }
 
 fn update_last_work_from_aabb(state: &mut EditorState, aabb: &Aabb) {
-    state.work_pos = (aabb.min + aabb.max) / 2;
+    state.work_pos = (aabb.min + aabb.max) / 2.0;
     let d = aabb.max - aabb.min;
-    let fallback = (state.config.grid_minor_step as i32).max(1);
-    state.work_depth = IVec3::new(
+    let fallback = (state.config.grid_minor_step).max(1) as f32;
+    state.work_depth = Vec3::new(
         normalize_depth(d.x, fallback),
         normalize_depth(d.y, fallback),
         normalize_depth(d.z, fallback),
     );
 }
 
-fn create_brush_from_drag(state: &mut EditorState, start: IVec2, end: IVec2) -> Option<BrushId> {
+fn create_brush_from_drag(state: &mut EditorState, start: Vec2, end: Vec2) -> Option<BrushId> {
     let min2 = start.min(end);
     let max2 = start.max(end);
     if min2.x == max2.x || min2.y == max2.y {
         return None;
     }
 
-    let fallback = (state.config.grid_minor_step as i32).max(1);
+    let fallback = (state.config.grid_minor_step as f32).max(1.0);
     let last = state.last_aabb.as_ref();
     let (min3, max3) = match state.ortho_axis {
         Ortho::XY => {
-            let (z0, z1) = last.map(|a| (a.min.z, a.max.z)).unwrap_or((0, fallback));
+            let (z0, z1) = last.map(|a| (a.min.z, a.max.z)).unwrap_or((0.0, fallback));
             (
-                IVec3::new(min2.x, min2.y, z0),
-                IVec3::new(max2.x, max2.y, z1),
+                Vec3::new(min2.x, min2.y, z0),
+                Vec3::new(max2.x, max2.y, z1),
             )
         }
         Ortho::XZ => {
-            let (y0, y1) = last.map(|a| (a.min.y, a.max.y)).unwrap_or((0, fallback));
+            let (y0, y1) = last.map(|a| (a.min.y, a.max.y)).unwrap_or((0.0, fallback));
             (
-                IVec3::new(min2.x, y0, -max2.y),
-                IVec3::new(max2.x, y1, -min2.y),
+                Vec3::new(min2.x, y0, -max2.y),
+                Vec3::new(max2.x, y1, -min2.y),
             )
         }
         Ortho::YZ => {
-            let (x0, x1) = last.map(|a| (a.min.x, a.max.x)).unwrap_or((0, fallback));
+            let (x0, x1) = last.map(|a| (a.min.x, a.max.x)).unwrap_or((0.0, fallback));
             (
-                IVec3::new(x0, min2.x, -max2.y),
-                IVec3::new(x1, max2.x, -min2.y),
+                Vec3::new(x0, min2.x, -max2.y),
+                Vec3::new(x1, max2.x, -min2.y),
             )
         }
     };

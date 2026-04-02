@@ -1,7 +1,7 @@
 use crate::map::{
     Brush, BrushContent, BrushId, Entity, EntityId, Face, Map, SurfaceFlags, TextureParams,
 };
-use crate::{IVec3, Quat, Vec3};
+use crate::{Quat, Vec3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AffineScale {
@@ -49,24 +49,24 @@ pub enum StretchFace {
     ZMax,
 }
 
-fn apply_stretch_face_delta(aabb: &mut Aabb, face: StretchFace, delta: i32) {
-    if delta == 0 {
+fn apply_stretch_face_delta(aabb: &mut Aabb, face: StretchFace, delta: f32) {
+    if delta == 0.0 {
         return;
     }
     match face {
-        StretchFace::XMin => aabb.min.x = (aabb.min.x + delta).min(aabb.max.x - 1),
-        StretchFace::XMax => aabb.max.x = (aabb.max.x + delta).max(aabb.min.x + 1),
-        StretchFace::YMin => aabb.min.y = (aabb.min.y + delta).min(aabb.max.y - 1),
-        StretchFace::YMax => aabb.max.y = (aabb.max.y + delta).max(aabb.min.y + 1),
-        StretchFace::ZMin => aabb.min.z = (aabb.min.z + delta).min(aabb.max.z - 1),
-        StretchFace::ZMax => aabb.max.z = (aabb.max.z + delta).max(aabb.min.z + 1),
+        StretchFace::XMin => aabb.min.x = (aabb.min.x + delta).min(aabb.max.x - 1.0),
+        StretchFace::XMax => aabb.max.x = (aabb.max.x + delta).max(aabb.min.x + 1.0),
+        StretchFace::YMin => aabb.min.y = (aabb.min.y + delta).min(aabb.max.y - 1.0),
+        StretchFace::YMax => aabb.max.y = (aabb.max.y + delta).max(aabb.min.y + 1.0),
+        StretchFace::ZMin => aabb.min.z = (aabb.min.z + delta).min(aabb.max.z - 1.0),
+        StretchFace::ZMax => aabb.max.z = (aabb.max.z + delta).max(aabb.min.z + 1.0),
     }
 }
 
 pub fn preview_stretched_aabb(
     selection_aabb: &Aabb,
     faces: [Option<StretchFace>; 2],
-    delta: IVec3,
+    delta: Vec3,
 ) -> Aabb {
     let mut out = selection_aabb.clone();
     for face in faces.iter().flatten() {
@@ -83,7 +83,7 @@ pub fn preview_stretched_aabb(
 pub fn stretch_selection_transform(
     selection_aabb: &Aabb,
     faces: [Option<StretchFace>; 2],
-    delta: IVec3,
+    delta: Vec3,
 ) -> Option<(AffineScale, Aabb)> {
     let preview = preview_stretched_aabb(selection_aabb, faces, delta);
 
@@ -95,7 +95,7 @@ pub fn stretch_selection_transform(
         match face {
             StretchFace::XMin => {
                 let old = selection_aabb.max.x - selection_aabb.min.x;
-                if old == 0 {
+                if old == 0.0 {
                     return None;
                 }
                 let new_ = selection_aabb.max.x - preview.min.x;
@@ -105,7 +105,7 @@ pub fn stretch_selection_transform(
             }
             StretchFace::XMax => {
                 let old = selection_aabb.max.x - selection_aabb.min.x;
-                if old == 0 {
+                if old == 0.0 {
                     return None;
                 }
                 let new_ = preview.max.x - selection_aabb.min.x;
@@ -115,7 +115,7 @@ pub fn stretch_selection_transform(
             }
             StretchFace::YMin => {
                 let old = selection_aabb.max.y - selection_aabb.min.y;
-                if old == 0 {
+                if old == 0.0 {
                     return None;
                 }
                 let new_ = selection_aabb.max.y - preview.min.y;
@@ -125,7 +125,7 @@ pub fn stretch_selection_transform(
             }
             StretchFace::YMax => {
                 let old = selection_aabb.max.y - selection_aabb.min.y;
-                if old == 0 {
+                if old == 0.0 {
                     return None;
                 }
                 let new_ = preview.max.y - selection_aabb.min.y;
@@ -135,7 +135,7 @@ pub fn stretch_selection_transform(
             }
             StretchFace::ZMin => {
                 let old = selection_aabb.max.z - selection_aabb.min.z;
-                if old == 0 {
+                if old == 0.0 {
                     return None;
                 }
                 let new_ = selection_aabb.max.z - preview.min.z;
@@ -145,7 +145,7 @@ pub fn stretch_selection_transform(
             }
             StretchFace::ZMax => {
                 let old = selection_aabb.max.z - selection_aabb.min.z;
-                if old == 0 {
+                if old == 0.0 {
                     return None;
                 }
                 let new_ = preview.max.z - selection_aabb.min.z;
@@ -159,26 +159,28 @@ pub fn stretch_selection_transform(
     any.then_some((AffineScale { anchor, scale }, preview))
 }
 
-fn transform_interval(lo: i32, hi: i32, anchor: f32, scale: f32) -> (i32, i32) {
-    let f = |x: i32| anchor + (x as f32 - anchor) * scale;
+fn transform_interval(lo: f32, hi: f32, anchor: f32, scale: f32) -> (f32, f32) {
+    let f = |x: f32| anchor + (x - anchor) * scale;
     let a = f(lo);
     let b = f(hi);
-    let min = aabb_floor_eps(a.min(b));
-    let max = aabb_ceil_eps(a.max(b));
+    //let min = aabb_floor_eps(a.min(b));
+    let min = a.min(b);
+    //let max = aabb_ceil_eps(a.max(b));
+    let max = a.max(b);
     (min, max)
 }
 
 // When brushes are grid-aligned, plane intersection can still yield slightly-off values like
 // `88.00001`. Treat values within a tiny epsilon as on-grid to avoid 1-unit AABB drift.
-const AABB_EPS: f32 = 1.0e-3;
+// const AABB_EPS: f32 = 1.0e-3;
 
-fn aabb_floor_eps(v: f32) -> i32 {
-    (v + AABB_EPS).floor() as i32
-}
+// fn aabb_floor_eps(v: f32) -> i32 {
+//     (v + AABB_EPS).floor() as i32
+// }
 
-fn aabb_ceil_eps(v: f32) -> i32 {
-    (v - AABB_EPS).ceil() as i32
-}
+// fn aabb_ceil_eps(v: f32) -> i32 {
+//     (v - AABB_EPS).ceil() as i32
+// }
 
 pub fn apply_affine_scale_to_brush(
     brush: &mut Brush,
@@ -226,11 +228,11 @@ pub fn apply_affine_scale_to_brush(
         xform.anchor.z,
         xform.scale.z,
     );
-    brush.aabb.min = IVec3::new(min_x, min_y, min_z);
-    brush.aabb.max = IVec3::new(max_x, max_y, max_z);
+    brush.aabb.min = Vec3::new(min_x, min_y, min_z);
+    brush.aabb.max = Vec3::new(max_x, max_y, max_z);
 
     // Bump generation and clear caches (via no-op translate).
-    brush.translate(generation, IVec3::ZERO);
+    brush.translate(generation, Vec3::ZERO);
     true
 }
 
@@ -239,15 +241,15 @@ pub fn rotate_selection_transform(
     axis: Vec3,
     angle_rad: f32,
 ) -> Option<(AffineRotate, Aabb)> {
-    let pivot = (selection_aabb.min.as_vec3() + selection_aabb.max.as_vec3()) * 0.5;
+    let pivot = (selection_aabb.min + selection_aabb.max) * 0.5;
     let xform = AffineRotate::from_axis_angle(pivot, axis, angle_rad)?;
     let preview = preview_rotated_aabb(selection_aabb, xform);
     Some((xform, preview))
 }
 
 pub fn preview_rotated_aabb(selection_aabb: &Aabb, xform: AffineRotate) -> Aabb {
-    let min = selection_aabb.min.as_vec3();
-    let max = selection_aabb.max.as_vec3();
+    let min = selection_aabb.min;
+    let max = selection_aabb.max;
     let corners = [
         Vec3::new(min.x, min.y, min.z),
         Vec3::new(max.x, min.y, min.z),
@@ -268,16 +270,18 @@ pub fn preview_rotated_aabb(selection_aabb: &Aabb, xform: AffineRotate) -> Aabb 
     }
 
     Aabb {
-        min: IVec3::new(
+        /*min: Vec3::new(
             aabb_floor_eps(out_min.x),
             aabb_floor_eps(out_min.y),
             aabb_floor_eps(out_min.z),
         ),
-        max: IVec3::new(
+        max: Vec3::new(
             aabb_ceil_eps(out_max.x),
             aabb_ceil_eps(out_max.y),
             aabb_ceil_eps(out_max.z),
-        ),
+        ),*/
+        min: Vec3::new(out_min.x, out_min.y, out_min.z),
+        max: Vec3::new(out_max.x, out_max.y, out_max.z)
     }
 }
 
@@ -315,7 +319,7 @@ pub fn apply_affine_rotate_to_brush(
     }
 
     // Bump generation and clear caches (via no-op translate).
-    brush.translate(generation, IVec3::ZERO);
+    brush.translate(generation, Vec3::ZERO);
     true
 }
 
@@ -327,89 +331,89 @@ fn axis_of_face(face: StretchFace) -> usize {
     }
 }
 
-fn div_ceil_i32(a: i32, b: i32) -> i32 {
-    debug_assert!(b > 0);
+fn div_ceil_f32(a: f32, b: f32) -> f32 {
+    debug_assert!(b > 0.0);
     -((-a).div_euclid(b))
 }
 
-fn clamp_face_delta_snapped(aabb: &Aabb, face: StretchFace, delta: i32, grid_step: i32) -> i32 {
-    let step = grid_step.abs().max(1);
+fn clamp_face_delta_snapped(aabb: &Aabb, face: StretchFace, delta: f32, grid_step: i32) -> f32 {
+    let step = grid_step.abs().max(1) as f32;
 
     // Ensure grid-step alignment even if upstream input was slightly off.
     // This matches the editor's f32 snapping (`round()`).
-    let delta = if step == 1 {
+    let delta = if step == 1.0 {
         delta
     } else {
-        ((delta as f32 / step as f32).round() as i32) * step
+        ((delta / step as f32).round()) * step as f32
     };
 
-    if delta == 0 {
-        return 0;
+    if delta == 0.0 {
+        return 0.0;
     }
 
     match face {
         StretchFace::XMin => {
-            if delta <= 0 {
+            if delta <= 0.0 {
                 return delta;
             }
-            let max_delta = (aabb.max.x - 1) - aabb.min.x;
+            let max_delta = (aabb.max.x - 1.0) - aabb.min.x;
             if delta <= max_delta {
                 return delta;
             }
             let q = max_delta.div_euclid(step) * step;
-            q.max(0)
+            q.max(0.0)
         }
         StretchFace::XMax => {
-            if delta >= 0 {
+            if delta >= 0.0 {
                 return delta;
             }
-            let min_delta = (aabb.min.x + 1) - aabb.max.x;
+            let min_delta = (aabb.min.x + 1.0) - aabb.max.x;
             if delta >= min_delta {
                 return delta;
             }
-            div_ceil_i32(min_delta, step) * step
+            div_ceil_f32(min_delta, step) * step
         }
         StretchFace::YMin => {
-            if delta <= 0 {
+            if delta <= 0.0 {
                 return delta;
             }
-            let max_delta = (aabb.max.y - 1) - aabb.min.y;
+            let max_delta = (aabb.max.y - 1.0) - aabb.min.y;
             if delta <= max_delta {
                 return delta;
             }
             let q = max_delta.div_euclid(step) * step;
-            q.max(0)
+            q.max(0.0)
         }
         StretchFace::YMax => {
-            if delta >= 0 {
+            if delta >= 0.0 {
                 return delta;
             }
-            let min_delta = (aabb.min.y + 1) - aabb.max.y;
+            let min_delta = (aabb.min.y + 1.0) - aabb.max.y;
             if delta >= min_delta {
                 return delta;
             }
-            div_ceil_i32(min_delta, step) * step
+            div_ceil_f32(min_delta, step) * step
         }
         StretchFace::ZMin => {
-            if delta <= 0 {
+            if delta <= 0.0 {
                 return delta;
             }
-            let max_delta = (aabb.max.z - 1) - aabb.min.z;
+            let max_delta = (aabb.max.z - 1.0) - aabb.min.z;
             if delta <= max_delta {
                 return delta;
             }
             let q = max_delta.div_euclid(step) * step;
-            q.max(0)
+            q.max(0.0)
         }
         StretchFace::ZMax => {
-            if delta >= 0 {
+            if delta >= 0.0 {
                 return delta;
             }
-            let min_delta = (aabb.min.z + 1) - aabb.max.z;
+            let min_delta = (aabb.min.z + 1.0) - aabb.max.z;
             if delta >= min_delta {
                 return delta;
             }
-            div_ceil_i32(min_delta, step) * step
+            div_ceil_f32(min_delta, step) * step
         }
     }
 }
@@ -471,7 +475,7 @@ fn apply_plane_translation(faces: &mut [Face], indices: &[usize], dv: Vec3) {
 pub fn preview_convex_face_stretch_polys(
     brush: &Brush,
     faces: [Option<StretchFace>; 2],
-    delta: IVec3,
+    delta: Vec3,
     grid_step: i32,
 ) -> Option<Vec<(Vec<Vec3>, Vec<u32>)>> {
     let BrushContent::Convex(_) = &brush.content else {
@@ -493,7 +497,7 @@ pub fn preview_convex_face_stretch_polys(
             StretchFace::ZMin | StretchFace::ZMax => delta.z,
         };
         let amt = clamp_face_delta_snapped(&aabb, *face, amt, grid_step);
-        if amt == 0 {
+        if amt == 0.0 {
             continue;
         }
 
@@ -518,7 +522,7 @@ pub fn stretch_convex_brush_faces(
     brush: &mut Brush,
     generation: &mut u64,
     faces: [Option<StretchFace>; 2],
-    delta: IVec3,
+    delta: Vec3,
     grid_step: i32,
 ) -> bool {
     let BrushContent::Convex(_) = &brush.content else {
@@ -546,7 +550,7 @@ pub fn stretch_convex_brush_faces(
             StretchFace::ZMin | StretchFace::ZMax => delta.z,
         };
         let amt = clamp_face_delta_snapped(&aabb, *face, amt, grid_step);
-        if amt == 0 {
+        if amt == 0.0 {
             continue;
         }
 
@@ -588,15 +592,15 @@ pub fn stretch_convex_brush_faces(
     } else {
         brush.content = BrushContent::Convex(old_faces);
         brush.aabb = old_aabb;
-        brush.translate(generation, IVec3::ZERO);
+        brush.translate(generation, Vec3::ZERO);
         false
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Aabb {
-    pub min: IVec3,
-    pub max: IVec3,
+    pub min: Vec3,
+    pub max: Vec3,
 }
 
 pub fn aabb_from_polys(polys: &[(Vec<Vec3>, Vec<u32>)]) -> Aabb {
@@ -611,7 +615,7 @@ pub fn aabb_from_polys(polys: &[(Vec<Vec3>, Vec<u32>)]) -> Aabb {
     }
 
     Aabb {
-        min: IVec3::new(
+        /*min: IVec3::new(
             aabb_floor_eps(min.x),
             aabb_floor_eps(min.y),
             aabb_floor_eps(min.z),
@@ -620,7 +624,9 @@ pub fn aabb_from_polys(polys: &[(Vec<Vec3>, Vec<u32>)]) -> Aabb {
             aabb_ceil_eps(max.x),
             aabb_ceil_eps(max.y),
             aabb_ceil_eps(max.z),
-        ),
+        ),*/
+        min: Vec3::new(min.x, min.y, min.z),
+        max: Vec3::new(max.x, max.y, max.z)
     }
 }
 
@@ -634,7 +640,7 @@ pub fn aabb_from_positions(positions: &[Vec3]) -> Aabb {
     }
 
     Aabb {
-        min: IVec3::new(
+        /*min: IVec3::new(
             aabb_floor_eps(min.x),
             aabb_floor_eps(min.y),
             aabb_floor_eps(min.z),
@@ -643,21 +649,23 @@ pub fn aabb_from_positions(positions: &[Vec3]) -> Aabb {
             aabb_ceil_eps(max.x),
             aabb_ceil_eps(max.y),
             aabb_ceil_eps(max.z),
-        ),
+        ),*/
+        min: Vec3::new(min.x, min.y, min.z),
+        max: Vec3::new(max.x, max.y, max.z)
     }
 }
 
 impl Default for Aabb {
     fn default() -> Self {
         Self {
-            min: IVec3::default(),
-            max: IVec3::default(),
+            min: Vec3::default(),
+            max: Vec3::default(),
         }
     }
 }
 
 impl Aabb {
-    pub fn from_points(min: IVec3, max: IVec3) -> Self {
+    pub fn from_points(min: Vec3, max: Vec3) -> Self {
         Self {
             min: min.min(max),
             max: min.max(max),
@@ -666,8 +674,8 @@ impl Aabb {
 
     pub fn intersected_by_ray(&self, ray_origin: Vec3, ray_dir: Vec3) -> bool {
         let inv_dir = 1.0 / ray_dir;
-        let min = self.min.as_vec3();
-        let max = self.max.as_vec3();
+        let min = self.min;
+        let max = self.max;
 
         let t1 = (min - ray_origin) * inv_dir;
         let t2 = (max - ray_origin) * inv_dir;
@@ -712,8 +720,8 @@ fn orient_faces_inward_toward_point(faces: &mut [Face], interior: Vec3) -> bool 
 }
 
 pub fn convex_brush_from_aabb(id: BrushId, aabb: Aabb, texture: impl Into<String>) -> Brush {
-    let min = aabb.min.as_vec3();
-    let max = aabb.max.as_vec3();
+    let min = aabb.min;
+    let max = aabb.max;
     let texture = texture.into();
     let params = default_texture_params();
 
@@ -861,7 +869,7 @@ pub fn orient_convex_brush_faces_inward(brush: &mut Brush, generation: &mut u64)
 
     if any {
         // Clear caches (and bump generation) via no-op translate.
-        brush.translate(generation, IVec3::ZERO);
+        brush.translate(generation, Vec3::ZERO);
     }
 
     any
@@ -920,8 +928,8 @@ pub fn pick_brush_by_ray(
                         continue;
                     };
                     let Some((t_enter, t_exit)) = ray_aabb_intersection(
-                        aabb.min.as_vec3(),
-                        aabb.max.as_vec3(),
+                        aabb.min,
+                        aabb.max,
                         ray_origin,
                         ray_dir,
                     ) else {
@@ -961,8 +969,8 @@ pub fn pick_brush_by_ray(
                     brush.aabb = patch_aabb.clone();
 
                     let Some((t_enter, t_exit)) = ray_aabb_intersection(
-                        patch_aabb.min.as_vec3(),
-                        patch_aabb.max.as_vec3(),
+                        patch_aabb.min,
+                        patch_aabb.max,
                         ray_origin,
                         ray_dir,
                     ) else {
@@ -1128,10 +1136,10 @@ mod tests {
 
     #[test]
     fn convex_brush_from_aabb_is_inward_by_default() {
-        let aabb = Aabb::from_points(IVec3::new(-16, -32, 0), IVec3::new(48, 64, 128));
+        let aabb = Aabb::from_points(Vec3::new(-16.0, -32.0, 0.0), Vec3::new(48.0, 64.0, 128.0));
         let mut brush = convex_brush_from_aabb(BrushId(0), aabb.clone(), "common/caulk");
 
-        let center = (aabb.min.as_vec3() + aabb.max.as_vec3()) * 0.5;
+        let center = (aabb.min + aabb.max) * 0.5;
         let BrushContent::Convex(faces) = &brush.content else {
             panic!("expected convex brush");
         };

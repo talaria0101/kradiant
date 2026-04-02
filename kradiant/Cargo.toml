@@ -9,3 +9,4 @@ log = "0.4"
 glam = "0.32.1"
 image = { version = "0.25.10", default-features = false, features = ["dds", "jpeg", "tga"] }
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
+num-traits = "0.2.19"

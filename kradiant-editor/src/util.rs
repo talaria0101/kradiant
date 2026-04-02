@@ -7,7 +7,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::ui::{EditorState, Ortho};
-use glam::{IVec2, IVec3, Vec3};
+use glam::{Vec2, Vec3};
 
 pub(crate) fn get_config_dir() -> io::Result<PathBuf> {
     let base = std::env::home_dir()
@@ -287,7 +287,7 @@ pub fn save_map(state: &mut EditorState) {
     }
 }
 
-pub fn click_in_selection_aabb(state: &EditorState, pt: IVec2) -> bool {
+pub fn click_in_selection_aabb(state: &EditorState, pt: Vec2) -> bool {
     if state.selected_brushes.is_empty() {
         return false;
     }
@@ -295,8 +295,8 @@ pub fn click_in_selection_aabb(state: &EditorState, pt: IVec2) -> bool {
         return false;
     };
 
-    let mut min = IVec3::new(i32::MAX, i32::MAX, i32::MAX);
-    let mut max = IVec3::new(i32::MIN, i32::MIN, i32::MIN);
+    let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+    let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
     let mut any = false;
 
     for &(entity_idx, brush_idx) in &state.selected_brushes {
@@ -323,37 +323,37 @@ pub fn click_in_selection_aabb(state: &EditorState, pt: IVec2) -> bool {
     pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y
 }
 
-pub fn drag_delta_to_3d(d: IVec2, axis: Ortho) -> IVec3 {
+pub fn drag_delta_to_3d(d: Vec2, axis: Ortho) -> Vec3 {
     match axis {
-        Ortho::XY => IVec3::new(d.x, d.y, 0),
-        Ortho::XZ => IVec3::new(d.x, 0, -d.y),
-        Ortho::YZ => IVec3::new(0, d.x, -d.y),
+        Ortho::XY => Vec3::new(d.x, d.y, 0.0),
+        Ortho::XZ => Vec3::new(d.x, 0.0, -d.y),
+        Ortho::YZ => Vec3::new(0.0, d.x, -d.y),
     }
 }
 
-pub fn div_ceil_i32(a: i32, b: i32) -> i32 {
-    debug_assert!(b > 0);
+pub fn div_ceil_f32(a: f32, b: f32) -> f32 {
+    debug_assert!(b > 0.0);
     -((-a).div_euclid(b))
 }
 
-pub fn normalize_depth(v: i32, fallback: i32) -> i32 {
+pub fn normalize_depth(v: f32, fallback: f32) -> f32 {
     let v = v.abs();
-    if v == 0 { fallback.max(1) } else { v }
+    if v == 0.0 { fallback.max(1.0) } else { v }
 }
 
-pub fn project_aabb_to_2d(aabb: &Aabb, axis: Ortho) -> (IVec2, IVec2) {
+pub fn project_aabb_to_2d(aabb: &Aabb, axis: Ortho) -> (Vec2, Vec2) {
     match axis {
         Ortho::XY => (
-            IVec2::new(aabb.min.x, aabb.min.y),
-            IVec2::new(aabb.max.x, aabb.max.y),
+            Vec2::new(aabb.min.x, aabb.min.y),
+            Vec2::new(aabb.max.x, aabb.max.y),
         ),
         Ortho::XZ => (
-            IVec2::new(aabb.min.x, -aabb.max.z),
-            IVec2::new(aabb.max.x, -aabb.min.z),
+            Vec2::new(aabb.min.x, -aabb.max.z),
+            Vec2::new(aabb.max.x, -aabb.min.z),
         ),
         Ortho::YZ => (
-            IVec2::new(aabb.min.y, -aabb.max.z),
-            IVec2::new(aabb.max.y, -aabb.min.z),
+            Vec2::new(aabb.min.y, -aabb.max.z),
+            Vec2::new(aabb.max.y, -aabb.min.z),
         ),
     }
 }
@@ -361,61 +361,74 @@ pub fn project_aabb_to_2d(aabb: &Aabb, axis: Ortho) -> (IVec2, IVec2) {
 pub fn clamp_stretch_delta(
     aabb: &Aabb,
     faces: [Option<editing::StretchFace>; 2],
-    delta: IVec3,
+    delta: Vec3,
     grid_step: i32,
-) -> IVec3 {
-    let step = grid_step.abs().max(1);
+    grid_snapping: bool,
+) -> Vec3 {
+    let step = grid_step.abs().max(1) as f32;
     let mut out = delta;
 
     for face in faces.iter().flatten() {
         match face {
             editing::StretchFace::XMin => {
-                if out.x > 0 {
-                    let max_delta = (aabb.max.x - 1) - aabb.min.x;
-                    if out.x > max_delta {
-                        out.x = (max_delta.div_euclid(step) * step).max(0);
-                    }
+                if grid_snapping {
+                    let new_x = aabb.min.x + out.x;
+                    let snapped_x = snap(new_x, step);
+                    out.x = snapped_x - aabb.min.x;
                 }
+                // Always clamp to prevent inverting the brush
+                let max_delta = (aabb.max.x - 1.0) - aabb.min.x;
+                out.x = out.x.clamp(-f32::INFINITY, max_delta);
             }
             editing::StretchFace::XMax => {
-                if out.x < 0 {
-                    let min_delta = (aabb.min.x + 1) - aabb.max.x;
-                    if out.x < min_delta {
-                        out.x = div_ceil_i32(min_delta, step) * step;
-                    }
+                if grid_snapping {
+                    let new_x = aabb.max.x + out.x;
+                    let snapped_x = snap(new_x, step);
+                    out.x = snapped_x - aabb.max.x;
                 }
+                // Always clamp to prevent inverting the brush
+                let min_delta = (aabb.min.x + 1.0) - aabb.max.x;
+                out.x = out.x.clamp(min_delta, f32::INFINITY);
             }
             editing::StretchFace::YMin => {
-                if out.y > 0 {
-                    let max_delta = (aabb.max.y - 1) - aabb.min.y;
-                    if out.y > max_delta {
-                        out.y = (max_delta.div_euclid(step) * step).max(0);
-                    }
+                if grid_snapping {
+                    let new_y = aabb.min.y + out.y;
+                    let snapped_y = snap(new_y, step);
+                    out.y = snapped_y - aabb.min.y;
                 }
+                // Always clamp to prevent inverting the brush
+                let max_delta = (aabb.max.y - 1.0) - aabb.min.y;
+                out.y = out.y.clamp(-f32::INFINITY, max_delta);
             }
             editing::StretchFace::YMax => {
-                if out.y < 0 {
-                    let min_delta = (aabb.min.y + 1) - aabb.max.y;
-                    if out.y < min_delta {
-                        out.y = div_ceil_i32(min_delta, step) * step;
-                    }
+                if grid_snapping {
+                    let new_y = aabb.max.y + out.y;
+                    let snapped_y = snap(new_y, step);
+                    out.y = snapped_y - aabb.max.y;
                 }
+                // Always clamp to prevent inverting the brush
+                let min_delta = (aabb.min.y + 1.0) - aabb.max.y;
+                out.y = out.y.clamp(min_delta, f32::INFINITY);
             }
             editing::StretchFace::ZMin => {
-                if out.z > 0 {
-                    let max_delta = (aabb.max.z - 1) - aabb.min.z;
-                    if out.z > max_delta {
-                        out.z = (max_delta.div_euclid(step) * step).max(0);
-                    }
+                if grid_snapping {
+                    let new_z = aabb.min.z + out.z;
+                    let snapped_z = snap(new_z, step);
+                    out.z = snapped_z - aabb.min.z;
                 }
+                // Always clamp to prevent inverting the brush
+                let max_delta = (aabb.max.z - 1.0) - aabb.min.z;
+                out.z = out.z.clamp(-f32::INFINITY, max_delta);
             }
             editing::StretchFace::ZMax => {
-                if out.z < 0 {
-                    let min_delta = (aabb.min.z + 1) - aabb.max.z;
-                    if out.z < min_delta {
-                        out.z = div_ceil_i32(min_delta, step) * step;
-                    }
+                if grid_snapping {
+                    let new_z = aabb.max.z + out.z;
+                    let snapped_z = snap(new_z, step);
+                    out.z = snapped_z - aabb.max.z;
                 }
+                // Always clamp to prevent inverting the brush
+                let min_delta = (aabb.min.z + 1.0) - aabb.max.z;
+                out.z = out.z.clamp(min_delta, f32::INFINITY);
             }
         }
     }
