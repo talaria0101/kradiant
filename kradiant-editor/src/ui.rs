@@ -347,6 +347,31 @@ impl EditorState {
             Ortho::XZ | Ortho::YZ => self.axis_lock.z,
         }
     }
+
+    pub fn view2d_center_world(&self) -> Vec3 {
+        let zoom = self.view2d_zoom.max(0.001);
+        let world_x = -self.view2d_pan[0] / zoom;
+        let world_y = -self.view2d_pan[1] / zoom;
+
+        match self.ortho_axis {
+            Ortho::XY => Vec3::new(world_x, world_y, self.work_pos.z),
+            Ortho::XZ => Vec3::new(world_x, self.work_pos.y, -world_y),
+            Ortho::YZ => Vec3::new(self.work_pos.x, world_x, -world_y),
+        }
+    }
+
+    pub fn set_view2d_center(&mut self, world_center: Vec3) {
+        let zoom = self.view2d_zoom.max(0.001);
+
+        let (target_x, target_y) = match self.ortho_axis {
+            Ortho::XY => (world_center.x, world_center.y),
+            Ortho::XZ => (world_center.x, -world_center.z),
+            Ortho::YZ => (world_center.y, -world_center.z),
+        };
+
+        self.view2d_pan[0] = -target_x * zoom;
+        self.view2d_pan[1] = -target_y * zoom;
+    }
 }
 
 // Top-level draw call
@@ -685,13 +710,23 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             ui.small_button("Switch") // fallback if texture didn't load
         };
         if view_switched {
+            let old_center = state.view2d_center_world();
             state.ortho_axis = state.ortho_axis.next();
+            state.set_view2d_center(old_center);
+
             if let Some(aabb) = state.last_aabb.clone() {
                 update_last_work_from_aabb(state, &aabb);
             }
         }
         if ui.is_item_hovered() {
             ui.tooltip_text("Switch View");
+        }
+
+        if ui.is_key_down(dear_imgui_rs::Key::LeftShift) && ui.is_key_pressed(dear_imgui_rs::Key::C) {
+            if !state.selected_brushes.is_empty() {
+                state.set_view2d_center(state.work_pos);
+                editor_log!(state, info, "Goto Selection");
+            }
         }
 
         ui.same_line();
