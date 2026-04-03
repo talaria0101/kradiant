@@ -281,7 +281,7 @@ pub fn preview_rotated_aabb(selection_aabb: &Aabb, xform: AffineRotate) -> Aabb 
             aabb_ceil_eps(out_max.z),
         ),*/
         min: Vec3::new(out_min.x, out_min.y, out_min.z),
-        max: Vec3::new(out_max.x, out_max.y, out_max.z)
+        max: Vec3::new(out_max.x, out_max.y, out_max.z),
     }
 }
 
@@ -626,7 +626,7 @@ pub fn aabb_from_polys(polys: &[(Vec<Vec3>, Vec<u32>)]) -> Aabb {
             aabb_ceil_eps(max.z),
         ),*/
         min: Vec3::new(min.x, min.y, min.z),
-        max: Vec3::new(max.x, max.y, max.z)
+        max: Vec3::new(max.x, max.y, max.z),
     }
 }
 
@@ -651,7 +651,7 @@ pub fn aabb_from_positions(positions: &[Vec3]) -> Aabb {
             aabb_ceil_eps(max.z),
         ),*/
         min: Vec3::new(min.x, min.y, min.z),
-        max: Vec3::new(max.x, max.y, max.z)
+        max: Vec3::new(max.x, max.y, max.z),
     }
 }
 
@@ -927,12 +927,9 @@ pub fn pick_brush_by_ray(
                     let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
                         continue;
                     };
-                    let Some((t_enter, t_exit)) = ray_aabb_intersection(
-                        aabb.min,
-                        aabb.max,
-                        ray_origin,
-                        ray_dir,
-                    ) else {
+                    let Some((t_enter, t_exit)) =
+                        ray_aabb_intersection(aabb.min, aabb.max, ray_origin, ray_dir)
+                    else {
                         continue;
                     };
                     if t_exit < 0.0 {
@@ -968,12 +965,9 @@ pub fn pick_brush_by_ray(
                     };
                     brush.aabb = patch_aabb.clone();
 
-                    let Some((t_enter, t_exit)) = ray_aabb_intersection(
-                        patch_aabb.min,
-                        patch_aabb.max,
-                        ray_origin,
-                        ray_dir,
-                    ) else {
+                    let Some((t_enter, t_exit)) =
+                        ray_aabb_intersection(patch_aabb.min, patch_aabb.max, ray_origin, ray_dir)
+                    else {
                         continue;
                     };
                     if t_exit < 0.0 {

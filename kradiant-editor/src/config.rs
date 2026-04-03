@@ -11,25 +11,18 @@ pub struct EditorConfig {
 
 impl EditorConfig {
     pub fn load() -> Result<Self, ini::Error> {
-        let cfg_dir = util::get_config_dir().unwrap();
-        let cfg_file = cfg_dir.join("prefs.ini");
-
-        match Ini::load_from_file(&cfg_file) {
-            Ok(c) => Ok(c.into()),
-            Err(e) => Err(e),
-        }
+        let cfg_file = util::get_config_dir()?.join("prefs.ini");
+        Ini::load_from_file(&cfg_file).map(Self::from)
     }
 
     pub fn save(cfg: Self) -> String {
-        let cfg_dir = util::get_config_dir().unwrap();
-        let cfg_file = cfg_dir.join("prefs.ini");
-
+        let cfg_file = util::get_config_dir().unwrap().join("prefs.ini");
         match Ini::write_to_file(&cfg.into(), &cfg_file) {
             Ok(_) => format!("Saved configuration to {}", cfg_file.display()),
             Err(e) => format!(
                 "Error saving configuration to {}: {}",
                 cfg_file.display(),
-                e.to_string()
+                e
             ),
         }
     }
@@ -125,15 +118,15 @@ impl From<Ini> for EditorConfig {
     }
 }
 
-impl Into<Ini> for EditorConfig {
-    fn into(self) -> Ini {
+impl From<EditorConfig> for Ini {
+    fn from(cfg: EditorConfig) -> Self {
         let mut conf = Ini::new();
         conf.with_section(Some("view"))
-            .set("grid_size", self.grid_minor_step.to_string())
-            .set("3d_fov", self.view3d_fov.to_string());
+            .set("grid_size", cfg.grid_minor_step.to_string())
+            .set("3d_fov", cfg.view3d_fov.to_string());
 
         conf.with_section(Some("misc"))
-            .set("active_theme", self.active_theme.to_string());
+            .set("active_theme", cfg.active_theme.to_string());
 
         conf
     }

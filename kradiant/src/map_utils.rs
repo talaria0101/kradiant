@@ -63,9 +63,7 @@ pub fn format_float<T: Float + Display>(value: T, points: u8) -> String {
 pub fn format_float_trim<T: Float + Display>(value: T, points: u8) -> String {
     let rounded = round_float(value, points);
     let formatted = format!("{rounded}");
-    let trimmed = formatted
-    .trim_end_matches('0')
-    .trim_end_matches('.');
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
 
     if trimmed.is_empty() { "0" } else { trimmed }.to_string()
 }

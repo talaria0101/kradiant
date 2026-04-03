@@ -96,6 +96,73 @@ struct View2dCache {
     cull_bottom: f32,
 }
 
+/// Register a texture image with the renderer.
+fn register_texture(
+    renderer: &mut GlowRenderer,
+    img: &kradiant::texture::TextureImage,
+    label: &str,
+) -> dear_imgui_rs::TextureId {
+    renderer
+        .register_texture(img.width, img.height, TextureFormat::RGBA32, &img.rgba8)
+        .unwrap_or_else(|_| panic!("failed to register {}", label))
+}
+
+/// Compile the 2D wire shader program (GL 2.1 compatible).
+/// Returns (program, mvp_uniform_location, color_uniform_location).
+fn compile_wire_shader(
+    gl: &glow::Context,
+) -> (glow::Program, glow::UniformLocation, glow::UniformLocation) {
+    unsafe {
+        let vert = gl.create_shader(glow::VERTEX_SHADER).unwrap();
+        gl.shader_source(
+            vert,
+            r#"
+        #version 120
+        attribute vec3 a_pos;
+        uniform mat4 u_mvp;
+        void main() { gl_Position = u_mvp * vec4(a_pos, 1.0); }
+        "#,
+        );
+        gl.compile_shader(vert);
+
+        if !gl.get_shader_compile_status(vert) {
+            panic!(
+                "vertex shader compilation failed: {}",
+                gl.get_shader_info_log(vert)
+            );
+        }
+
+        let frag = gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
+        gl.shader_source(
+            frag,
+            r#"
+        #version 120
+        uniform vec4 u_color;
+        void main() { gl_FragColor = u_color; }
+        "#,
+        );
+        gl.compile_shader(frag);
+
+        if !gl.get_shader_compile_status(frag) {
+            panic!(
+                "fragment shader compilation failed: {}",
+                gl.get_shader_info_log(frag)
+            );
+        }
+
+        let program = gl.create_program().unwrap();
+        gl.attach_shader(program, vert);
+        gl.attach_shader(program, frag);
+        gl.bind_attrib_location(program, 0, "a_pos");
+        gl.link_program(program);
+
+        let mvp_loc = gl.get_uniform_location(program, "u_mvp").unwrap();
+        let color_loc = gl.get_uniform_location(program, "u_color").unwrap();
+
+        (program, mvp_loc, color_loc)
+    }
+}
+
 impl AppState {
     fn new(event_loop: &ActiveEventLoop) -> Self {
         // window + GL config ─
@@ -213,58 +280,8 @@ impl AppState {
         let v = gl_for_renderer.version();
         let gl_info = format!("Using OpenGL {}.{} | {}", v.major, v.minor, v.vendor_info);
 
-        // ── Simple shader for 2D wire (GL 2.1 compatible) ─────────────────────
-        let program = unsafe {
-            let vert = gl_for_renderer.create_shader(glow::VERTEX_SHADER).unwrap();
-            gl_for_renderer.shader_source(
-                vert,
-                r#"
-            #version 120
-            attribute vec3 a_pos;
-            uniform mat4 u_mvp;
-            void main() { gl_Position = u_mvp * vec4(a_pos, 1.0); }
-            "#,
-            );
-            gl_for_renderer.compile_shader(vert);
-
-            if !gl_for_renderer.get_shader_compile_status(vert) {
-                panic!("vert: {}", gl_for_renderer.get_shader_info_log(vert));
-            }
-
-            let frag = gl_for_renderer
-                .create_shader(glow::FRAGMENT_SHADER)
-                .unwrap();
-            gl_for_renderer.shader_source(
-                frag,
-                r#"
-            #version 120
-            uniform vec4 u_color;
-            void main() { gl_FragColor = u_color; }
-            "#,
-            );
-            gl_for_renderer.compile_shader(frag);
-            if !gl_for_renderer.get_shader_compile_status(frag) {
-                panic!("frag: {}", gl_for_renderer.get_shader_info_log(frag));
-            }
-
-            let prog = gl_for_renderer.create_program().unwrap();
-            gl_for_renderer.attach_shader(prog, vert);
-            gl_for_renderer.attach_shader(prog, frag);
-            gl_for_renderer.bind_attrib_location(prog, 0, "a_pos");
-            gl_for_renderer.link_program(prog);
-            prog
-        };
-
-        let mvp_loc = unsafe {
-            gl_for_renderer
-                .get_uniform_location(program, "u_mvp")
-                .unwrap()
-        };
-        let color_loc = unsafe {
-            gl_for_renderer
-                .get_uniform_location(program, "u_color")
-                .unwrap()
-        };
+        // Compile the 2D wire shader program
+        let (program, mvp_loc, color_loc) = compile_wire_shader(&gl_for_renderer);
 
         let vbo = unsafe { gl_for_renderer.create_buffer().unwrap() };
         //let ebo = unsafe { gl_for_renderer.create_buffer().unwrap() };
@@ -331,113 +348,27 @@ impl AppState {
             GlowRenderer::new(gl_for_renderer, &mut imgui).expect("GlowRenderer::new failed");
 
         let editor_splash = EditorImages::get_image(editor_images::IMG_SPLASH_DDS);
-        let id_splash_img = renderer
-            .register_texture(
-                editor_splash.width,
-                editor_splash.height,
-                TextureFormat::RGBA32,
-                &editor_splash.rgba8,
-            )
-            .expect("register editor image");
-        let img_view_cycle = EditorIcons::get_image(editor_icons::ICON_VIEW_CHANGE_DDS);
-        let id_icon_view_cycle = renderer
-            .register_texture(
-                img_view_cycle.width,
-                img_view_cycle.height,
-                TextureFormat::RGBA32,
-                &img_view_cycle.rgba8,
-            )
-            .expect("register editor icon");
+        let id_splash_img = register_texture(&mut renderer, &editor_splash, "editor splash image");
 
-        let img_mouse_rotate = EditorIcons::get_image(editor_icons::ICON_SELECT_MOUSEROTATE_DDS);
-        let id_mouse_rotate = renderer
-            .register_texture(
-                img_mouse_rotate.width,
-                img_mouse_rotate.height,
-                TextureFormat::RGBA32,
-                &img_mouse_rotate.rgba8,
-            )
-            .expect("register editor icon");
+        // Register all icons
+        let icons_data = [
+            (editor_icons::ICON_VIEW_CHANGE_DDS, "view_cycle"),
+            (editor_icons::ICON_SELECT_MOUSEROTATE_DDS, "mouse_rotate"),
+            (editor_icons::ICON_SELECT_MOUSESCALE_DDS, "free_scale"),
+            (editor_icons::ICON_SELECT_MOUSERESIZE_DDS, "resize"),
+            (editor_icons::ICON_FILE_OPEN_DDS, "open"),
+            (editor_icons::ICON_FILE_SAVE_DDS, "save"),
+            (editor_icons::ICON_LOCK_X_DDS, "lock_x"),
+            (editor_icons::ICON_LOCK_Y_DDS, "lock_y"),
+            (editor_icons::ICON_LOCK_Z_DDS, "lock_z"),
+            (editor_icons::ICON_SNAP_TO_GRID_DDS, "grid_snap"),
+        ];
 
-        let img_free_scale = EditorIcons::get_image(editor_icons::ICON_SELECT_MOUSESCALE_DDS);
-        let id_free_scale = renderer
-            .register_texture(
-                img_free_scale.width,
-                img_free_scale.height,
-                TextureFormat::RGBA32,
-                &img_free_scale.rgba8,
-            )
-            .expect("register editor icon");
-
-        let img_resize = EditorIcons::get_image(editor_icons::ICON_SELECT_MOUSERESIZE_DDS);
-        let id_resize = renderer
-            .register_texture(
-                img_resize.width,
-                img_resize.height,
-                TextureFormat::RGBA32,
-                &img_resize.rgba8,
-            )
-            .expect("register editor icon");
-
-        let img_open = EditorIcons::get_image(editor_icons::ICON_FILE_OPEN_DDS);
-        let id_open = renderer
-            .register_texture(
-                img_open.width,
-                img_open.height,
-                TextureFormat::RGBA32,
-                &img_open.rgba8,
-            )
-            .expect("register editor icon");
-
-        let img_save = EditorIcons::get_image(editor_icons::ICON_FILE_SAVE_DDS);
-        let id_save = renderer
-            .register_texture(
-                img_save.width,
-                img_save.height,
-                TextureFormat::RGBA32,
-                &img_save.rgba8,
-            )
-            .expect("register editor icon");
-
-        let img_lock_x = EditorIcons::get_image(editor_icons::ICON_LOCK_X_DDS);
-        let id_lock_x = renderer
-            .register_texture(
-                img_lock_x.width,
-                img_lock_x.height,
-                TextureFormat::RGBA32,
-                &img_lock_x.rgba8,
-            )
-            .expect("register editor icon");
-
-        let img_lock_y = EditorIcons::get_image(editor_icons::ICON_LOCK_Y_DDS);
-        let id_lock_y = renderer
-            .register_texture(
-                img_lock_y.width,
-                img_lock_y.height,
-                TextureFormat::RGBA32,
-                &img_lock_y.rgba8,
-            )
-            .expect("register editor icon");
-
-        let img_lock_z = EditorIcons::get_image(editor_icons::ICON_LOCK_Z_DDS);
-        let id_lock_z = renderer
-            .register_texture(
-                img_lock_z.width,
-                img_lock_z.height,
-                TextureFormat::RGBA32,
-                &img_lock_z.rgba8,
-            )
-            .expect("register editor icon");
-
-        let img_grid_snap = EditorIcons::get_image(editor_icons::ICON_SNAP_TO_GRID_DDS);
-        let id_grid_snap = renderer
-            .register_texture(
-                img_grid_snap.width,
-                img_grid_snap.height,
-                TextureFormat::RGBA32,
-                &img_grid_snap.rgba8,
-            )
-            .expect("register editor icon");
+        let mut icon_ids = Vec::new();
+        for (icon_data, _name) in &icons_data {
+            let img = EditorIcons::get_image(icon_data);
+            icon_ids.push(register_texture(&mut renderer, &img, "editor icon"));
+        }
 
         let mut editor = ui::EditorState::default();
         editor.log_info(gl_info);
@@ -467,16 +398,16 @@ impl AppState {
                 .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
         editor.view2d_tex_id = Some(view2d_imgui_tex);
         editor.images.splash = Some(id_splash_img);
-        editor.icons.open = Some(id_open);
-        editor.icons.save = Some(id_save);
-        editor.icons.view_cycle = Some(id_icon_view_cycle);
-        editor.icons.free_rotate = Some(id_mouse_rotate);
-        editor.icons.free_scale = Some(id_free_scale);
-        editor.icons.resize = Some(id_resize);
-        editor.icons.lock_x = Some(id_lock_x);
-        editor.icons.lock_y = Some(id_lock_y);
-        editor.icons.lock_z = Some(id_lock_z);
-        editor.icons.grid_snap = Some(id_grid_snap);
+        editor.icons.open = icon_ids.get(4).copied();
+        editor.icons.save = icon_ids.get(5).copied();
+        editor.icons.view_cycle = icon_ids.get(0).copied();
+        editor.icons.free_rotate = icon_ids.get(1).copied();
+        editor.icons.free_scale = icon_ids.get(2).copied();
+        editor.icons.resize = icon_ids.get(3).copied();
+        editor.icons.lock_x = icon_ids.get(6).copied();
+        editor.icons.lock_y = icon_ids.get(7).copied();
+        editor.icons.lock_z = icon_ids.get(8).copied();
+        editor.icons.grid_snap = icon_ids.get(9).copied();
 
         Self {
             window,

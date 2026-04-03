@@ -68,6 +68,65 @@ impl Default for StretchMode {
     }
 }
 
+/// Helper function to create an icon button with fallback text and tooltip.
+fn icon_button(ui: &Ui, id: &str, icon: Option<TextureId>, tooltip: &str) -> bool {
+    let clicked = if let Some(tid) = icon {
+        ui.image_button_config(id, tid, [24.0, 24.0]).build()
+    } else {
+        ui.button(tooltip)
+    };
+    if ui.is_item_hovered() {
+        ui.tooltip_text(tooltip);
+    }
+    clicked
+}
+
+/// Helper function to create a toggle button with icon and tint based on state.
+fn icon_button_toggle(
+    ui: &Ui,
+    id: &str,
+    icon: Option<TextureId>,
+    fallback_label: &str,
+    is_enabled: bool,
+    tooltip: &str,
+) -> bool {
+    let tint_col = if is_enabled {
+        [1.0, 1.0, 1.0, 1.0]
+    } else {
+        [1.0, 1.0, 1.0, 0.5]
+    };
+    let clicked = if let Some(tid) = icon {
+        ui.image_button_config(id, tid, [24.0, 24.0])
+            .tint_color(tint_col)
+            .build()
+    } else {
+        ui.button(fallback_label)
+    };
+    if ui.is_item_hovered() {
+        ui.tooltip_text(tooltip);
+    }
+    clicked
+}
+
+/// Helper function to check if a key combination was pressed.
+fn key_combo_pressed(ui: &Ui, main_key: dear_imgui_rs::Key, modifiers: u32) -> bool {
+    if !ui.is_key_pressed(main_key) {
+        return false;
+    }
+    const CTRL: u32 = 1;
+    const SHIFT: u32 = 2;
+
+    let has_ctrl = ui.is_key_down(dear_imgui_rs::Key::LeftCtrl)
+        || ui.is_key_down(dear_imgui_rs::Key::RightCtrl);
+    let has_shift = ui.is_key_down(dear_imgui_rs::Key::LeftShift)
+        || ui.is_key_down(dear_imgui_rs::Key::RightShift);
+
+    let needs_ctrl = (modifiers & CTRL) != 0;
+    let needs_shift = (modifiers & SHIFT) != 0;
+
+    (has_ctrl == needs_ctrl) && (has_shift == needs_shift)
+}
+
 #[derive(Clone)]
 struct StretchDrag {
     selection_aabb: Aabb,
@@ -96,9 +155,9 @@ pub enum LogLevel {
 impl LogLevel {
     fn prefix(self) -> &'static str {
         match self {
-            LogLevel::Info => "   ",
-            LogLevel::Warn => "[W]",
-            LogLevel::Error => "[E]",
+            Self::Info => "   ",
+            Self::Warn => "[W]",
+            Self::Error => "[E]",
         }
     }
 }
@@ -107,16 +166,8 @@ impl LogLevel {
 pub struct AxisLock {
     pub x: bool,
     pub y: bool,
-    pub z: bool
+    pub z: bool,
 }
-/*
-impl Default for AxisLock {
-    fn default() -> Self
-    {
-        Self { x: false, y: false, z: false }
-    }
-}
-*/
 pub struct EditorState {
     pub config: EditorConfig,
     pub show_demo: bool,
@@ -148,7 +199,6 @@ pub struct EditorState {
     pub tex_selected: Option<String>,
     pub tex_tile_size: f32,
     pub log: Vec<LogEntry>,
-    //pub console_input:  String,
     pub console_scroll: bool,
     pub con_filter: String,
     pub map: Option<kradiant::map::Map>,
@@ -163,18 +213,6 @@ pub struct EditorState {
     pub pending_theme: Option<usize>,
     pub palette: EditorPalette,
 }
-
-/*macro_rules! editor_log {
-    (info, $($arg:tt)+) => {
-        self.log_info(format!($($arg)+))
-    };
-    (warn, $($arg:tt)+) => {
-        self.log_warn(format!($($arg)+))
-    };
-    (error, $($arg:tt)+) => {
-        self.log_error(format!($($arg)+))
-    };
-}*/
 
 macro_rules! editor_log {
     ($state:expr, info, $($arg:tt)+) => {
@@ -291,28 +329,7 @@ impl EditorState {
         });
         self.console_scroll = true;
     }
-    /*
-        pub(crate) fn view2d_preview_point(&self, p: Vec3) -> Vec3
-        {
-            match self.view2d_drag_mode {
-                DragMode::MoveSelection => p + self.view2d_move_offset.as_vec3(),
-                DragMode::StretchSelection => {
-                    let Some(stretch) = self.view2d_stretch.as_ref() else {
-                        return p;
-                    };
-                    let Some((xform, _preview)) = editing::stretch_selection_transform(
-                        &stretch.selection_aabb,
-                        stretch.faces,
-                        self.view2d_stretch_delta,
-                    ) else {
-                        return p;
-                    };
-                    xform.apply_point(p)
-                }
-                DragMode::NewBrush => p,
-            }
-        }
-    */
+
     pub(crate) fn view2d_stretch_preview_xform(&self) -> Option<editing::AffineScale> {
         let stretch = self.view2d_stretch.as_ref()?;
         editing::stretch_selection_transform(
@@ -598,19 +615,18 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
         });
     }
 
-    if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) && ui.is_key_pressed(dear_imgui_rs::Key::N) {
+    const CTRL: u32 = 1;
+    const SHIFT: u32 = 2;
+    if key_combo_pressed(ui, dear_imgui_rs::Key::N, CTRL) {
         util::new_map(state);
     }
-    if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) && ui.is_key_pressed(dear_imgui_rs::Key::O) {
+    if key_combo_pressed(ui, dear_imgui_rs::Key::O, CTRL) {
         util::open_map(state);
     }
-    if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) && ui.is_key_pressed(dear_imgui_rs::Key::S) {
+    if key_combo_pressed(ui, dear_imgui_rs::Key::S, CTRL) {
         util::save_map(state);
     }
-    if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl)
-        && ui.is_key_down(dear_imgui_rs::Key::LeftShift)
-        && ui.is_key_pressed(dear_imgui_rs::Key::S)
-    {
+    if key_combo_pressed(ui, dear_imgui_rs::Key::S, CTRL | SHIFT) {
         util::save_map_as(state);
     }
 }
@@ -647,69 +663,31 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
 
     ui.window("##toolbar").flags(flags).build(|| {
         // File operations
-        let open_map = if let Some(tid) = state.icons.open {
-            // image_button(id, texture_id, size) — the str id disambiguates multiple image buttons
-            //ui.image_button("##switch_view", tid, [24.0, 24.0])
-            ui.image_button_config("##open_map", tid, [24.0, 24.0])
-                .build()
-        } else {
-            ui.small_button("Open") // fallback if texture didn't load
-        };
-        if open_map {
+        if icon_button(ui, "##open_map", state.icons.open, "Open Map") {
             util::open_map(state);
         }
-        if ui.is_item_hovered() {
-            ui.tooltip_text("Open Map");
-        }
-
         ui.same_line();
-
-        let save_map = if let Some(tid) = state.icons.save {
-            // image_button(id, texture_id, size) — the str id disambiguates multiple image buttons
-            //ui.image_button("##switch_view", tid, [24.0, 24.0])
-            ui.image_button_config("##save_map", tid, [24.0, 24.0])
-                .build()
-        } else {
-            ui.small_button("Open") // fallback if texture didn't load
-        };
-        if save_map {
+        if icon_button(ui, "##save_map", state.icons.save, "Save Map") {
             util::save_map(state);
         }
-        if ui.is_item_hovered() {
-            ui.tooltip_text("Save Map");
-        }
 
         ui.same_line();
-        ui.separator_vertical(); // vertical separator
+        ui.separator_vertical();
         ui.same_line();
-
-        let toggle_snap = if let Some(tid) = state.icons.grid_snap {
-            let tint_col = match state.grid_snapping {
-                true => [1.0, 1.0, 1.0, 1.0],
-                false => [1.0, 1.0, 1.0, 0.5],
-            };
-            ui.image_button_config("##grid_snapping", tid, [24.0, 24.0])
-            .tint_color(tint_col)
-            .build()
-        } else {
-            ui.button("Grid Snap")
-        };
-        if toggle_snap {
+        if icon_button_toggle(
+            ui,
+            "##grid_snapping",
+            state.icons.grid_snap,
+            "Grid Snap",
+            state.grid_snapping,
+            "Toggle Grid Snapping",
+        ) {
             state.grid_snapping = !state.grid_snapping;
         }
-        if ui.is_item_hovered() {
-            ui.tooltip_text("Toggle Grid Snapping");
-        }
 
         ui.same_line();
 
-        let view_switched = if let Some(tid) = state.icons.view_cycle {
-            ui.image_button_config("##switch_view", tid, [24.0, 24.0])
-            .build()
-        } else {
-            ui.small_button("Switch") // fallback if texture didn't load
-        };
-        if view_switched {
+        if icon_button(ui, "##switch_view", state.icons.view_cycle, "Switch View") {
             let old_center = state.view2d_center_world();
             state.ortho_axis = state.ortho_axis.next();
             state.set_view2d_center(old_center);
@@ -718,11 +696,9 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
                 update_last_work_from_aabb(state, &aabb);
             }
         }
-        if ui.is_item_hovered() {
-            ui.tooltip_text("Switch View");
-        }
 
-        if ui.is_key_down(dear_imgui_rs::Key::LeftShift) && ui.is_key_pressed(dear_imgui_rs::Key::C) {
+        if ui.is_key_down(dear_imgui_rs::Key::LeftShift) && ui.is_key_pressed(dear_imgui_rs::Key::C)
+        {
             if !state.selected_brushes.is_empty() {
                 state.set_view2d_center(state.work_pos);
                 editor_log!(state, info, "Goto Selection");
@@ -737,103 +713,63 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             StretchMode::Scale => state.icons.free_scale,
             StretchMode::Resize => state.icons.resize,
         };
-        if ui
-            .image_button_config(
-                &format!("##stretch_mode"),
-                stretch_icon.unwrap(),
-                [24.0, 24.0],
-            )
-            .build()
-        {
+        if icon_button(ui, "##stretch_mode", stretch_icon, "Stretch Mode") {
             state.stretch_mode = match state.stretch_mode {
                 StretchMode::Scale => StretchMode::Resize,
                 StretchMode::Resize => StretchMode::Scale,
             };
-        }
-        if ui.is_item_hovered() {
             ui.tooltip_text("Stretch behavior when dragging outside selection");
         }
 
         ui.same_line();
 
-        let toggle_rotate = if let Some(tid) = state.icons.free_rotate {
-            let tint_col = match state.rotate_mode {
-                true => [1.0, 1.0, 1.0, 1.0],
-                false => [1.0, 1.0, 1.0, 0.5],
-            };
-            ui.image_button_config("##rotate_mode", tid, [24.0, 24.0])
-                .tint_color(tint_col)
-                .build()
-        } else {
-            ui.button("Rotate")
-        };
-        if toggle_rotate {
+        if icon_button_toggle(
+            ui,
+            "##rotate_mode",
+            state.icons.free_rotate,
+            "Rotate",
+            state.rotate_mode,
+            "Free Rotation",
+        ) {
             state.rotate_mode = !state.rotate_mode;
-        }
-        if ui.is_item_hovered() {
-            ui.tooltip_text("Free Rotation");
         }
 
         ui.same_line();
         ui.separator_vertical();
         ui.same_line();
 
-        let lock_x = if let Some(tid) = state.icons.lock_x {
-            let tint_col = match state.axis_lock.x {
-                true => [1.0, 1.0, 1.0, 1.0],
-                false => [1.0, 1.0, 1.0, 0.5],
-            };
-            ui.image_button_config("##lock_x", tid, [24.0, 24.0])
-            .tint_color(tint_col)
-            .build()
-        } else {
-            ui.button("Lock X")
-        };
-        if lock_x {
+        // Axis lock buttons
+        if icon_button_toggle(
+            ui,
+            "##lock_x",
+            state.icons.lock_x,
+            "Lock X",
+            state.axis_lock.x,
+            "Lock all transformations on X-axis",
+        ) {
             state.axis_lock.x = !state.axis_lock.x;
         }
-        if ui.is_item_hovered() {
-            ui.tooltip_text("Lock all transformations on X-axis");
-        }
-
         ui.same_line();
-
-        let lock_y = if let Some(tid) = state.icons.lock_y {
-            let tint_col = match state.axis_lock.y {
-                true => [1.0, 1.0, 1.0, 1.0],
-                false => [1.0, 1.0, 1.0, 0.5],
-            };
-            ui.image_button_config("##lock_y", tid, [24.0, 24.0])
-            .tint_color(tint_col)
-            .build()
-        } else {
-            ui.button("Lock Y")
-        };
-        if lock_y {
+        if icon_button_toggle(
+            ui,
+            "##lock_y",
+            state.icons.lock_y,
+            "Lock Y",
+            state.axis_lock.y,
+            "Lock all transformations on Y-axis",
+        ) {
             state.axis_lock.y = !state.axis_lock.y;
         }
-        if ui.is_item_hovered() {
-            ui.tooltip_text("Lock all transformations on Y-axis");
-        }
-
         ui.same_line();
-
-        let lock_z = if let Some(tid) = state.icons.lock_z {
-            let tint_col = match state.axis_lock.z {
-                true => [1.0, 1.0, 1.0, 1.0],
-                false => [1.0, 1.0, 1.0, 0.5],
-            };
-            ui.image_button_config("##lock_z", tid, [24.0, 24.0])
-            .tint_color(tint_col)
-            .build()
-        } else {
-            ui.button("Lock Z")
-        };
-        if lock_z {
+        if icon_button_toggle(
+            ui,
+            "##lock_z",
+            state.icons.lock_z,
+            "Lock Z",
+            state.axis_lock.z,
+            "Lock all transformations on Z-axis",
+        ) {
             state.axis_lock.z = !state.axis_lock.z;
-        }
-        if ui.is_item_hovered() {
-            ui.tooltip_text("Lock all transformations on Z-axis");
         }
 
         // Store the toolbar height so the dockspace can offset below it.
@@ -1881,10 +1817,7 @@ fn create_brush_from_drag(state: &mut EditorState, start: Vec2, end: Vec2) -> Op
     let (min3, max3) = match state.ortho_axis {
         Ortho::XY => {
             let (z0, z1) = last.map(|a| (a.min.z, a.max.z)).unwrap_or((0.0, fallback));
-            (
-                Vec3::new(min2.x, min2.y, z0),
-                Vec3::new(max2.x, max2.y, z1),
-            )
+            (Vec3::new(min2.x, min2.y, z0), Vec3::new(max2.x, max2.y, z1))
         }
         Ortho::XZ => {
             let (y0, y1) = last.map(|a| (a.min.y, a.max.y)).unwrap_or((0.0, fallback));
@@ -1921,86 +1854,6 @@ fn create_brush_from_drag(state: &mut EditorState, start: Vec2, end: Vec2) -> Op
         }
     }
 }
-/*
-fn draw_ortho_grid(
-    draw: &dear_imgui_rs::DrawListMut<'_>,
-    origin: [f32; 2],
-    w: f32,
-    h: f32,
-    zoom: f32,
-    pan: [f32; 2],
-    minor_step: u8,
-) {
-    let major_world = 64.0;
-    let minor_world = minor_step.max(1);
-
-    let major_step = major_world * zoom;
-    let minor_step = minor_world as f32 * zoom;
-
-    if major_step < 3.0 {
-        return;
-    }
-
-    let cx = origin[0] + w * 0.5 + pan[0];
-    let cy = origin[1] + h * 0.5 + pan[1];
-
-    // --- MINOR GRID ---
-    if minor_step >= 3.0 {
-        let i0 = ((origin[0] - cx) / minor_step).floor() as i32 - 1;
-        let i1 = ((origin[0] + w - cx) / minor_step).ceil() as i32 + 1;
-
-        for i in i0..=i1 {
-            let x = cx + i as f32 * minor_step;
-
-            // skip lines where major grid will draw
-            if (i as f32 % (major_world / minor_world as f32)) == 0.0 {
-                continue;
-            }
-
-            draw.add_line([x, origin[1]], [x, origin[1] + h], 0xFF22_2222u32)
-                .thickness(1.0)
-                .build();
-        }
-
-        let j0 = ((origin[1] - cy) / minor_step).floor() as i32 - 1;
-        let j1 = ((origin[1] + h - cy) / minor_step).ceil() as i32 + 1;
-
-        for j in j0..=j1 {
-            let y = cy + j as f32 * minor_step;
-
-            if (j as f32 % (major_world / minor_world as f32)) == 0.0 {
-                continue;
-            }
-
-            draw.add_line([origin[0], y], [origin[0] + w, y], 0xFF22_2222u32)
-                .thickness(1.0)
-                .build();
-        }
-    }
-
-    // --- MAJOR GRID ---
-    let i0 = ((origin[0] - cx) / major_step).floor() as i32 - 1;
-    let i1 = ((origin[0] + w - cx) / major_step).ceil() as i32 + 1;
-
-    for i in i0..=i1 {
-        let x = cx + i as f32 * major_step;
-
-        draw.add_line([x, origin[1]], [x, origin[1] + h], 0xFF2C_2C2Cu32)
-            .thickness(1.0)
-            .build();
-    }
-
-    let j0 = ((origin[1] - cy) / major_step).floor() as i32 - 1;
-    let j1 = ((origin[1] + h - cy) / major_step).ceil() as i32 + 1;
-
-    for j in j0..=j1 {
-        let y = cy + j as f32 * major_step;
-
-        draw.add_line([origin[0], y], [origin[0] + w, y], 0xFF2C_2C2Cu32)
-            .thickness(1.0)
-            .build();
-    }
-}*/
 
 // Console
 
@@ -2162,9 +2015,6 @@ fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
         if ui.is_item_hovered() {
             ui.tooltip_text(*material);
         }
-
-        //let label = truncate_to_width(ui, short, tile);
-        //ui.text(&label);
 
         if (i + 1) % cols != 0 {
             ui.same_line_with_spacing(0.0, 4.0);

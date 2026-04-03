@@ -20,28 +20,26 @@ pub(crate) fn get_config_dir() -> io::Result<PathBuf> {
     Ok(base)
 }
 
-/// Measure text width via the imgui sys layer (calc_text_size is not on &Ui in 0.10).
-pub fn text_width(ui: &Ui, text: &str) -> f32 {
-    let _ = ui; // keep signature symmetric with the rest
+/// Measure text dimensions via the imgui sys layer (calc_text_size is not on &Ui in 0.10).
+/// Returns (width, height) tuple.
+fn measure_text_impl(text: &str) -> (f32, f32) {
     let c = std::ffi::CString::new(text).unwrap_or_default();
     unsafe {
         // In this build igCalcTextSize(text, text_end, hide_text_after_double_hash, wrap_width)
-        // and returns ImVec2 by value (no out-param).
+        // returns ImVec2 by value (no out-param).
         let sz = dear_imgui_rs::sys::igCalcTextSize(c.as_ptr(), std::ptr::null(), false, -1.0);
-        sz.x
+        (sz.x, sz.y)
     }
 }
 
-/// Measure text height via the imgui sys layer (calc_text_size is not on &Ui in 0.10).
-pub fn text_height(ui: &Ui, text: &str) -> f32 {
-    let _ = ui; // keep signature symmetric with the rest
-    let c = std::ffi::CString::new(text).unwrap_or_default();
-    unsafe {
-        // In this build igCalcTextSize(text, text_end, hide_text_after_double_hash, wrap_width)
-        // and returns ImVec2 by value (no out-param).
-        let sz = dear_imgui_rs::sys::igCalcTextSize(c.as_ptr(), std::ptr::null(), false, -1.0);
-        sz.y
-    }
+/// Measure text width via the imgui sys layer.
+pub fn text_width(_ui: &Ui, text: &str) -> f32 {
+    measure_text_impl(text).0
+}
+
+/// Measure text height via the imgui sys layer.
+pub fn text_height(_ui: &Ui, text: &str) -> f32 {
+    measure_text_impl(text).1
 }
 
 /// Truncate `text` so it fits within `max_px`, appending `…` if needed.
@@ -60,7 +58,7 @@ pub fn truncate_to_width(_ui: &Ui, text: &str, max_px: f32) -> String {
     out
 }
 
-/// Pack f32 RGBA into a u32 in the ABGR byte order that ImGui DrawList uses.
+/// Convert normalized RGBA [0-1] to u32 ABGR format for ImGui.
 pub fn pack_abgr(r: f32, g: f32, b: f32, a: f32) -> u32 {
     let ri = (r.clamp(0.0, 1.0) * 255.0).round() as u32;
     let gi = (g.clamp(0.0, 1.0) * 255.0).round() as u32;
@@ -69,32 +67,23 @@ pub fn pack_abgr(r: f32, g: f32, b: f32, a: f32) -> u32 {
     (ai << 24) | (bi << 16) | (gi << 8) | ri
 }
 
+/// Convert RGBA color array [0-1] to u32 in ABGR byte order (same as pack_abgr).
 pub fn imgui_color_to_u32(c: [f32; 4]) -> u32 {
-    let r = (c[0] * 255.0) as u32;
-    let g = (c[1] * 255.0) as u32;
-    let b = (c[2] * 255.0) as u32;
-    let a = (c[3] * 255.0) as u32;
-
-    (a << 24) | (b << 16) | (g << 8) | r
+    pack_abgr(c[0], c[1], c[2], c[3])
 }
 
 /// Adjust brightness of an ImGui u32 color (format: 0xAARRGGBB).
 /// `brightness` multiplies RGB channels (1.0 = unchanged, <1.0 darker, >1.0 brighter).
 pub fn adjust_color_brightness(color: u32, brightness: f32) -> u32 {
-    let a = ((color >> 24) & 0xFF) as u8;
-    let r = ((color >> 16) & 0xFF) as u8;
-    let g = ((color >> 8) & 0xFF) as u8;
-    let b = (color & 0xFF) as u8;
+    let extract_channel = |shift: u8| ((color >> shift) & 0xFF) as u8;
+    let a = extract_channel(24);
+    let r = extract_channel(16);
+    let g = extract_channel(8);
+    let b = extract_channel(0);
 
     let scale = |v: u8| -> u8 {
-        let v = (v as f32 * brightness).round();
-        if v < 0.0 {
-            0
-        } else if v > 255.0 {
-            255
-        } else {
-            v as u8
-        }
+        let scaled = (v as f32 * brightness).round();
+        scaled.clamp(0.0, 255.0) as u8
     };
 
     let r = scale(r);
@@ -204,27 +193,35 @@ pub fn open_map(state: &mut EditorState) {
     }
 }
 
+/// Helper to get file path for saving, prompting user if needed.
+/// Returns Some(path) if user selected a file, None if cancelled.
+fn get_save_path(force_dialog: bool, current_path: &str) -> Option<PathBuf> {
+    if !force_dialog && !current_path.is_empty() {
+        let path = PathBuf::from(current_path);
+        if path.exists() && path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let cwd = std::env::current_dir().unwrap();
+    rfd::FileDialog::new()
+        .set_title("Save map")
+        .add_filter("CoD Map", &["map", "bak"])
+        .set_directory(cwd)
+        .save_file()
+}
+
 pub fn save_map_as(state: &mut EditorState) {
     if state.map.is_none() {
         editor_log!(state, info, "Not allowed to save empty map!");
         return;
     }
 
-    let cwd = std::env::current_dir().unwrap();
-    match rfd::FileDialog::new()
-        .set_title("Save map as")
-        .add_filter("CoD Map", &["map", "bak"])
-        .set_directory(cwd)
-        .save_file()
-    {
-        Some(p) => {
-            state.map_path = p.to_str().unwrap().to_string();
-            save_map(state);
-        }
-        None => {
-            editor_log!(state, info, "Save map cancelled by user");
-            return;
-        }
+    if let Some(p) = get_save_path(true, "") {
+        state.map_path = p.to_str().unwrap().to_string();
+        perform_save_map(state, &p);
+    } else {
+        editor_log!(state, info, "Save map cancelled by user");
     }
 }
 
@@ -233,39 +230,17 @@ pub fn save_map(state: &mut EditorState) {
         editor_log!(state, info, "Not allowed to save empty map!");
         return;
     }
-    let mut chosen_path = PathBuf::new();
-    let mut choose_new_file = if !state.map_path.is_empty() {
-        let path = PathBuf::from(&state.map_path);
-        if path.exists() && path.is_file() {
-            chosen_path = path;
-            false
-        } else {
-            true
-        }
+
+    if let Some(path) = get_save_path(false, &state.map_path) {
+        perform_save_map(state, &path);
     } else {
-        true
-    };
-
-    while choose_new_file {
-        let cwd = std::env::current_dir().unwrap();
-        match rfd::FileDialog::new()
-            .set_title("Save map")
-            .add_filter("CoD Map", &["map", "bak"])
-            .set_directory(cwd)
-            .save_file()
-        {
-            Some(p) => {
-                chosen_path = p;
-                choose_new_file = false;
-            }
-            None => {
-                editor_log!(state, info, "Save map cancelled by user");
-                return;
-            }
-        }
+        editor_log!(state, info, "Save map cancelled by user");
     }
+}
 
-    let path_str = chosen_path.to_str().unwrap();
+/// Perform the actual map save operation.
+fn perform_save_map(state: &mut EditorState, path: &PathBuf) {
+    let path_str = path.to_str().unwrap();
     if let Some(map) = state.map.as_mut() {
         let changed = kradiant::editing::orient_map_convex_brushes_inward(map);
         if changed > 0 {
@@ -275,15 +250,7 @@ pub fn save_map(state: &mut EditorState) {
 
     match map_loader::save_map(state.map.as_ref().unwrap(), path_str) {
         Ok(_) => editor_log!(state, info, "Saved map to {}", path_str),
-        Err(e) => {
-            editor_log!(
-                state,
-                error,
-                "Failed to save map to {}: {}",
-                path_str,
-                e.to_string()
-            );
-        }
+        Err(e) => editor_log!(state, error, "Failed to save map to {}: {}", path_str, e),
     }
 }
 
@@ -340,7 +307,7 @@ pub fn drag_delta_to_3d(d: Vec2, axis: Ortho, lock: AxisLock) -> Vec3 {
             let y = if lock.y { 0.0 } else { d.x };
             let z = if lock.z { 0.0 } else { -d.y };
             Vec3 { x: 0.0, y, z }
-        },
+        }
     }
 }
 
