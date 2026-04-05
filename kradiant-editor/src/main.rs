@@ -175,7 +175,7 @@ impl AppState {
             .with_depth_size(24);
 
         let (window, gl_config) = DisplayBuilder::new()
-            .with_window_attributes(Some(window_attrs))
+            .with_window_attributes(Some(window_attrs.clone()))
             .build(event_loop, template, |configs| {
                 configs
                     .reduce(|acc, cfg| {
@@ -198,16 +198,50 @@ impl AppState {
 
         // GL context ─
         let raw_handle = window.window_handle().unwrap().as_raw();
+        let req_gl_v = Version::new(2, 1);
         let ctx_attrs = ContextAttributesBuilder::new()
-            .with_context_api(ContextApi::OpenGl(Some(Version::new(2, 1))))
+            .with_context_api(ContextApi::OpenGl(Some(req_gl_v)))
             .build(Some(raw_handle));
 
-        let not_current = unsafe {
-            gl_config
-                .display()
-                .create_context(&gl_config, &ctx_attrs)
-                .expect("failed to create GL context")
-        };
+        let not_current =
+            match unsafe { gl_config.display().create_context(&gl_config, &ctx_attrs) } {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    let versions = [
+                        //(4, 6), (4, 5), (4, 4), (4, 3), (4, 2), (4, 1), (4, 0),
+                        //(3, 3), (3, 2), (3, 1), (3, 0), (2, 1)
+                        (2, 0),
+                        (1, 5),
+                        (1, 4),
+                        (1, 3),
+                        (1, 2),
+                    ];
+
+                    let highest_supported = versions.iter().find_map(|&(major, minor)| {
+                        let attrs = ContextAttributesBuilder::new()
+                            .with_context_api(ContextApi::OpenGl(Some(Version::new(major, minor))))
+                            .build(Some(raw_handle));
+                        unsafe { gl_config.display().create_context(&gl_config, &attrs).ok() }
+                            .map(|_| format!("{major}.{minor}"))
+                    });
+
+                    let version_info = match highest_supported {
+                        Some(v) => format!("Your seems to support up to OpenGL {v}"),
+                        None => "Could not determine supported OpenGL version".to_string(),
+                    };
+
+                    let msg =
+                        format!("Kradiant requires OpenGL 2.1.\n{version_info}\n\nGLX error: {e}");
+
+                    rfd::MessageDialog::new()
+                        .set_title("Kradiant — OpenGL Error")
+                        .set_description(&msg)
+                        .set_level(rfd::MessageLevel::Error)
+                        .show();
+
+                    std::process::exit(1);
+                }
+            };
 
         // GL surface
         let (width, height): (u32, u32) = window.inner_size().into();
@@ -371,7 +405,7 @@ impl AppState {
         }
 
         let mut editor = ui::EditorState::default();
-        editor.log_info(gl_info);
+        editor.console.info(gl_info);
 
         // Apply configured theme on startup
         if !editor.themes.is_empty() {
@@ -381,7 +415,7 @@ impl AppState {
                 .min(editor.themes.len().saturating_sub(1));
             if let Some(entry) = editor.themes.get(idx) {
                 theme::apply_theme(&mut imgui, &entry.data);
-                EditorConfig::update(&mut editor, "active_theme", idx);
+                EditorConfig::update(&mut editor.config, "active_theme", idx, &mut editor.console);
             }
         }
         editor.palette = theme::palette_from_theme(
@@ -396,7 +430,7 @@ impl AppState {
             renderer
                 .texture_map_mut()
                 .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
-        editor.view2d_tex_id = Some(view2d_imgui_tex);
+        editor.view2d.tex_id = Some(view2d_imgui_tex);
         editor.images.splash = Some(id_splash_img);
         editor.icons.open = icon_ids.get(4).copied();
         editor.icons.save = icon_ids.get(5).copied();
@@ -459,7 +493,12 @@ impl AppState {
         if let Some(idx) = self.editor.pending_theme.take() {
             if let Some(entry) = self.editor.themes.get(idx) {
                 theme::apply_theme(&mut self.imgui, &entry.data);
-                EditorConfig::update(&mut self.editor, "active_theme", idx);
+                EditorConfig::update(
+                    &mut self.editor.config,
+                    "active_theme",
+                    idx,
+                    &mut self.editor.console,
+                );
             }
         }
 
@@ -497,7 +536,7 @@ impl AppState {
             self.gl.use_program(Some(self.program));
 
             // 2d
-            let r2 = self.editor.view2d_rect;
+            let r2 = self.editor.view2d.rect;
             if r2[2] > 10.0 && r2[3] > 10.0 {
                 let fbo_w = r2[2] as u32;
                 let fbo_h = r2[3] as u32;
@@ -540,13 +579,13 @@ impl AppState {
 
                 self.gl.use_program(Some(self.program));
 
-                let zoom = self.editor.view2d_zoom.max(0.001);
+                let zoom = self.editor.view2d.zoom.max(0.001);
                 // `view2d_pan` is in pixels (screen space). Convert to world units here.
                 // Also flip Y so positive world Y goes down (matching ImGui + screen_to_world).
                 let half_w = fbo_w as f32 / (2.0 * zoom);
                 let half_h = fbo_h as f32 / (2.0 * zoom);
-                let pan_x = self.editor.view2d_pan[0] / zoom;
-                let pan_y = self.editor.view2d_pan[1] / zoom;
+                let pan_x = self.editor.view2d.pan[0] / zoom;
+                let pan_y = self.editor.view2d.pan[1] / zoom;
                 let view_left = -half_w - pan_x;
                 let view_right = half_w - pan_x;
                 let view_top = -half_h - pan_y;
@@ -565,7 +604,7 @@ impl AppState {
                     &ortho.to_cols_array(),
                 );
 
-                let axis = self.editor.ortho_axis;
+                let axis = self.editor.view2d.ortho_axis;
 
                 // Draw grid under map lines.
                 const MIN_MINOR_STEP_PX: f32 = 1.0;
@@ -953,12 +992,12 @@ impl AppState {
                         ui::Ortho::YZ => glam::Vec3::new(-1.0, 0.0, 0.0),
                     };
 
-                    let preview_drag_mode = self.editor.view2d_drag_mode;
+                    let preview_drag_mode = self.editor.view2d.drag_mode;
                     let preview_stretch_mode = self.editor.stretch_mode;
-                    let preview_move_offset = self.editor.view2d_move_offset;
-                    let preview_stretch = self.editor.view2d_stretch_preview_xform();
-                    let preview_rotate = self.editor.view2d_rotate_preview_xform();
-                    let preview_face = self.editor.view2d_face_stretch_preview();
+                    let preview_move_offset = self.editor.view2d.move_offset;
+                    let preview_stretch = self.editor.view2d.stretch_preview_xform();
+                    let preview_rotate = self.editor.view2d.rotate_preview_xform();
+                    let preview_face = self.editor.view2d.face_stretch_preview();
                     let preview_point = |p: Vec3| -> Vec3 {
                         match preview_drag_mode {
                             ui::DragMode::MoveSelection => p + preview_move_offset,

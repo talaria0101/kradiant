@@ -1,7 +1,7 @@
 use dear_imgui_rs::Ui;
 use kradiant::editing::{self, Aabb};
 use kradiant::loader::map_loader;
-use num_traits::{Num, NumCast, ToPrimitive};
+use num_traits::{NumCast, ToPrimitive};
 use std::fs::create_dir_all;
 use std::io;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use crate::ui::{EditorState, Ortho};
 use glam::{Vec2, Vec3};
 
-pub(crate) fn get_config_dir() -> io::Result<PathBuf> {
+pub fn get_config_dir() -> io::Result<PathBuf> {
     let base = std::env::home_dir()
         .unwrap()
         .join(".config/kradiant_editor");
@@ -158,7 +158,7 @@ pub fn screen_to_world_ortho(
 pub fn new_map(state: &mut EditorState) {
     state.map_path = String::new();
     state.map = None;
-    editor_log!(state, info, "New map");
+    log_info!(state.console, "New map");
 }
 
 pub fn open_map(state: &mut EditorState) {
@@ -178,12 +178,11 @@ pub fn open_map(state: &mut EditorState) {
                 state.selected_entity = None;
                 state.map_path = path_str.to_string();
                 state.map = Some(map);
-                editor_log!(state, info, "Loaded map: {}", path_str);
+                log_info!(state.console, "Loaded map: {}", path_str);
             }
             Err(e) => {
-                editor_log!(
-                    state,
-                    error,
+                log_error!(
+                    state.console,
                     "Failed to load {}: {}",
                     path_str,
                     e.to_string()
@@ -213,7 +212,7 @@ fn get_save_path(force_dialog: bool, current_path: &str) -> Option<PathBuf> {
 
 pub fn save_map_as(state: &mut EditorState) {
     if state.map.is_none() {
-        editor_log!(state, info, "Not allowed to save empty map!");
+        log_error!(state.console, "Not allowed to save empty map!");
         return;
     }
 
@@ -221,20 +220,20 @@ pub fn save_map_as(state: &mut EditorState) {
         state.map_path = p.to_str().unwrap().to_string();
         perform_save_map(state, &p);
     } else {
-        editor_log!(state, info, "Save map cancelled by user");
+        log_info!(state.console, "Save map cancelled by user");
     }
 }
 
 pub fn save_map(state: &mut EditorState) {
     if state.map.is_none() {
-        editor_log!(state, info, "Not allowed to save empty map!");
+        log_info!(state.console, "Not allowed to save empty map!");
         return;
     }
 
     if let Some(path) = get_save_path(false, &state.map_path) {
         perform_save_map(state, &path);
     } else {
-        editor_log!(state, info, "Save map cancelled by user");
+        log_info!(state.console, "Save map cancelled by user");
     }
 }
 
@@ -244,29 +243,31 @@ fn perform_save_map(state: &mut EditorState, path: &PathBuf) {
     if let Some(map) = state.map.as_mut() {
         let changed = kradiant::editing::orient_map_convex_brushes_inward(map);
         if changed > 0 {
-            editor_log!(state, info, "Oriented {} brushes", changed);
+            log_info!(state.console, "Oriented {} brushes", changed);
         }
     }
 
     match map_loader::save_map(state.map.as_ref().unwrap(), path_str) {
-        Ok(_) => editor_log!(state, info, "Saved map to {}", path_str),
-        Err(e) => editor_log!(state, error, "Failed to save map to {}: {}", path_str, e),
+        Ok(_) => log_info!(state.console, "Saved map to {}", path_str),
+        Err(e) => log_error!(state.console, "Failed to save map to {}: {}", path_str, e),
     }
 }
 
-pub fn click_in_selection_aabb(state: &EditorState, pt: Vec2) -> bool {
-    if state.selected_brushes.is_empty() {
+pub fn click_in_selection_aabb(
+    selected_brushes: &[(usize, usize)],
+    map: &kradiant::map::Map,
+    pt: Vec2,
+    ortho: Ortho,
+) -> bool {
+    if selected_brushes.is_empty() {
         return false;
     }
-    let Some(map) = &state.map else {
-        return false;
-    };
 
     let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
     let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
     let mut any = false;
 
-    for &(entity_idx, brush_idx) in &state.selected_brushes {
+    for &(entity_idx, brush_idx) in selected_brushes {
         let Some(entity) = map.entities.get(entity_idx) else {
             continue;
         };
@@ -281,7 +282,7 @@ pub fn click_in_selection_aabb(state: &EditorState, pt: Vec2) -> bool {
         return false;
     }
 
-    let (min_x, max_x, min_y, max_y) = match state.ortho_axis {
+    let (min_x, max_x, min_y, max_y) = match ortho {
         Ortho::XY => (min.x, max.x, min.y, max.y),
         Ortho::XZ => (min.x, max.x, -max.z, -min.z),
         Ortho::YZ => (min.y, max.y, -max.z, -min.z),
@@ -291,7 +292,7 @@ pub fn click_in_selection_aabb(state: &EditorState, pt: Vec2) -> bool {
 }
 
 use crate::ui::AxisLock;
-pub fn drag_delta_to_3d(d: Vec2, axis: Ortho, lock: AxisLock) -> Vec3 {
+pub fn drag_delta_to_3d(d: Vec2, axis: Ortho, lock: &AxisLock) -> Vec3 {
     match axis {
         Ortho::XY => {
             let x = if lock.x { 0.0 } else { d.x };
@@ -464,7 +465,7 @@ pub fn stretch_handle_point_2d(
 
     Some([u, v])
 }
-
+/*
 pub fn num_from_str<T: std::str::FromStr + std::default::Default + Num>(s: &str) -> T
 where
     <T as std::str::FromStr>::Err: std::fmt::Display,
@@ -476,11 +477,27 @@ where
             T::default()
         }
     }
+}*/
+/*
+pub trait ToMyNum { fn to(self) -> u8; }
+impl ToMyNum for bool {
+    fn to(self) -> u8
+    {
+        if self { 1 } else { 0 }
+    }
 }
+
+impl<T: Num> ToMyNum for T {
+    fn to(self) -> T
+    {
+        self
+    }
+}
+*/
 
 pub fn to_num<T, U>(n: U) -> T
 where
-    T: NumCast + Default,
+    T: NumCast + Default + Copy,
     U: ToPrimitive,
 {
     match NumCast::from(n) {
