@@ -1,6 +1,7 @@
 use dear_imgui_rs::Ui;
 use kradiant::editing::{self, Aabb};
 use kradiant::loader::map_loader;
+use kradiant::map::Map;
 use num_traits::{NumCast, ToPrimitive};
 use std::fs::create_dir_all;
 use std::io;
@@ -173,8 +174,10 @@ pub fn screen_to_world_ortho(
 */
 
 pub fn new_map(state: &mut EditorState) {
-    state.map_path = String::new();
-    state.map = None;
+    state.map_path = "unsaved.map".to_string();
+    state.map = Some(Map::default());
+    state.map_revision = state.map_revision.wrapping_add(1);
+    state.undo.clear();
     log_info!(state.console, "New map");
 }
 
@@ -195,6 +198,8 @@ pub fn open_map(state: &mut EditorState) {
                 state.selected_entity = None;
                 state.map_path = path_str.to_string();
                 state.map = Some(map);
+                state.map_revision = state.map_revision.wrapping_add(1);
+                state.undo.clear();
                 log_info!(state.console, "Loaded map: {}", path_str);
             }
             Err(e) => {

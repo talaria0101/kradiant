@@ -81,6 +81,7 @@ struct AppState {
     view2d_fbo_size: [u32; 2],
     view2d_cache: Option<View2dCache>,*/
     vp2d: Viewport2D,
+    vp3d: Viewport3D,
     needs_redraw: bool,
 }
 
@@ -90,12 +91,21 @@ struct View2dCache {
     map_present: bool,
     map_ptr: usize,
     map_generation: u64,
+    map_revision: u64,
     zoom: f32,
     // Expanded cull bounds (world units in the 2D plane coordinates).
     cull_left: f32,
     cull_right: f32,
     cull_top: f32,
     cull_bottom: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct View3dCache {
+    map_present: bool,
+    map_ptr: usize,
+    map_generation: u64,
+    map_revision: u64,
 }
 
 pub struct RenderBackend<'a> {
@@ -354,7 +364,12 @@ impl Viewport2D {
                 .as_ref()
                 .map(|m| (m as *const kradiant::map::Map) as usize)
                 .unwrap_or(0);
-            let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0);
+            let map_generation = editor
+                .map
+                .as_ref()
+                .map(|m| m.generation)
+                .unwrap_or(0u64);
+            let map_revision = editor.map_revision;
             let map_present = editor.map.is_some();
 
             if !map_present {
@@ -372,6 +387,7 @@ impl Viewport2D {
                         || cache.map_present != map_present
                         || cache.map_ptr != map_ptr
                         || cache.map_generation != map_generation
+                        || cache.map_revision != map_revision
                         || (cache.zoom - zoom).abs() > 1.0e-6
                     {
                         rebuild_view2d = true;
@@ -403,6 +419,7 @@ impl Viewport2D {
                     map_present,
                     map_ptr,
                     map_generation,
+                    map_revision,
                     zoom,
                     cull_left,
                     cull_right,
@@ -802,6 +819,212 @@ impl Viewport2D {
     }
 }
 
+pub struct Viewport3D {
+    line_vertices: Vec<Vec3>,
+    fbo: glow::Framebuffer,
+    tex: glow::Texture,
+    rbo: glow::Renderbuffer, // depth
+    fbo_size: [u32; 2],
+    cache: Option<View3dCache>,
+}
+
+impl Viewport3D {
+    pub fn render(&mut self, backend: &mut RenderBackend<'_>, editor: &mut ui::EditorState) {
+        unsafe {
+            use glow::HasContext;
+
+            let r3 = editor.view3d.rect;
+            if r3[2] <= 10.0 || r3[3] <= 10.0 {
+                return;
+            }
+
+            let fbo_w = r3[2] as u32;
+            let fbo_h = r3[3] as u32;
+
+            if [fbo_w, fbo_h] != self.fbo_size {
+                self.fbo_size = [fbo_w, fbo_h];
+                backend.gl.bind_texture(glow::TEXTURE_2D, Some(self.tex));
+                backend.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA as i32,
+                    fbo_w as i32,
+                    fbo_h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(None),
+                );
+                backend
+                    .gl
+                    .bind_renderbuffer(glow::RENDERBUFFER, Some(self.rbo));
+                backend.gl.renderbuffer_storage(
+                    glow::RENDERBUFFER,
+                    glow::DEPTH_COMPONENT16,
+                    fbo_w as i32,
+                    fbo_h as i32,
+                );
+            }
+
+            // Geometry cache
+            let map_present = editor.map.is_some();
+            let map_ptr = editor
+                .map
+                .as_ref()
+                .map(|m| m as *const _ as usize)
+                .unwrap_or(0);
+            let map_generation = editor
+                .map
+                .as_ref()
+                .map(|m| m.generation)
+                .unwrap_or(0u64);
+            let map_revision = editor.map_revision;
+
+            let need_rebuild = match self.cache {
+                Some(c) => {
+                    c.map_present != map_present
+                        || c.map_ptr != map_ptr
+                        || c.map_generation != map_generation
+                        || c.map_revision != map_revision
+                }
+                None => true,
+            };
+
+            if need_rebuild {
+                let prev_revision = self.cache.map(|c| c.map_revision).unwrap_or(0);
+                self.line_vertices.clear();
+
+                let mut bounds_min = Vec3::splat(f32::INFINITY);
+                let mut bounds_max = Vec3::splat(f32::NEG_INFINITY);
+
+                if let Some(map) = editor.map.as_mut() {
+                    // Cheap reserve to reduce reallocs on medium maps
+                    self.line_vertices.reserve(32_768);
+
+                    for ent in &mut map.entities {
+                        for brush in &mut ent.brushes {
+                            match &mut brush.content {
+                                BrushContent::Convex(_) => {
+                                    let Some((aabb, polys)) = brush.get_polygons_and_aabb()
+                                    else {
+                                        continue;
+                                    };
+                                    bounds_min = bounds_min.min(aabb.min);
+                                    bounds_max = bounds_max.max(aabb.max);
+                                    for (positions, _) in polys {
+                                        if positions.len() < 2 {
+                                            continue;
+                                        }
+                                        for i in 0..positions.len() {
+                                            let a = positions[i];
+                                            let b = positions[(i + 1) % positions.len()];
+                                            self.line_vertices.push(a);
+                                            self.line_vertices.push(b);
+                                        }
+                                    }
+                                }
+                                BrushContent::Patch(patch) => {
+                                    let Some((mesh, patch_aabb, edges)) =
+                                        patch.get_mesh_aabb_wire()
+                                    else {
+                                        continue;
+                                    };
+                                    bounds_min = bounds_min.min(patch_aabb.min);
+                                    bounds_max = bounds_max.max(patch_aabb.max);
+                                    let positions = mesh.positions.as_slice();
+                                    for &(a, b) in edges {
+                                        let ia = a as usize;
+                                        let ib = b as usize;
+                                        if ia >= positions.len() || ib >= positions.len() {
+                                            continue;
+                                        }
+                                        self.line_vertices.push(positions[ia]);
+                                        self.line_vertices.push(positions[ib]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                self.cache = Some(View3dCache {
+                    map_present,
+                    map_ptr,
+                    map_generation,
+                    map_revision,
+                });
+
+                // Auto-frame camera on new map load (pointer change)
+                if map_ptr != 0
+                    && map_revision != prev_revision
+                    && bounds_min.x.is_finite()
+                    && bounds_max.x.is_finite()
+                {
+                    let center = (bounds_min + bounds_max) * 0.5;
+                    let ext = bounds_max - bounds_min;
+                    let radius = (ext.length() * 0.5).max(64.0);
+
+                    let offset = Vec3::new(-1.0, -1.0, 0.65).normalize() * (radius * 2.5);
+                    let eye = center + offset;
+                    let dir = (center - eye).normalize();
+                    let yaw = dir.y.atan2(dir.x);
+                    let pitch = dir.z.asin();
+
+                    editor.view3d.cam.pos = eye;
+                    editor.view3d.cam.angles = Vec3::new(yaw, pitch, 0.0);
+                    if editor.view3d.cam.zoom <= 1.0 {
+                        editor.view3d.cam.zoom = (radius * 0.08).clamp(16.0, 512.0);
+                    }
+                }
+            }
+
+            // Draw into FBO
+            backend.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+            backend.gl.viewport(0, 0, fbo_w as i32, fbo_h as i32);
+
+            let view_bg = editor.palette.view2d_bg;
+            backend
+                .gl
+                .clear_color(view_bg[0], view_bg[1], view_bg[2], view_bg[3]);
+            backend
+                .gl
+                .clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+
+            backend.gl.enable(glow::DEPTH_TEST);
+            backend.gl.depth_func(glow::LEQUAL);
+
+            let cam = &editor.view3d.cam;
+            let (yaw, pitch) = (cam.angles.x, cam.angles.y);
+            let forward =
+                Vec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin())
+                    .normalize();
+            let eye = cam.pos;
+            let target = eye + forward;
+            let world_up = Vec3::Z;
+            let mut right = forward.cross(world_up);
+            if right.length_squared() <= 1e-8 {
+                right = Vec3::X;
+            }
+            right = right.normalize();
+            let up = right.cross(forward).normalize_or_zero();
+
+            let view = glam::Mat4::look_at_rh(eye, target, up);
+            let aspect = fbo_w as f32 / (fbo_h as f32).max(1.0);
+            let fov = editor.config.view3d_fov.to_radians().clamp(0.1, 3.0);
+            let proj = glam::Mat4::perspective_rh_gl(fov, aspect, 4.0, 100_000.0);
+            let mvp = proj * view;
+
+            // Map wire
+            let geom_col = editor.palette.view2d_geometry;
+            backend.draw_lines(&self.line_vertices, geom_col, mvp);
+
+            backend.gl.disable(glow::DEPTH_TEST);
+            backend.gl.use_program(None);
+            backend.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+    }
+}
+
 /// Register a texture image with the renderer.
 fn register_texture(
     renderer: &mut GlowRenderer,
@@ -1039,6 +1262,15 @@ impl AppState {
         };
         let view2d_fbo_size = [1u32, 1u32]; // resized on first frame
 
+        let (view3d_fbo, view3d_tex, view3d_rbo) = unsafe {
+            (
+                gl_for_renderer.create_framebuffer().unwrap(),
+                gl_for_renderer.create_texture().unwrap(),
+                gl_for_renderer.create_renderbuffer().unwrap(),
+            )
+        };
+        let view3d_fbo_size = [1u32, 1u32]; // resized on first frame
+
         unsafe {
             gl_for_renderer.bind_framebuffer(glow::FRAMEBUFFER, Some(view2d_fbo));
 
@@ -1079,6 +1311,47 @@ impl AppState {
                 glow::DEPTH_ATTACHMENT,
                 glow::RENDERBUFFER,
                 Some(view2d_rbo),
+            );
+
+            gl_for_renderer.bind_framebuffer(glow::FRAMEBUFFER, Some(view3d_fbo));
+
+            gl_for_renderer.bind_texture(glow::TEXTURE_2D, Some(view3d_tex));
+            gl_for_renderer.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                1,
+                1,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            gl_for_renderer.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl_for_renderer.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl_for_renderer.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(view3d_tex),
+                0,
+            );
+
+            gl_for_renderer.bind_renderbuffer(glow::RENDERBUFFER, Some(view3d_rbo));
+            gl_for_renderer.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT16, 1, 1);
+            gl_for_renderer.framebuffer_renderbuffer(
+                glow::FRAMEBUFFER,
+                glow::DEPTH_ATTACHMENT,
+                glow::RENDERBUFFER,
+                Some(view3d_rbo),
             );
 
             gl_for_renderer.bind_framebuffer(glow::FRAMEBUFFER, None);
@@ -1142,7 +1415,14 @@ impl AppState {
             renderer
                 .texture_map_mut()
                 .register_texture(view2d_tex, 1, 1, TextureFormat::RGBA32);
+
+        let view3d_imgui_tex =
+            renderer
+                .texture_map_mut()
+                .register_texture(view3d_tex, 1, 1, TextureFormat::RGBA32);
+
         editor.view2d.tex_id = Some(view2d_imgui_tex);
+        editor.view3d.tex_id = Some(view3d_imgui_tex);
         editor.images.splash = Some(id_splash_img);
         editor.icons.open = icon_ids.get(4).copied();
         editor.icons.save = icon_ids.get(5).copied();
@@ -1166,6 +1446,15 @@ impl AppState {
             cache: None
         };
 
+        let vp3d = Viewport3D {
+            line_vertices: vec![],
+            fbo: view3d_fbo,
+            fbo_size: view3d_fbo_size,
+            tex: view3d_tex,
+            rbo: view3d_rbo,
+            cache: None,
+        };
+
         Self {
             window,
             gl_surface,
@@ -1184,6 +1473,7 @@ impl AppState {
             //ebo,
             vao,
             vp2d,
+            vp3d,
             needs_redraw: true,
         }
     }
@@ -1238,6 +1528,17 @@ impl AppState {
         let ui = self.imgui.frame();
         ui::draw_editor(ui, &mut self.editor, delta);
 
+        if let Some(warp) = self.editor.view3d.warp_request.take() {
+            let fb_scale = self.imgui.io().display_framebuffer_scale();
+            let sx = fb_scale[0].max(1.0) as f64;
+            let sy = fb_scale[1].max(1.0) as f64;
+            let _ = self.window.set_cursor_position(winit::dpi::PhysicalPosition::new(
+                warp[0] as f64 * sx,
+                warp[1] as f64 * sy,
+            ));
+            self.editor.view3d.warp_pending_reset = true;
+        }
+
         self.platform.prepare_render(&mut self.imgui, &self.window);
         let draw_data = self.imgui.render();
 
@@ -1265,6 +1566,7 @@ impl AppState {
                 vao: self.vao,
                 vbo: self.vbo,
             };
+            self.vp3d.render(&mut backend, &mut self.editor);
             self.vp2d.render(&mut backend, &mut self.editor);
 
             self.gl.use_program(None);

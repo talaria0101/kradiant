@@ -88,6 +88,7 @@ pub struct EditorState {
     pub show_about: bool,
     pub toolbar_height: f32,
     pub map_path: String,
+    pub map_revision: u64,
     pub view2d: View2D,
     pub view3d: View3D,
     pub stretch_mode: StretchMode,
@@ -150,6 +151,7 @@ impl Default for EditorState {
             show_about: false,
             toolbar_height: 0.0,
             map_path: String::new(),
+            map_revision: 0,
             view2d: View2D::default(),
             view3d: View3D::default(),
             stretch_mode: StretchMode::default(),
@@ -194,7 +196,14 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
     draw_toolbar(ui, state);
     draw_entity_list(ui, state);
     draw_properties(ui, state);
-    draw_view3d(ui, state);
+    //draw_view3d(ui, state);
+    {
+        let view3d_ref = &mut state.view3d;
+        let config = &mut state.config;
+        let palette = &state.palette;
+
+        view3d_ref.draw_impl(ui, config, palette);
+    }
 
     state.selection_rgba = ui.style_color(StyleColor::ButtonActive);
 
@@ -693,46 +702,13 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
                     .or_insert_with(|| state.new_prop_val.clone());
                 state.new_prop_key.clear();
                 state.new_prop_val.clear();
+                state.map_revision = state.map_revision.wrapping_add(1);
             }
             /*if !can_add {
                  *                ui.pop_style_color();
                  *                ui.pop_style_color();
             }*/
         });
-}
-
-// 3D View
-
-fn draw_view3d(ui: &Ui, state: &mut EditorState) {
-    ui.window("3D View")
-    .size([640.0, 480.0], Condition::FirstUseEver)
-    .build(|| {
-        ui.text("FOV");
-        ui.same_line();
-        ui.set_next_item_width(80.0);
-        ui.slider_config("##fov", 40.0f32, 120.0f32)
-        .display_format("%.0f°")
-        .build(&mut state.config.view3d_fov);
-
-        ui.separator();
-
-        let [w, h] = ui.content_region_avail();
-        let (w, h) = (w.max(1.0), h.max(1.0));
-        let p = ui.cursor_screen_pos();
-
-        /*let draw = ui.get_window_draw_list();
-         *            draw.add_rect(p, [p[0] + w, p[1] + h], 0xFF20_2020u32).filled(true).build();
-         *            draw.add_rect(p, [p[0] + w, p[1] + h], 0xFF44_4444u32).filled(false).build();*/
-
-        let label = "3D View";
-        let lw = text_width(ui, label);
-        ui.set_cursor_screen_pos([p[0] + (w - lw) * 0.5, p[1] + h * 0.5 - 7.0]);
-        ui.text_disabled(label);
-
-        ui.set_cursor_screen_pos(p);
-        ui.invisible_button("##3d_hit", [w, h]);
-        // TODO: camera mouse-look / WASD when item is active/hovered
-    });
 }
 
 // Texture Browser
