@@ -136,7 +136,7 @@ use crate::geometry::PatchMesh;
 #[derive(Debug, Clone)]
 pub struct Patch {
     pub patch_type: PatchType,
-    pub shader: String,
+    pub texture: String,
     pub params: PatchParams,
     /// Vertex grid stored as `[row][col]` in map space.
     pub vertices: Vec<Vec<PatchVertex>>,
@@ -279,13 +279,13 @@ impl Patch {
     /// Create a new patch with the given shader, parameters and vertex grid.
     pub fn new(
         patch_type: PatchType,
-        shader: String,
+        texture: String,
         params: PatchParams,
         vertices: Vec<Vec<PatchVertex>>,
     ) -> Self {
         Self {
             patch_type,
-            shader,
+            texture,
             params,
             vertices,
             cached_mesh: None,

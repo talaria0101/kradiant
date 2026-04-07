@@ -632,7 +632,7 @@ impl Patch {
             PatchType::Curve => "patchDef5",
         };
 
-        let mut out = format!("{}\n{{\n{}\n", type_name, self.shader);
+        let mut out = format!("{}\n{{\n{}\n", type_name, self.texture);
 
         // params line
         writeln!(
@@ -780,7 +780,7 @@ common/caulk
         match &world.brushes[0].content {
             BrushContent::Patch(p) => {
                 assert_eq!(p.patch_type, PatchType::Curve);
-                assert_eq!(p.shader, "common/caulk");
+                assert_eq!(p.texture, "common/caulk");
                 assert_eq!(p.params.rows, 3);
                 assert_eq!(p.params.cols, 3);
                 assert_eq!(p.vertices.len(), 3);

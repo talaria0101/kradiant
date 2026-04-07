@@ -1,4 +1,4 @@
-//! 2D View — comprehensive view management and interaction logic
+//! 2D View
 
 use crate::config::EditorConfig;
 use crate::ui::console::ConsoleLogger;
@@ -9,10 +9,6 @@ use glam::{Vec2, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::BrushId;
 use kradiant::map_utils::format_float;
-
-// ============================================================================
-// Type Definitions
-// ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Ortho {

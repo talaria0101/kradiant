@@ -11,10 +11,13 @@ use crate::util::text_width;
 use crate::{EDITOR_THEMES, util};
 
 pub mod console;
-//#[macro_use]
+pub mod texbro;
 pub mod view2d;
+pub mod view3d;
 use console::ConsoleLogger;
+use texbro::TextureBrowser;
 pub use view2d::{AxisLock, DragMode, Ortho, StretchMode, View2D};
+use view3d::View3D;
 
 /// Helper function to create an icon button with fallback text and tooltip.
 fn icon_button(ui: &Ui, id: &str, icon: Option<TextureId>, tooltip: &str) -> bool {
@@ -86,10 +89,12 @@ pub struct EditorState {
     pub toolbar_height: f32,
     pub map_path: String,
     pub view2d: View2D,
+    pub view3d: View3D,
     pub stretch_mode: StretchMode,
     pub rotate_mode: bool,
     pub axis_lock: AxisLock,
     pub selection_rgba: [f32; 4],
+    pub tex_browser: TextureBrowser,
     pub tex_filter: String,
     pub tex_selected: Option<String>,
     pub tex_tile_size: f32,
@@ -146,10 +151,12 @@ impl Default for EditorState {
             toolbar_height: 0.0,
             map_path: String::new(),
             view2d: View2D::default(),
+            view3d: View3D::default(),
             stretch_mode: StretchMode::default(),
             rotate_mode: false,
             axis_lock: AxisLock::default(),
             selection_rgba: [0.3, 0.6, 1.0, 1.0],
+            tex_browser: TextureBrowser::default(),
             tex_filter: String::new(),
             tex_selected: None,
             tex_tile_size: 64.0,
@@ -505,7 +512,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         ) {
             state.config.update(
                 "grid_snap",
-                state.config.grid_snap as u8,
+                !state.config.grid_snap as u8,
                 &mut state.console,
             );
         }
@@ -731,117 +738,18 @@ fn draw_view3d(ui: &Ui, state: &mut EditorState) {
 // Texture Browser
 
 fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
-    ui.window("Textures")
-        .size([1280.0, 200.0], Condition::FirstUseEver)
-        .build(|| {
-            ui.text("Filter:");
-            ui.same_line();
-            ui.set_next_item_width(200.0);
-            let mut fbuf = state.tex_filter.clone();
-            if ui
-                .input_text("##tex_filter", &mut fbuf)
-                .hint("e.g. caulk")
-                .build()
-            {
-                state.tex_filter = fbuf;
-            }
-            ui.same_line();
-            ui.text("  Size:");
-            ui.same_line();
-            ui.set_next_item_width(100.0);
-            ui.slider_config("##tile_size", 32.0f32, 256.0f32)
-                .display_format("%.0f px")
-                .build(&mut state.tex_tile_size);
-
-            if let Some(sel) = &state.tex_selected {
-                ui.same_line();
-                ui.text_disabled(format!("  selected: {sel}"));
-            }
-
-            ui.separator();
-
-            ui.child_window("##tex_scroll")
-                .size([0.0, 0.0])
-                .build(ui, || draw_texture_tiles(ui, state));
-        });
-}
-
-fn draw_texture_tiles(ui: &Ui, state: &mut EditorState) {
-    // Placeholder list — replace with AssetDb::collect_used_materials() later
-    let materials: &[&str] = &[
-        "common/caulk",
-        "common/clip",
-        "common/trigger",
-        "common/water",
-    ];
-
-    let tile = state.tex_tile_size;
-    let label_h = ui.frame_height_with_spacing();
-    let cell_w = tile + 4.0;
-    let avail_w = ui.content_region_avail()[0].max(cell_w);
-    let cols = ((avail_w + 4.0) / cell_w).floor().max(1.0) as usize;
-
-    let filter_lc = state.tex_filter.to_ascii_lowercase();
-    let visible: Vec<&str> = materials
-        .iter()
-        .filter(|m| filter_lc.is_empty() || m.to_ascii_lowercase().contains(&filter_lc))
-        .copied()
-        .collect();
-
-    if visible.is_empty() {
-        ui.text_disabled("no textures match filter");
-        return;
-    }
-
-    for (i, material) in visible.iter().enumerate() {
-        let short = material.rsplit('/').next().unwrap_or(material);
-        let selected = state.tex_selected.as_deref() == Some(material);
-
-        if selected {
-            let p = ui.cursor_screen_pos();
-            ui.get_window_draw_list()
-                .add_rect(
-                    p,
-                    [p[0] + tile + 2.0, p[1] + tile + label_h + 2.0],
-                    util::imgui_color_to_u32(ui.style_color(StyleColor::TabSelectedOverline)),
-                )
-                .filled(true)
-                .rounding(3.0)
-                .build();
-        }
-
-        // Deterministic colour placeholder — swap for Image::new(gpu_tex_id, [tile,tile]) later.
-        {
-            let hash = short
-                .bytes()
-                .fold(5381u32, |a, b| a.wrapping_mul(33).wrapping_add(b as u32));
-            let r = (((hash) & 0x7F) as f32 + 64.0) / 255.0;
-            let g = (((hash >> 8) & 0x7F) as f32 + 64.0) / 255.0;
-            let b = (((hash >> 16) & 0x7F) as f32 + 64.0) / 255.0;
-            // Pack as ABGR u32 that DrawList expects (0xAA_BB_GG_RR).
-            let col = util::pack_abgr(r, g, b, 1.0);
-            let p = ui.cursor_screen_pos();
-            ui.get_window_draw_list()
-                .add_rect(p, [p[0] + tile, p[1] + tile], col)
-                .filled(true)
-                .build();
-        }
-
-        if ui.invisible_button(format!("##t_{i}"), [tile, tile]) {
-            state.tex_selected = if selected {
-                None
-            } else {
-                Some(material.to_string())
-            };
-        }
-        if ui.is_item_hovered() {
-            ui.tooltip_text(*material);
-        }
-
-        if (i + 1) % cols != 0 {
-            ui.same_line_with_spacing(0.0, 4.0);
-        }
-    }
+    let mut on_select = |_selected: String| {
+        // TODO: store selected texture for brush creation/face texturing
+    };
+    
+    texbro::draw_texture_browser(
+        ui,
+        &mut state.tex_browser,
+        &mut state.tex_filter,
+        &mut state.tex_tile_size,
+        &mut on_select,
+        &mut state.map
+    );
 }
 
 fn draw_about_dialog(ui: &Ui) {

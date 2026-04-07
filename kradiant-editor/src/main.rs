@@ -290,13 +290,13 @@ impl AppState {
 
         // fonts
         imgui.fonts().add_font(&[
-            /*FontSource::TtfData {
-                data: include_bytes!("../assets/Nunito-Regular.ttf"),
-                size_pixels: Some(18.0),
-                config: None,
-            },*/
             FontSource::TtfData {
                 data: include_bytes!("../assets/fonts/Nunito-SemiBold.ttf"),
+                size_pixels: Some(18.0),
+                config: None,
+            },
+            FontSource::TtfData {
+                data: include_bytes!("../assets/fonts/NotoEmoji-SemiBold.ttf"),
                 size_pixels: Some(18.0),
                 config: None,
             },
@@ -407,6 +407,12 @@ impl AppState {
         let mut editor = ui::EditorState::default();
         editor.console.info(gl_info);
 
+        // Initialize texture browser with game main directory
+        if !editor.config.game_main.as_os_str().is_empty() {
+            editor.tex_browser.init(&editor.config.game_main);
+            editor.console.info("Asset database loaded".to_string());
+        }
+
         // Apply configured theme on startup
         if !editor.themes.is_empty() {
             let idx = editor
@@ -509,6 +515,14 @@ impl AppState {
                 .get(self.editor.config.active_theme)
                 .map(|e| &e.data),
         );
+
+        const UPLOADS_PER_FRAME: usize = 4; // later would add in configuration
+        let pending = &mut self.editor.tex_browser.pending_uploads;
+        let batch: Vec<_> = pending.drain(..pending.len().min(UPLOADS_PER_FRAME)).collect();
+        for (material, img) in batch {
+            let tid = register_texture(&mut self.renderer, &img, "game texture");
+            self.editor.tex_browser.tex_gpu_cache.insert(material, (tid, [img.width as f32, img.height as f32]));
+        }
 
         self.platform.prepare_frame(&self.window, &mut self.imgui);
         let ui = self.imgui.frame();
@@ -1210,13 +1224,18 @@ impl AppState {
         self.gl_surface
             .swap_buffers(&self.gl_context)
             .expect("swap failed");
+
+        self.needs_redraw = false;
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_none() {
-            self.state = Some(AppState::new(event_loop));
+            let mut state = AppState::new(event_loop);
+            state.needs_redraw = true;
+            state.window.request_redraw();
+            self.state = Some(state);
         }
     }
 
@@ -1245,32 +1264,46 @@ impl ApplicationHandler for App {
                     NonZeroU32::new(size.height).unwrap(),
                 );
                 state.needs_redraw = true;
+                state.window.request_redraw();
             }
-            WindowEvent::RedrawRequested => {
-                state.render();
-            }
-            // Any input/UI event should schedule a redraw; we avoid continuous rendering when idle.
             WindowEvent::CursorMoved { .. }
-            | WindowEvent::MouseInput { .. }
             | WindowEvent::MouseWheel { .. }
-            | WindowEvent::KeyboardInput { .. }
-            | WindowEvent::ModifiersChanged(_)
-            | WindowEvent::Focused(_)
-            | WindowEvent::ScaleFactorChanged { .. }
-            | WindowEvent::ThemeChanged(_)
             | WindowEvent::Touch(_)
             | WindowEvent::TouchpadPressure { .. }
             | WindowEvent::AxisMotion { .. } => {
                 state.needs_redraw = true;
+                state.window.request_redraw();
+            }
+            // Any input/UI event should schedule a redraw; we avoid continuous rendering when idle
+            WindowEvent::MouseInput { .. }
+            | WindowEvent::KeyboardInput { .. }
+            | WindowEvent::ModifiersChanged(_) => {
+                state.needs_redraw = true;
+                state.render();
+                state.needs_redraw = false;
+            }
+            WindowEvent::Focused(_)
+            | WindowEvent::ScaleFactorChanged { .. }
+            | WindowEvent::ThemeChanged(_) => {
+                state.needs_redraw = true;
+                state.window.request_redraw();
+            }
+            WindowEvent::RedrawRequested => {
+                if state.needs_redraw {
+                    state.render();
+                    state.needs_redraw = false;
+                }
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(state) = &mut self.state {
             if state.needs_redraw {
-                state.window.request_redraw();
+                state.window.request_redraw();   // keep drawing while UI is active
+            } else {
+                event_loop.set_control_flow(ControlFlow::Wait);
             }
         }
     }

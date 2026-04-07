@@ -32,7 +32,7 @@ impl Map {
                         }
                     }
                     BrushContent::Patch(p) => {
-                        out.push(resolve_editor_image_name(&p.shader, shader_db));
+                        out.push(resolve_editor_image_name(&p.texture, shader_db));
                     }
                 }
             }

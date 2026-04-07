@@ -93,6 +93,23 @@ pub fn adjust_color_brightness(color: u32, brightness: f32) -> u32 {
     ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
+pub fn adjust_color_opacity(color: u32, opacity: f32) -> u32 {
+    let extract_channel = |shift: u8| ((color >> shift) & 0xFF) as u8;
+    let a = extract_channel(24);
+    let r = extract_channel(16);
+    let g = extract_channel(8);
+    let b = extract_channel(0);
+
+    let scale = |v: u8| -> u8 {
+        let scaled = (v as f32 * opacity).round();
+        scaled.clamp(0.0, 255.0) as u8
+    };
+
+    let a = scale(a);
+
+    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
 pub fn screen_to_world(
     mouse: [f32; 2],
     origin: [f32; 2],
