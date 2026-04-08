@@ -5,9 +5,9 @@ use kradiant::loader::asset_loader::{AssetDb, AssetDbOptions};
 use kradiant::map::Map;
 use kradiant::texture::TextureImage;
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
-use std::io;
 use std::fs;
+use std::io;
+use std::path::PathBuf;
 
 use crate::util;
 
@@ -40,8 +40,7 @@ pub struct TextureEntry {
     pub display: String,
 }
 
-fn texture_entry_from_str(s: &str) -> io::Result<TextureEntry>
-{
+fn texture_entry_from_str(s: &str) -> io::Result<TextureEntry> {
     //use std::path::Path;
     //let tmp_path = Path::new(s);
     let mut tok: Vec<&str> = s.split(".").collect();
@@ -49,8 +48,7 @@ fn texture_entry_from_str(s: &str) -> io::Result<TextureEntry>
         println!("ext: {ext}");
         if AssetDb::file_useful_for_radiant(*ext) {
             tok.pop();
-        }
-        else {
+        } else {
             let t = format!("Unknown file: {}", s);
             return Err(io::Error::new(io::ErrorKind::InvalidInput, t));
         }
@@ -59,11 +57,7 @@ fn texture_entry_from_str(s: &str) -> io::Result<TextureEntry>
     let path = tok.join("");
     println!("t entry path: {path}");
 
-    let display = path
-        .rsplit('/')
-        .nth(0)
-        .unwrap_or(&path)
-        .to_string();
+    let display = path.rsplit('/').nth(0).unwrap_or(&path).to_string();
 
     Ok(TextureEntry { path, display })
 }
@@ -89,13 +83,16 @@ fn texture_entry_from_resolved(
         // Strip the textures_dir prefix to get the relative part,
         // then rebuild it as a virtual path.
         ResolvedAsset::Loose(abs_path) => {
-            let rel = abs_path
-            .strip_prefix(textures_dir)
-            .map_err(|_| io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("loose path {} is not under textures_dir {}",
-                    abs_path.display(), textures_dir.display()),
-            ))?;
+            let rel = abs_path.strip_prefix(textures_dir).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "loose path {} is not under textures_dir {}",
+                        abs_path.display(),
+                        textures_dir.display()
+                    ),
+                )
+            })?;
             // Convert OS separators to forward slashes and prepend "textures/"
             format!("textures/{}", rel.to_string_lossy().replace('\\', "/"))
         }
@@ -103,8 +100,8 @@ fn texture_entry_from_resolved(
 
     // Strip the "textures/" prefix (9 chars) to get the material name.
     let material = virtual_path
-    .strip_prefix("textures/")
-    .unwrap_or(&virtual_path);
+        .strip_prefix("textures/")
+        .unwrap_or(&virtual_path);
 
     // Strip the extension — find last dot after last slash.
     let material_no_ext = if let Some(dot) = material.rfind('.') {
@@ -120,34 +117,35 @@ fn texture_entry_from_resolved(
     };
 
     if material_no_ext.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty material path"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty material path",
+        ));
     }
 
     let display = material_no_ext
-    .rsplit('/')
-    .next()
-    .unwrap_or(material_no_ext)
-    .to_string();
+        .rsplit('/')
+        .next()
+        .unwrap_or(material_no_ext)
+        .to_string();
 
     Ok(TextureEntry {
         path: material_no_ext.to_string(),
-       display,
+        display,
     })
 }
 
 impl TryFrom<String> for TextureEntry {
     type Error = std::io::Error;
 
-    fn try_from(value: String) -> Result<Self, Self::Error>
-    {
+    fn try_from(value: String) -> Result<Self, Self::Error> {
         texture_entry_from_str(&value)
     }
 }
 impl TryFrom<&str> for TextureEntry {
     type Error = std::io::Error;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error>
-    {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         texture_entry_from_str(value)
     }
 }
@@ -171,11 +169,14 @@ impl Default for TextureBrowser {
 impl TextureBrowser {
     /// Initialize if maindir is available
     pub fn init(&mut self, maindir: &PathBuf) {
-        match AssetDb::from_maindir_with_options(maindir.clone(), AssetDbOptions {
-            full_index: false,
-            index_textures: true,
-            index_shaders: true,
-        }) {
+        match AssetDb::from_maindir_with_options(
+            maindir.clone(),
+            AssetDbOptions {
+                full_index: false,
+                index_textures: true,
+                index_shaders: true,
+            },
+        ) {
             Ok(db) => {
                 self.asset_db = Some(db);
                 self.refresh_contents();
@@ -204,7 +205,7 @@ impl TextureBrowser {
 
         // Prepend "textures/" to current_path to match virtual paths from asset DB
         let prefix = format!("textures/{}", self.current_path);
-        
+
         // Scan pk3 files
         for vpath in db.iter_pk3_virtual_paths() {
             if !vpath.starts_with(&prefix) {
@@ -219,13 +220,12 @@ impl TextureBrowser {
                 if !subdir.is_empty() {
                     dir_set.insert(subdir);
                 }
-            }
-            else if !remainder.is_empty() {
+            } else if !remainder.is_empty() {
                 // It's a file in the current directory, add if it looks like a texture
                 let s = &vpath[9..];
                 match s.try_into() {
                     Ok(e) => tex_vec.push(e),
-                    Err(e) => eprintln!("{e}")
+                    Err(e) => eprintln!("{e}"),
                 }
             }
         }
@@ -237,7 +237,7 @@ impl TextureBrowser {
         } else {
             textures_dir.join(self.current_path.trim_end_matches('/'))
         };
-        
+
         if current_loose_dir.is_dir() {
             if let Ok(entries) = fs::read_dir(&current_loose_dir) {
                 for entry in entries.flatten() {
@@ -307,8 +307,7 @@ impl TextureBrowser {
         let Some(db) = &mut self.asset_db else {
             return Err("Asset database not initialized".to_string());
         };
-        db.load_texture_rgba8(material)
-            .map_err(|e| e.to_string())
+        db.load_texture_rgba8(material).map_err(|e| e.to_string())
     }
 
     /// Get list of subdirectories in current path
@@ -337,16 +336,16 @@ impl TextureBrowser {
         if self.tex_gpu_cache.contains_key(material)
             || self.tex_cache.contains_key(material)
             || self.pending_uploads.iter().any(|(k, _)| k == material)
-            {
-                return;
+        {
+            return;
+        }
+        match self.load_texture(material) {
+            Ok(img) => {
+                self.tex_cache.insert(material.to_string(), img.clone());
+                self.pending_uploads.push((material.to_string(), img));
             }
-            match self.load_texture(material) {
-                Ok(img) => {
-                    self.tex_cache.insert(material.to_string(), img.clone());
-                    self.pending_uploads.push((material.to_string(), img));
-                }
-                Err(e) => eprintln!("tex load failed {material}: {e}"),
-            }
+            Err(e) => eprintln!("tex load failed {material}: {e}"),
+        }
     }
 }
 
@@ -356,8 +355,8 @@ pub fn draw_texture_browser(
     browser: &mut TextureBrowser,
     tex_filter: &mut String,
     tex_tile_size: &mut f32,
-    on_select: &mut dyn FnMut(String),
-    map: &mut Option<Map>
+    on_select: &mut dyn FnMut(String, &mut Option<Map>),
+    map: &mut Option<Map>,
 ) {
     ui.window("Textures")
         .size([1280.0, 400.0], Condition::FirstUseEver)
@@ -389,7 +388,7 @@ pub fn draw_texture_browser(
                             if let Some(resolved) = db.resolve_texture(&material) {
                                 match texture_entry_from_resolved(&resolved, &textures_dir) {
                                     Ok(entry) => browser.textures.push(entry),
-               Err(e) => eprintln!("skip {material}: {e}"),
+                                    Err(e) => eprintln!("skip {material}: {e}"),
                                 }
                             }
                         }
@@ -398,7 +397,6 @@ pub fn draw_texture_browser(
                     //browser.subdirs.clear();
                 }
             }
-
 
             if let Some(sel) = &browser.selected {
                 ui.same_line();
@@ -436,13 +434,7 @@ pub fn draw_texture_browser(
             ui.child_window("##tex_tiles")
                 .size([tiles_w, panel_h])
                 .build(ui, || {
-                    draw_texture_tiles(
-                        ui,
-                        browser,
-                        tex_filter,
-                        *tex_tile_size,
-                        on_select,
-                    );
+                    draw_texture_tiles(ui, browser, tex_filter, *tex_tile_size, map, on_select);
                 });
         });
 }
@@ -451,7 +443,7 @@ pub fn draw_texture_browser(
 fn draw_breadcrumb(
     ui: &Ui,
     browser: &mut TextureBrowser,
-    _on_select: &mut dyn FnMut(String),
+    _on_select: &mut dyn FnMut(String, &mut Option<Map>),
 ) {
     let breadcrumbs = browser.breadcrumb_path();
 
@@ -485,7 +477,7 @@ fn draw_breadcrumb(
 /// Draw the directory tree
 fn draw_directory_tree(ui: &Ui, browser: &mut TextureBrowser) {
     let mut has_items = false;
-    
+
     if !browser.current_path.is_empty() {
         if ui.button("📁 ..") {
             browser.navigate("..");
@@ -501,7 +493,7 @@ fn draw_directory_tree(ui: &Ui, browser: &mut TextureBrowser) {
         }
         has_items = true;
     }
-    
+
     // Ensure window is never completely empty
     if !has_items {
         ui.text_disabled("(no subdirectories)");
@@ -514,7 +506,8 @@ fn draw_texture_tiles(
     browser: &mut TextureBrowser,
     filter: &str,
     tile_size: f32,
-    on_select: &mut dyn FnMut(String),
+    map: &mut Option<Map>,
+    on_select: &mut dyn FnMut(String, &mut Option<Map>),
 ) {
     let textures = browser.get_textures();
 
@@ -525,10 +518,10 @@ fn draw_texture_tiles(
 
     let filter_lc = filter.to_ascii_lowercase();
     let visible: Vec<TextureEntry> = textures
-    .iter()
-    .filter(|t| filter_lc.is_empty() || t.display.to_ascii_lowercase().contains(&filter_lc))
-    .cloned()
-    .collect();
+        .iter()
+        .filter(|t| filter_lc.is_empty() || t.display.to_ascii_lowercase().contains(&filter_lc))
+        .cloned()
+        .collect();
 
     if visible.is_empty() {
         ui.text_disabled("no textures match filter");
@@ -536,7 +529,7 @@ fn draw_texture_tiles(
         return;
     }
 
-    let cell_width = tile_size + 8.0;// 8 = padding between columns
+    let cell_width = tile_size + 8.0; // 8 = padding between columns
     let avail_w = ui.content_region_avail()[0].max(cell_width);
     let cols = ((avail_w) / cell_width).floor().max(1.0) as usize;
 
@@ -558,23 +551,27 @@ fn draw_texture_tiles(
             ui.dummy(display_size); // Reserves the exact layout space
 
             // Draw color placeholder exactly over the dummy's space
-            let hash = entry.display
-            .bytes()
-            .fold(5381u32, |a, b| a.wrapping_mul(33).wrapping_add(b as u32));
+            let hash = entry
+                .display
+                .bytes()
+                .fold(5381u32, |a, b| a.wrapping_mul(33).wrapping_add(b as u32));
             let r = (((hash) & 0x7F) as f32 + 64.0) / 255.0;
             let g = (((hash >> 8) & 0x7F) as f32 + 64.0) / 255.0;
             let b = (((hash >> 16) & 0x7F) as f32 + 64.0) / 255.0;
             let col = crate::util::pack_abgr(r, g, b, 1.0);
 
             ui.get_window_draw_list()
-            .add_rect(p, [p[0] + display_size[0], p[1] + display_size[1]], col)
-            .filled(true)
-            .build();
+                .add_rect(p, [p[0] + display_size[0], p[1] + display_size[1]], col)
+                .filled(true)
+                .build();
 
             let in_view = unsafe {
                 dear_imgui_rs::sys::igIsRectVisible_Vec2(
                     dear_imgui_rs::sys::ImVec2 { x: p[0], y: p[1] },
-                    dear_imgui_rs::sys::ImVec2 { x: p[0] + display_size[0], y: p[1] + display_size[1] },
+                    dear_imgui_rs::sys::ImVec2 {
+                        x: p[0] + display_size[0],
+                        y: p[1] + display_size[1],
+                    },
                 )
             };
             if in_view {
@@ -585,13 +582,13 @@ fn draw_texture_tiles(
         if selected {
             let h_color = util::imgui_color_to_u32(ui.style_color(StyleColor::TabSelectedOverline));
             ui.get_window_draw_list()
-            .add_rect(
-                p,
-                [p[0] + display_size[0], p[1] + display_size[1]],
-                util::adjust_color_opacity(h_color, 0.5),
-            )
-            .filled(true)
-            .build();
+                .add_rect(
+                    p,
+                    [p[0] + display_size[0], p[1] + display_size[1]],
+                    util::adjust_color_opacity(h_color, 0.5),
+                )
+                .filled(true)
+                .build();
         }
 
         if ui.is_item_hovered() {
@@ -602,7 +599,7 @@ fn draw_texture_tiles(
             browser.selected = if selected {
                 None
             } else {
-                on_select(entry.path.clone());
+                on_select(entry.path.clone(), map);
                 Some(entry.path.clone())
             };
         }

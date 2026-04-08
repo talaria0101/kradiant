@@ -1,11 +1,12 @@
 //! 2D View
 
 use crate::config::EditorConfig;
+use crate::ui::FaceSelection;
 use crate::ui::console::ConsoleLogger;
 use crate::util::{project_to_2d, text_height, text_width};
 use crate::{log_error, log_info, log_warn, util};
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
-use glam::{Vec2, Vec3};
+use glam::{Quat, Vec2, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::BrushId;
 use kradiant::map_utils::format_float;
@@ -75,6 +76,7 @@ pub struct RotateDrag {
     pub selection_aabb: Aabb,
     pub pivot_uv: [f32; 2],
     pub start_uv: [f32; 2],
+    pub axis: Vec3,
 }
 
 pub struct View2D {
@@ -138,12 +140,7 @@ impl View2D {
 
     pub fn rotate_preview_xform(&self) -> Option<editing::AffineRotate> {
         let rotate = self.rotate.as_ref()?;
-        let axis = match self.ortho_axis {
-            Ortho::XY => Vec3::Z,
-            Ortho::XZ => Vec3::Y,
-            Ortho::YZ => Vec3::X,
-        };
-        editing::rotate_selection_transform(&rotate.selection_aabb, axis, self.rotate_angle)
+        editing::rotate_selection_transform(&rotate.selection_aabb, rotate.axis, self.rotate_angle)
             .map(|(xform, _)| xform)
     }
 
@@ -194,7 +191,9 @@ impl View2D {
         console: &mut crate::ui::console::ConsoleLogger,
         undo: &mut crate::ui::undo::UndoRedo,
         selected_brushes: &mut Vec<(usize, usize)>,
+        selected_faces: &mut Vec<FaceSelection>,
         selected_entity: &mut Option<usize>,
+        edit_faces: bool,
         map: &mut Option<kradiant::map::Map>,
         selection_rgba: [f32; 4],
         dt: f32,
@@ -216,9 +215,55 @@ impl View2D {
                 ui.invisible_button("##2d_canvas", [w, h]);
                 let canvas_interacting = ui.is_item_hovered() || ui.is_item_active();
 
+                if edit_faces {
+                    sync_selected_brushes_from_faces(selected_faces, selected_brushes);
+                } else if !selected_faces.is_empty() {
+                    selected_faces.clear();
+                }
+
                 if canvas_interacting {
                     let wheel = ui.io().mouse_wheel();
                     if wheel != 0.0 {
+                        if edit_faces
+                            && ui.is_key_down(dear_imgui_rs::Key::LeftAlt)
+                            && map.is_some()
+                            && !selected_faces.is_empty()
+                        {
+                            let ticks = wheel.round() as i32;
+                            if ticks != 0 {
+                                let step = (config.grid_minor_step as f32).max(1.0);
+                                let mut delta = match self.ortho_axis {
+                                    Ortho::XY => Vec3::new(0.0, 0.0, step * ticks as f32),
+                                    Ortho::XZ => Vec3::new(0.0, step * ticks as f32, 0.0),
+                                    Ortho::YZ => Vec3::new(step * ticks as f32, 0.0, 0.0),
+                                };
+
+                                if axis_lock.x {
+                                    delta.x = 0.0;
+                                }
+                                if axis_lock.y {
+                                    delta.y = 0.0;
+                                }
+                                if axis_lock.z {
+                                    delta.z = 0.0;
+                                }
+
+                                if delta != Vec3::ZERO {
+                                    undo.push("Move faces", map, selected_brushes, selected_faces, selected_entity);
+                                    if let Some(map) = map.as_mut() {
+                                        if translate_selected_faces(map, selected_faces, delta) {
+                                            log_info!(console, "Moved selected faces");
+                                            if let Some(aabb) =
+                                                selection_aabb_faces_from_map(map, selected_faces)
+                                            {
+                                                self.last_aabb = Some(aabb.clone());
+                                                update_last_work_from_aabb(self, &aabb);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
                         let mouse = ui.io().mouse_pos();
                         let old_zoom = self.zoom;
                         let f = if wheel > 0.0 { 1.15f32 } else { 1.0 / 1.15 };
@@ -228,6 +273,7 @@ impl View2D {
                             self.zoom = new_zoom;
                             self.pan[0] = (mouse[0] - (p[0] + w * 0.5)) - world[0] * new_zoom;
                             self.pan[1] = (mouse[1] - (p[1] + h * 0.5)) - world[1] * new_zoom;
+                        }
                         }
                     }
                     if ui.is_mouse_dragging(MouseButton::Right) {
@@ -282,17 +328,44 @@ impl View2D {
                         ),
                     };
 
-                    let selected_brush = map.as_mut().and_then(|m| {
-                        editing::pick_brush_by_ray(m, ray_origin, ray_dir, editing::PickMask::ALL)
-                    });
-                    if let Some(sel) = selected_brush {
-                        if !selected_brushes.contains(&sel) {
-                            selected_brushes.push(sel);
+                    if edit_faces {
+                        let selected_face = map
+                            .as_mut()
+                            .and_then(|m| editing::pick_convex_face_by_ray(m, ray_origin, ray_dir));
+                        if let Some((entity_idx, brush_idx, face_idx)) = selected_face {
+                            let sel = FaceSelection {
+                                entity_idx,
+                                brush_idx,
+                                face_idx,
+                            };
+                            if !selected_faces.contains(&sel) {
+                                selected_faces.push(sel);
+                            }
+                            sync_selected_brushes_from_faces(selected_faces, selected_brushes);
+                            *selected_entity = Some(entity_idx);
+
+                            if let Some(aabb) = selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                            {
+                                self.last_aabb = Some(aabb.clone());
+                                update_last_work_from_aabb(self, &aabb);
+                            }
                         }
-                        *selected_entity = Some(sel.0);
-                        if let Some(aabb) = selection_aabb(map, selected_brushes) {
-                            self.last_aabb = Some(aabb.clone());
-                            update_last_work_from_aabb(self, &aabb);
+                    } else {
+                        let selected_brush = map.as_mut().and_then(|m| {
+                            editing::pick_brush_by_ray(m, ray_origin, ray_dir, editing::PickMask::ALL)
+                        });
+                        if let Some(sel) = selected_brush {
+                            if !selected_brushes.contains(&sel) {
+                                selected_brushes.push(sel);
+                            }
+                            selected_faces.clear();
+                            *selected_entity = Some(sel.0);
+                            if let Some(aabb) =
+                                selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                            {
+                                self.last_aabb = Some(aabb.clone());
+                                update_last_work_from_aabb(self, &aabb);
+                            }
                         }
                     }
                 }
@@ -315,32 +388,44 @@ impl View2D {
                     self.stretch_delta = Vec3::ZERO;
                     self.rotate = None;
                     self.rotate_angle = 0.0;
-                    self.drag_mode = if !selected_brushes.is_empty() {
-                        if util::click_in_selection_aabb(selected_brushes, map.as_ref().unwrap(), snapped_i, self.ortho_axis) {
-                            if rotate_mode {
-                                if let Some(aabb) = selection_aabb(map, selected_brushes) {
+                    let has_selection = if edit_faces {
+                        !selected_faces.is_empty()
+                    } else {
+                        !selected_brushes.is_empty()
+                    };
+
+                    self.drag_mode = if has_selection {
+                        if let Some(aabb) =
+                            selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                        {
+                            if click_in_aabb_2d(&aabb, snapped_i, self.ortho_axis) {
+                                if rotate_mode {
                                     let center = (aabb.min + aabb.max) * 0.5;
                                     let pivot_uv = project_to_2d(center, self.ortho_axis);
+                                    let axis = match self.ortho_axis {
+                                        Ortho::XY => Vec3::Z,
+                                        Ortho::XZ => Vec3::Y,
+                                        Ortho::YZ => Vec3::X,
+                                    };
                                     self.rotate = Some(RotateDrag {
                                         selection_aabb: aabb,
                                         pivot_uv,
                                         start_uv: world,
+                                        axis,
                                     });
                                     DragMode::RotateSelection
                                 } else {
                                     DragMode::MoveSelection
                                 }
                             } else {
-                                DragMode::MoveSelection
+                                let faces = stretch_faces_from_start(self.ortho_axis, &aabb, snapped_i);
+                                self.stretch = Some(StretchDrag {
+                                    selection_aabb: aabb,
+                                    faces: [faces.get(0).copied(), faces.get(1).copied()],
+                                });
+                                self.stretch_delta = Vec3::ZERO;
+                                DragMode::StretchSelection
                             }
-                        } else if let Some(aabb) = selection_aabb(map, selected_brushes) {
-                            let faces = stretch_faces_from_start(self.ortho_axis, &aabb, snapped_i);
-                            self.stretch = Some(StretchDrag {
-                                selection_aabb: aabb,
-                                faces: [faces.get(0).copied(), faces.get(1).copied()],
-                            });
-                            self.stretch_delta = Vec3::ZERO;
-                            DragMode::StretchSelection
                         } else {
                             DragMode::NewBrush
                         }
@@ -359,13 +444,13 @@ impl View2D {
                     if self.drag_start.is_some() {
                         self.drag_current = Some(snapped_i);
 
-                        if self.drag_mode == DragMode::MoveSelection {
-                            let d = snapped_i - self.drag_start.unwrap();
-                            self.move_offset =
-                                util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
-                        } else if self.drag_mode == DragMode::StretchSelection {
-                            let d = snapped_i - self.drag_start.unwrap();
-                            let mut delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
+                            if self.drag_mode == DragMode::MoveSelection {
+                                let d = snapped_i - self.drag_start.unwrap();
+                                let delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
+                                self.move_offset = delta;
+                            } else if self.drag_mode == DragMode::StretchSelection {
+                                let d = snapped_i - self.drag_start.unwrap();
+                                let mut delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
                             if let Some(stretch) = self.stretch.as_ref() {
                                 delta = util::clamp_stretch_delta(
                                     &stretch.selection_aabb,
@@ -376,27 +461,33 @@ impl View2D {
                                 );
                             }
                             self.stretch_delta = delta;
-                        } else if self.drag_mode == DragMode::RotateSelection {
-                            if let Some(rot) = self.rotate.as_ref() {
-                                let angle = if self.rotation_locked(axis_lock) {
-                                    0.0
-                                } else {
-                                    let v0 = [rot.start_uv[0] - rot.pivot_uv[0], rot.start_uv[1] - rot.pivot_uv[1]];
-                                    let v1 = [world[0] - rot.pivot_uv[0], world[1] - rot.pivot_uv[1]];
-                                    let dot = v0[0] * v1[0] + v0[1] * v1[1];
-                                    let cross = v0[0] * v1[1] - v0[1] * v1[0];
-                                    let mut angle = cross.atan2(dot);
-                                    if matches!(self.ortho_axis, Ortho::XY | Ortho::YZ) {
-                                        angle = -angle;
-                                    }
-                                    if my_snapping {
-                                        angle = angle.to_degrees().round().to_radians();
-                                    }
-                                    angle
-                                };
-                                self.rotate_angle = angle;
+                            } else if self.drag_mode == DragMode::RotateSelection {
+                                if let Some(rot) = self.rotate.as_ref() {
+                                    let locked = (rot.axis == Vec3::X && axis_lock.x)
+                                        || (rot.axis == Vec3::Y && axis_lock.y)
+                                        || (rot.axis == Vec3::Z && axis_lock.z);
+                                    let angle = if locked {
+                                        0.0
+                                    } else {
+                                        let v0 = [
+                                            rot.start_uv[0] - rot.pivot_uv[0],
+                                            rot.start_uv[1] - rot.pivot_uv[1],
+                                        ];
+                                        let v1 = [world[0] - rot.pivot_uv[0], world[1] - rot.pivot_uv[1]];
+                                        let dot = v0[0] * v1[0] + v0[1] * v1[1];
+                                        let cross = v0[0] * v1[1] - v0[1] * v1[0];
+                                        let mut angle = cross.atan2(dot);
+                                        if matches!(self.ortho_axis, Ortho::XY | Ortho::YZ) {
+                                            angle = -angle;
+                                        }
+                                        if my_snapping {
+                                            angle = angle.to_degrees().round().to_radians();
+                                        }
+                                        angle
+                                    };
+                                    self.rotate_angle = angle;
+                                }
                             }
-                        }
 
                         let edge_zone = 20.0;
                         let pan_speed = 100.0 * dt;
@@ -421,94 +512,225 @@ impl View2D {
                 // FINISH drag
                 if canvas_interacting && ui.is_mouse_released(MouseButton::Left) {
                     if let (Some(start), Some(end)) = (self.drag_start, self.drag_current) {
-                        match self.drag_mode {
-                            DragMode::MoveSelection => {
-                                let d = end - start;
-                                if d != Vec2::ZERO {
-                                    let delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
-                                    if delta != Vec3::ZERO
-                                        && map.is_some()
-                                        && !selected_brushes.is_empty()
-                                    {
-                                        undo.push(
-                                            "Move selection",
-                                            map,
-                                            selected_brushes,
-                                            selected_entity,
-                                        );
-                                    }
-                                    if let Some(map) = map.as_mut() {
-                                        let generation = &mut map.generation;
-                                        for (entity_idx, brush_idx) in selected_brushes.iter() {
-                                            if let Some(entity) = map.entities.get_mut(*entity_idx) {
-                                                if let Some(brush) = entity.brushes.get_mut(*brush_idx) {
-                                                    brush.translate(generation, delta);
+                            match self.drag_mode {
+                                    DragMode::MoveSelection => {
+                                        let d = end - start;
+                                        if d != Vec2::ZERO {
+                                            let delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
+                                            let can_apply = if edit_faces {
+                                                delta != Vec3::ZERO && !selected_faces.is_empty()
+                                            } else {
+                                                delta != Vec3::ZERO && !selected_brushes.is_empty()
+                                            };
+
+                                            if can_apply {
+                                                let label = if edit_faces { "Move faces" } else { "Move selection" };
+                                                undo.push(label, map, selected_brushes, selected_faces, selected_entity);
+                                            }
+
+                                            if let Some(map) = map.as_mut() {
+                                                if edit_faces {
+                                                    let any = can_apply
+                                                        && translate_selected_faces(map, selected_faces, delta);
+                                                    if any {
+                                                        log_info!(console, "Moved selected faces");
+                                                    }
+                                                } else {
+                                                let generation = &mut map.generation;
+                                                for (entity_idx, brush_idx) in selected_brushes.iter() {
+                                                    if let Some(entity) = map.entities.get_mut(*entity_idx) {
+                                                        if let Some(brush) = entity.brushes.get_mut(*brush_idx) {
+                                                            brush.translate(generation, delta);
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
+
+                                            if can_apply {
+                                                if let Some(aabb) = selection_aabb_active(
+                                                    map,
+                                                    selected_brushes,
+                                                    selected_faces,
+                                                    edit_faces,
+                                                ) {
+                                                    self.last_aabb = Some(aabb.clone());
+                                                    update_last_work_from_aabb(self, &aabb);
+                                                }
+                                            }
+                                        }
+                                        self.move_offset = Vec3::ZERO;
+                                        log_info!(console, "Dragged selection");
                                     }
-                                    if let Some(aabb) = selection_aabb(map, selected_brushes) {
-                                        self.last_aabb = Some(aabb.clone());
-                                        update_last_work_from_aabb(self, &aabb);
-                                    }
-                                }
-                                self.move_offset = Vec3::ZERO;
-                                log_info!(console, "Dragged selection");
-                            }
-                            DragMode::NewBrush => {
-                                if selected_brushes.is_empty() {
-                                    if map.is_some() {
-                                        undo.push(
-                                            "Create brush",
+                                DragMode::NewBrush => {
+                                    let can_create = if edit_faces {
+                                        selected_faces.is_empty()
+                                    } else {
+                                        selected_brushes.is_empty()
+                                    };
+                                    if can_create {
+                                        if map.is_some() {
+                                            undo.push(
+                                                "Create brush",
+                                                map,
+                                                selected_brushes,
+                                                selected_faces,
+                                                selected_entity,
+                                            );
+                                        }
+                                        if let Some(created) = create_brush_from_drag(
+                                            self,
+                                            start,
+                                            end,
+                                            &mut config,
                                             map,
-                                            selected_brushes,
-                                            selected_entity,
-                                        );
-                                    }
-                                    if let Some(created) = create_brush_from_drag(
-                                        self,
-                                        start,
-                                        end,
-                                        &mut config,
-                                        map,
-                                        console
-                                    ) {
-                                        let diff = (start - end).abs();
-                                        if diff.x < 1.0 || diff.y < 1.0 {
-                                            log_warn!(console, "Brush planes smaller than `1` not recommended");
-                                        }
-                                        selected_brushes.push((0, created.0 as usize));
-                                        if let Some(aabb) = selection_aabb(map, selected_brushes) {
-                                            self.last_aabb = Some(aabb.clone());
-                                            update_last_work_from_aabb(self, &aabb);
+                                            console
+                                        ) {
+                                            let diff = (start - end).abs();
+                                            if diff.x < 1.0 || diff.y < 1.0 {
+                                                log_warn!(console, "Brush planes smaller than `1` not recommended");
+                                            }
+                                            selected_faces.clear();
+                                            selected_brushes.push((0, created.0 as usize));
+                                            if let Some(aabb) =
+                                                selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                                            {
+                                                self.last_aabb = Some(aabb.clone());
+                                                update_last_work_from_aabb(self, &aabb);
+                                            }
                                         }
                                     }
                                 }
-                            }
                             DragMode::StretchSelection => {
                                 if let Some(stretch) = self.stretch.take() {
                                     let delta = self.stretch_delta;
                                     if delta != Vec3::ZERO {
-                                        if map.is_some() && !selected_brushes.is_empty() {
-                                            let label = match stretch_mode {
-                                                StretchMode::Scale => "Scale selection",
-                                                StretchMode::Resize => "Resize selection",
+                                        let has_selection = if edit_faces {
+                                            !selected_faces.is_empty()
+                                        } else {
+                                            !selected_brushes.is_empty()
+                                        };
+
+                                        if map.is_some() && has_selection {
+                                            let label = if edit_faces {
+                                                match stretch_mode {
+                                                    StretchMode::Scale => "Scale faces",
+                                                    StretchMode::Resize => "Resize faces",
+                                                }
+                                            } else {
+                                                match stretch_mode {
+                                                    StretchMode::Scale => "Scale selection",
+                                                    StretchMode::Resize => "Resize selection",
+                                                }
                                             };
-                                            undo.push(label, map, selected_brushes, selected_entity);
+                                            undo.push(label, map, selected_brushes, selected_faces, selected_entity);
                                         }
-                                        let mut new_sel_aabb: Option<Aabb> = None;
+
                                         if let Some(map) = map.as_mut() {
-                                            let mut any = false;
-                                            match stretch_mode {
-                                                StretchMode::Scale => {
-                                                    if let Some((xform, _preview)) =
-                                                        editing::stretch_selection_transform(
-                                                            &stretch.selection_aabb,
-                                                            stretch.faces,
-                                                            delta,
-                                                        )
-                                                    {
+                                            let mut new_sel_aabb: Option<Aabb> = None;
+
+                                            if edit_faces {
+                                                let mut any = false;
+                                                match stretch_mode {
+                                                    StretchMode::Scale => {
+                                                        if let Some((xform, _preview)) =
+                                                            editing::stretch_selection_transform(
+                                                                &stretch.selection_aabb,
+                                                                stretch.faces,
+                                                                delta,
+                                                            )
+                                                        {
+                                                            any = apply_affine_scale_to_selected_faces(
+                                                                map,
+                                                                selected_faces,
+                                                                xform,
+                                                            );
+                                                        }
+                                                    }
+                                                    StretchMode::Resize => {
                                                         for (entity_idx, brush_idx) in selected_brushes.iter() {
+                                                            let Some(entity) =
+                                                                map.entities.get_mut(*entity_idx)
+                                                            else {
+                                                                continue;
+                                                            };
+                                                            let Some(brush) =
+                                                                entity.brushes.get_mut(*brush_idx)
+                                                            else {
+                                                                continue;
+                                                            };
+                                                            match &brush.content {
+                                                                kradiant::map::BrushContent::Convex(_) => {
+                                                                    if editing::stretch_convex_brush_faces(
+                                                                        brush,
+                                                                        &mut map.generation,
+                                                                        stretch.faces,
+                                                                        delta,
+                                                                        config.grid_minor_step as i32,
+                                                                    ) {
+                                                                        any = true;
+                                                                    }
+                                                                }
+                                                                kradiant::map::BrushContent::Patch(_patch) => {
+                                                                    if let Some((xform, _)) =
+                                                                        editing::stretch_selection_transform(
+                                                                            &stretch.selection_aabb,
+                                                                            stretch.faces,
+                                                                            delta,
+                                                                        )
+                                                                    {
+                                                                        if editing::apply_affine_scale_to_brush(
+                                                                            brush,
+                                                                            &mut map.generation,
+                                                                            xform,
+                                                                        ) {
+                                                                            any = true;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if any {
+                                                    new_sel_aabb =
+                                                        selection_aabb_faces_from_map(map, selected_faces);
+                                                    log_info!(console, "Stretched selected faces");
+                                                }
+                                            } else {
+                                                let mut any = false;
+                                                match stretch_mode {
+                                                    StretchMode::Scale => {
+                                                        if let Some((xform, _preview)) =
+                                                            editing::stretch_selection_transform(
+                                                                &stretch.selection_aabb,
+                                                                stretch.faces,
+                                                                delta,
+                                                            )
+                                                        {
+                                                            for (entity_idx, brush_idx) in selected_brushes.iter() {
+                                                                let Some(entity) = map.entities.get_mut(*entity_idx)
+                                                                    else {
+                                                                    continue;
+                                                                };
+                                                                let Some(brush) =
+                                                                    entity.brushes.get_mut(*brush_idx)
+                                                                else {
+                                                                    continue;
+                                                                };
+                                                                if editing::apply_affine_scale_to_brush(
+                                                                    brush,
+                                                                    &mut map.generation,
+                                                                    xform,
+                                                                ) {
+                                                                    any = true;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    StretchMode::Resize => {
+                                                        for (entity_idx, brush_idx) in &mut *selected_brushes {
                                                             let Some(entity) = map.entities.get_mut(*entity_idx)
                                                                 else {
                                                                 continue;
@@ -517,59 +739,45 @@ impl View2D {
                                                                 else {
                                                                 continue;
                                                             };
-                                                            if editing::apply_affine_scale_to_brush(
-                                                                brush,
-                                                                &mut map.generation,
-                                                                xform,
-                                                            ) { any = true; }
-                                                        }
-                                                    }
-                                                }
-                                                StretchMode::Resize => {
-                                                    for (entity_idx, brush_idx) in &mut *selected_brushes {
-                                                        let Some(entity) = map.entities.get_mut(*entity_idx)
-                                                            else {
-                                                            continue;
-                                                        };
-                                                        let Some(brush) = entity.brushes.get_mut(*brush_idx)
-                                                            else {
-                                                            continue;
-                                                        };
-                                                        match &brush.content {
-                                                            kradiant::map::BrushContent::Convex(_) => {
-                                                                if editing::stretch_convex_brush_faces(
-                                                                    brush,
-                                                                    &mut map.generation,
-                                                                    stretch.faces,
-                                                                    delta,
-                                                                    config.grid_minor_step as i32,
-                                                                ) { any = true; }
-                                                            }
-                                                            kradiant::map::BrushContent::Patch(_patch) => {
-                                                                if let Some((xform, _)) =
-                                                                    editing::stretch_selection_transform(
-                                                                        &stretch.selection_aabb,
-                                                                        stretch.faces,
-                                                                        delta,
-                                                                    )
-                                                                {
-                                                                    if editing::apply_affine_scale_to_brush(
+                                                            match &brush.content {
+                                                                kradiant::map::BrushContent::Convex(_) => {
+                                                                    if editing::stretch_convex_brush_faces(
                                                                         brush,
                                                                         &mut map.generation,
-                                                                        xform,
-                                                                    ) { any = true; }
+                                                                        stretch.faces,
+                                                                        delta,
+                                                                        config.grid_minor_step as i32,
+                                                                    ) {
+                                                                        any = true;
+                                                                    }
+                                                                }
+                                                                kradiant::map::BrushContent::Patch(_patch) => {
+                                                                    if let Some((xform, _)) =
+                                                                        editing::stretch_selection_transform(
+                                                                            &stretch.selection_aabb,
+                                                                            stretch.faces,
+                                                                            delta,
+                                                                        )
+                                                                    {
+                                                                        if editing::apply_affine_scale_to_brush(
+                                                                            brush,
+                                                                            &mut map.generation,
+                                                                            xform,
+                                                                        ) {
+                                                                            any = true;
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
                                                         }
                                                     }
                                                 }
-                                            }
-                                            if any {
-                                                new_sel_aabb = selection_aabb_from_map(
-                                                    map,
-                                                    &selected_brushes,
-                                                );
-                                                log_info!(console, "Stretched selection");
+
+                                                if any {
+                                                    new_sel_aabb =
+                                                        selection_aabb_from_map(map, &selected_brushes);
+                                                    log_info!(console, "Stretched selection");
+                                                }
                                             }
 
                                             if let Some(aabb) = new_sel_aabb {
@@ -590,43 +798,52 @@ impl View2D {
                                     };
 
                                     if angle.abs() > 1.0e-6 {
-                                        if map.is_some() && !selected_brushes.is_empty() {
-                                            undo.push(
-                                                "Rotate selection",
-                                                map,
-                                                selected_brushes,
-                                                selected_entity,
-                                            );
-                                        }
-                                        let axis = match self.ortho_axis {
-                                            Ortho::XY => Vec3::Z,
-                                            Ortho::XZ => Vec3::Y,
-                                            Ortho::YZ => Vec3::X,
+                                        let has_selection = if edit_faces {
+                                            !selected_faces.is_empty()
+                                        } else {
+                                            !selected_brushes.is_empty()
                                         };
-                                        if let Some((xform, _preview)) =
-                                            editing::rotate_selection_transform(
-                                                &rot.selection_aabb,
-                                                axis,
-                                                angle,
-                                            )
-                                        {
-                                            let mut new_sel_aabb: Option<Aabb> = None;
-                                            if let Some(map) = map.as_mut() {
+                                        if map.is_some() && has_selection {
+                                            let label = if edit_faces { "Rotate faces" } else { "Rotate selection" };
+                                            undo.push(label, map, selected_brushes, selected_faces, selected_entity);
+                                        }
+                                        let axis = rot.axis;
+                                        let mut new_sel_aabb: Option<Aabb> = None;
+                                        if let Some(map) = map.as_mut() {
+                                            if edit_faces {
+                                                let any = apply_affine_rotate_to_selected_faces(
+                                                    map,
+                                                    selected_faces.as_mut_slice(),
+                                                    axis,
+                                                    angle,
+                                                );
+                                                if any {
+                                                    new_sel_aabb =
+                                                        selection_aabb_faces_from_map(map, selected_faces);
+                                                    log_info!(console, "Rotated selected faces");
+                                                }
+                                            } else if let Some((xform, _preview)) =
+                                                editing::rotate_selection_transform(
+                                                    &rot.selection_aabb,
+                                                    axis,
+                                                    angle,
+                                                )
+                                            {
                                                 let mut any = false;
                                                 for (entity_idx, brush_idx) in selected_brushes.iter() {
-                                                    let Some(entity) = map.entities.get_mut(*entity_idx)
-                                                        else {
+                                                    let Some(entity) = map.entities.get_mut(*entity_idx) else {
                                                         continue;
                                                     };
-                                                    let Some(brush) = entity.brushes.get_mut(*brush_idx)
-                                                        else {
+                                                    let Some(brush) = entity.brushes.get_mut(*brush_idx) else {
                                                         continue;
                                                     };
                                                     if editing::apply_affine_rotate_to_brush(
                                                         brush,
                                                         &mut map.generation,
                                                         xform,
-                                                    ) { any = true; }
+                                                    ) {
+                                                        any = true;
+                                                    }
                                                 }
 
                                                 if any {
@@ -634,10 +851,10 @@ impl View2D {
                                                     log_info!(console, "Rotated selection");
                                                 }
                                             }
-                                            if let Some(aabb) = new_sel_aabb {
-                                                self.last_aabb = Some(aabb.clone());
-                                                update_last_work_from_aabb(self, &aabb);
-                                            }
+                                        }
+                                        if let Some(aabb) = new_sel_aabb {
+                                            self.last_aabb = Some(aabb.clone());
+                                            update_last_work_from_aabb(self, &aabb);
                                         }
                                     }
                                 }
@@ -653,12 +870,64 @@ impl View2D {
                     self.rotate_angle = 0.0;
                 }
 
+                if ui.is_window_hovered()
+                    && edit_faces
+                    && map.is_some()
+                    && !selected_faces.is_empty()
+                    && self.drag_start.is_none()
+                {
+                    let step = (config.grid_minor_step as f32).max(1.0);
+                    let depth_axis = match self.ortho_axis {
+                        Ortho::XY => Vec3::Z,
+                        Ortho::XZ => Vec3::Y,
+                        Ortho::YZ => Vec3::X,
+                    };
+                    let mut delta = Vec3::ZERO;
+                    if ui.is_key_pressed(dear_imgui_rs::Key::PageUp) {
+                        delta += depth_axis * step;
+                    }
+                    if ui.is_key_pressed(dear_imgui_rs::Key::PageDown) {
+                        delta -= depth_axis * step;
+                    }
+                    if axis_lock.x {
+                        delta.x = 0.0;
+                    }
+                    if axis_lock.y {
+                        delta.y = 0.0;
+                    }
+                    if axis_lock.z {
+                        delta.z = 0.0;
+                    }
+
+                    if delta != Vec3::ZERO {
+                        undo.push("Move faces", map, selected_brushes, selected_faces, selected_entity);
+                        if let Some(map) = map.as_mut() {
+                            if translate_selected_faces(map, selected_faces, delta) {
+                                log_info!(console, "Moved selected faces");
+                                if let Some(aabb) =
+                                    selection_aabb_faces_from_map(map, selected_faces)
+                                {
+                                    self.last_aabb = Some(aabb.clone());
+                                    update_last_work_from_aabb(self, &aabb);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
-                    if let Some(aabb) = selection_aabb(map, selected_brushes) {
+                    if let Some(aabb) =
+                        selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                    {
                         self.last_aabb = Some(aabb.clone());
                         update_last_work_from_aabb(self, &aabb);
                     }
-                    selected_brushes.clear();
+                    if edit_faces {
+                        selected_faces.clear();
+                        sync_selected_brushes_from_faces(selected_faces, selected_brushes);
+                    } else {
+                        selected_brushes.clear();
+                    }
                     self.stretch = None;
                     self.stretch_delta = Vec3::ZERO;
                     self.rotate = None;
@@ -667,55 +936,63 @@ impl View2D {
                 }
 
                 if ui.is_key_pressed(dear_imgui_rs::Key::Backspace) {
-                    if let Some(aabb) = selection_aabb(map, selected_brushes) {
-                        self.last_aabb = Some(aabb.clone());
-                        update_last_work_from_aabb(self, &aabb);
-                    }
-
-                    if map.is_some() && !selected_brushes.is_empty() {
-                        undo.push(
-                            "Delete selection",
-                            map,
-                            selected_brushes,
-                            selected_entity,
-                        );
-                    }
-                    if let Some(map) = map.as_mut() {
-                        let mut any = false;
-                        use std::collections::BTreeMap;
-                        let mut by_entity: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-                        for (entity_idx, brush_idx) in &*selected_brushes {
-                            by_entity.entry(*entity_idx).or_default().push(*brush_idx);
+                    if edit_faces {
+                        selected_faces.clear();
+                        sync_selected_brushes_from_faces(selected_faces, selected_brushes);
+                    } else {
+                        if let Some(aabb) =
+                            selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                        {
+                            self.last_aabb = Some(aabb.clone());
+                            update_last_work_from_aabb(self, &aabb);
                         }
 
-                        for brush_indices in by_entity.values_mut() {
-                            brush_indices.sort_unstable();
-                            brush_indices.dedup();
-                            brush_indices.sort_unstable_by(|a, b| b.cmp(a));
+                        if map.is_some() && !selected_brushes.is_empty() {
+                            undo.push(
+                                "Delete selection",
+                                map,
+                                selected_brushes,
+                                selected_faces,
+                                selected_entity,
+                            );
                         }
+                        if let Some(map) = map.as_mut() {
+                            let mut any = false;
+                            use std::collections::BTreeMap;
+                            let mut by_entity: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                            for (entity_idx, brush_idx) in &*selected_brushes {
+                                by_entity.entry(*entity_idx).or_default().push(*brush_idx);
+                            }
 
-                        for (entity_idx, brush_indices) in by_entity {
-                            let Some(entity) = map.entities.get_mut(entity_idx) else {
-                                continue;
-                            };
-                            for brush_idx in brush_indices {
-                                if brush_idx < entity.brushes.len() {
-                                    entity.brushes.swap_remove(brush_idx);
-                                    if !any {
-                                        any = true; // we actually deleted something
+                            for brush_indices in by_entity.values_mut() {
+                                brush_indices.sort_unstable();
+                                brush_indices.dedup();
+                                brush_indices.sort_unstable_by(|a, b| b.cmp(a));
+                            }
+
+                            for (entity_idx, brush_indices) in by_entity {
+                                let Some(entity) = map.entities.get_mut(entity_idx) else {
+                                    continue;
+                                };
+                                for brush_idx in brush_indices {
+                                    if brush_idx < entity.brushes.len() {
+                                        entity.brushes.swap_remove(brush_idx);
+                                        if !any {
+                                            any = true; // we actually deleted something
+                                        }
                                     }
                                 }
                             }
+
+                            if any {
+                                map.generation = map.generation.wrapping_add(1);
+                                log_info!(console, "Deleted selected brushes");
+                            }
                         }
 
-                        if any {
-                            map.generation = map.generation.wrapping_add(1);
-                            log_info!(console, "Deleted selected brushes");
-                        }
+                        selected_brushes.clear();
+                        *selected_entity = None;
                     }
-
-                    selected_brushes.clear();
-                    *selected_entity = None;
                 }
 
                 // Render canvas
@@ -795,13 +1072,15 @@ impl View2D {
                         };
 
                         match self.drag_mode {
-                            DragMode::MoveSelection => {
-                                let (a, b) = if let Some(sel) = selection_aabb(map, selected_brushes) {
-                                    let (min2, max2) = crate::util::project_aabb_to_2d(&sel, self.ortho_axis);
-                                    let center = [
-                                        (min2.x as f32 + max2.x as f32) * 0.5,
-                                        (min2.y as f32 + max2.y as f32) * 0.5,
-                                    ];
+                                DragMode::MoveSelection => {
+                                    let (a, b) = if let Some(sel) =
+                                        selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                                    {
+                                        let (min2, max2) = crate::util::project_aabb_to_2d(&sel, self.ortho_axis);
+                                        let center = [
+                                            (min2.x as f32 + max2.x as f32) * 0.5,
+                                            (min2.y as f32 + max2.y as f32) * 0.5,
+                                        ];
                                     let off2 = project_to_2d(self.move_offset, self.ortho_axis);
                                     let a = to_screen_f(center);
                                     let b = to_screen_f([center[0] + off2[0], center[1] + off2[1]]);
@@ -915,7 +1194,9 @@ impl View2D {
                         }
                     }
 
-                    if let Some(mut selection_aabb) = selection_aabb(map, selected_brushes) {
+                        if let Some(mut selection_aabb) =
+                            selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                        {
                         if self.drag_mode == DragMode::StretchSelection {
                             if let Some(stretch) = self.stretch.as_ref() {
                                 selection_aabb = editing::preview_stretched_aabb(
@@ -924,17 +1205,13 @@ impl View2D {
                                     self.stretch_delta,
                                 );
                             }
-                        } else if self.drag_mode == DragMode::RotateSelection {
-                            if let Some(rot) = self.rotate.as_ref() {
-                                let axis = match self.ortho_axis {
-                                    Ortho::XY => Vec3::Z,
-                                    Ortho::XZ => Vec3::Y,
-                                    Ortho::YZ => Vec3::X,
-                                };
-                                if let Some((_xform, preview)) = editing::rotate_selection_transform(
-                                    &rot.selection_aabb,
-                                    axis,
-                                    self.rotate_angle,
+                            } else if self.drag_mode == DragMode::RotateSelection {
+                                if let Some(rot) = self.rotate.as_ref() {
+                                    let axis = rot.axis;
+                                    if let Some((_xform, preview)) = editing::rotate_selection_transform(
+                                        &rot.selection_aabb,
+                                        axis,
+                                        self.rotate_angle,
                                 ) {
                                     selection_aabb = preview;
                                 }
@@ -1004,6 +1281,722 @@ impl View2D {
                 });
             });
     }
+}
+
+fn sync_selected_brushes_from_faces(
+    selected_faces: &[FaceSelection],
+    selected_brushes: &mut Vec<(usize, usize)>,
+) {
+    use std::collections::BTreeSet;
+
+    let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for sel in selected_faces {
+        set.insert((sel.entity_idx, sel.brush_idx));
+    }
+    selected_brushes.clear();
+    selected_brushes.extend(set.into_iter());
+}
+
+fn selection_aabb_faces_from_map(
+    map: &mut kradiant::map::Map,
+    selected_faces: &[FaceSelection],
+) -> Option<Aabb> {
+    if selected_faces.is_empty() {
+        return None;
+    }
+
+    use std::collections::BTreeMap;
+    let mut by_brush: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for sel in selected_faces {
+        by_brush
+            .entry((sel.entity_idx, sel.brush_idx))
+            .or_default()
+            .push(sel.face_idx);
+    }
+
+    let mut out = Aabb {
+        min: Vec3::new(f32::MAX, f32::MAX, f32::MAX),
+        max: Vec3::new(f32::MIN, f32::MIN, f32::MIN),
+    };
+
+    let mut any = false;
+    for ((entity_idx, brush_idx), mut face_indices) in by_brush {
+        face_indices.sort_unstable();
+        face_indices.dedup();
+
+        let Some(entity) = map.entities.get_mut(entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+            continue;
+        };
+        let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
+            continue;
+        };
+
+        for face_idx in face_indices {
+            let Some((verts, _indices)) = polys.get(face_idx) else {
+                continue;
+            };
+            for v in verts {
+                out.min = out.min.min(*v);
+                out.max = out.max.max(*v);
+                any = true;
+            }
+        }
+    }
+
+    any.then_some(out)
+}
+
+fn selection_aabb_faces(
+    map: &mut Option<kradiant::map::Map>,
+    selected_faces: &[FaceSelection],
+) -> Option<Aabb> {
+    let map = map.as_mut()?;
+    selection_aabb_faces_from_map(map, selected_faces)
+}
+
+fn selection_aabb_active(
+    map: &mut Option<kradiant::map::Map>,
+    selected_brushes: &[(usize, usize)],
+    selected_faces: &[FaceSelection],
+    edit_faces: bool,
+) -> Option<Aabb> {
+    if edit_faces {
+        selection_aabb_faces(map, selected_faces)
+    } else {
+        selection_aabb(&*map, selected_brushes)
+    }
+}
+
+fn click_in_aabb_2d(aabb: &Aabb, pt: Vec2, ortho: Ortho) -> bool {
+    let (min2, max2) = crate::util::project_aabb_to_2d(aabb, ortho);
+    pt.x >= min2.x && pt.x <= max2.x && pt.y >= min2.y && pt.y <= max2.y
+}
+
+fn face_plane_normal(plane_points: [Vec3; 3]) -> Option<Vec3> {
+    let n = (plane_points[1] - plane_points[0]).cross(plane_points[2] - plane_points[0]);
+    let len2 = n.length_squared();
+    if len2 <= 1.0e-10 || !len2.is_finite() {
+        return None;
+    }
+    Some(n / len2.sqrt())
+}
+
+fn apply_face_weighted_point_transform_to_convex_brush<F>(
+    brush: &mut kradiant::map::Brush,
+    face_idx: usize,
+    transform_point: F,
+) -> bool
+where
+    F: Fn(Vec3) -> Vec3,
+{
+    let (face_plane, face_n) = match &brush.content {
+        kradiant::map::BrushContent::Convex(faces) => {
+            let Some(face) = faces.get(face_idx) else {
+                return false;
+            };
+            let Some(n) = face_plane_normal(face.plane_points) else {
+                return false;
+            };
+            (face.plane_points, n)
+        }
+        kradiant::map::BrushContent::Patch(_) => return false,
+    };
+
+    let mut tmp = brush.clone();
+
+    let Some((_aabb, polys)) = tmp.get_polygons_and_aabb() else {
+        return false;
+    };
+    let p0 = face_plane[0];
+
+    let mut min_d = f32::INFINITY;
+    let mut max_d = f32::NEG_INFINITY;
+    for (verts, _) in polys {
+        for v in verts {
+            let d = v.dot(face_n);
+            min_d = min_d.min(d);
+            max_d = max_d.max(d);
+        }
+    }
+    let span = max_d - min_d;
+    if !span.is_finite() || span.abs() < 1.0e-6 {
+        return false;
+    }
+
+    let face_d = p0.dot(face_n);
+    let selected_is_min = (face_d - min_d).abs() <= (face_d - max_d).abs();
+
+    let old_planes: Vec<[Vec3; 3]> = match &tmp.content {
+        kradiant::map::BrushContent::Convex(faces) => {
+            faces.iter().map(|f| f.plane_points).collect()
+        }
+        kradiant::map::BrushContent::Patch(_) => return false,
+    };
+
+    let xform = |pt: Vec3| -> Vec3 {
+        let alpha = ((pt.dot(face_n) - min_d) / span).clamp(0.0, 1.0);
+        let w = if selected_is_min { 1.0 - alpha } else { alpha };
+        let target = transform_point(pt);
+        pt + (target - pt) * w
+    };
+
+    let mut dummy_gen = 0u64;
+    for (i, p) in old_planes.into_iter().enumerate() {
+        let new_plane = [xform(p[0]), xform(p[1]), xform(p[2])];
+        tmp.update_brush_plane(&mut dummy_gen, i, new_plane);
+    }
+
+    if tmp.get_polygons_and_aabb().is_some() {
+        *brush = tmp;
+        true
+    } else {
+        false
+    }
+}
+
+fn apply_face_weighted_twist_rotate_to_convex_brush(
+    brush: &mut kradiant::map::Brush,
+    face_idx: usize,
+    pivot: Vec3,
+    axis: Vec3,
+    angle_rad: f32,
+) -> bool {
+    if angle_rad.abs() <= 1.0e-8 {
+        return false;
+    }
+
+    let axis_len2 = axis.length_squared();
+    if axis_len2 <= 1.0e-10 || !axis_len2.is_finite() {
+        return false;
+    }
+    let axis_n = axis / axis_len2.sqrt();
+
+    let (face_plane, face_n) = match &brush.content {
+        kradiant::map::BrushContent::Convex(faces) => {
+            let Some(face) = faces.get(face_idx) else {
+                return false;
+            };
+            let Some(n) = face_plane_normal(face.plane_points) else {
+                return false;
+            };
+            (face.plane_points, n)
+        }
+        kradiant::map::BrushContent::Patch(_) => return false,
+    };
+
+    let mut tmp = brush.clone();
+    let Some((_aabb, polys)) = tmp.get_polygons_and_aabb() else {
+        return false;
+    };
+
+    let p0 = face_plane[0];
+
+    let mut min_d = f32::INFINITY;
+    let mut max_d = f32::NEG_INFINITY;
+    for (verts, _) in polys {
+        for v in verts {
+            let d = v.dot(face_n);
+            min_d = min_d.min(d);
+            max_d = max_d.max(d);
+        }
+    }
+    let span = max_d - min_d;
+    if !span.is_finite() || span.abs() < 1.0e-6 {
+        return false;
+    }
+
+    let face_d = p0.dot(face_n);
+    let selected_is_min = (face_d - min_d).abs() <= (face_d - max_d).abs();
+
+    let old_planes: Vec<[Vec3; 3]> = match &tmp.content {
+        kradiant::map::BrushContent::Convex(faces) => {
+            faces.iter().map(|f| f.plane_points).collect()
+        }
+        kradiant::map::BrushContent::Patch(_) => return false,
+    };
+
+    let xform = |pt: Vec3| -> Vec3 {
+        let alpha = ((pt.dot(face_n) - min_d) / span).clamp(0.0, 1.0);
+        let w = if selected_is_min { 1.0 - alpha } else { alpha };
+        if w <= 0.0 {
+            return pt;
+        }
+        let phi = angle_rad * w;
+        let q = Quat::from_axis_angle(axis_n, phi);
+        pivot + q * (pt - pivot)
+    };
+
+    let mut dummy_gen = 0u64;
+    for (i, p) in old_planes.into_iter().enumerate() {
+        let new_plane = [xform(p[0]), xform(p[1]), xform(p[2])];
+        tmp.update_brush_plane(&mut dummy_gen, i, new_plane);
+    }
+
+    if tmp.get_polygons_and_aabb().is_some() {
+        *brush = tmp;
+        true
+    } else {
+        false
+    }
+}
+
+fn centroid(verts: &[Vec3]) -> Option<Vec3> {
+    if verts.is_empty() {
+        return None;
+    }
+    let mut sum = Vec3::ZERO;
+    for v in verts {
+        sum += *v;
+    }
+    Some(sum / verts.len() as f32)
+}
+
+fn outward_plane_points(mut pts: [Vec3; 3], center: Vec3) -> [Vec3; 3] {
+    let n = (pts[1] - pts[0]).cross(pts[2] - pts[0]);
+    if n.dot(center - pts[0]) > 0.0 {
+        pts.swap(1, 2);
+    }
+    pts
+}
+
+fn uv_basis_from_axis(axis_n: Vec3) -> (Vec3, Vec3) {
+    let ref_axis = if axis_n.x.abs() < 0.9 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
+    let u = axis_n.cross(ref_axis).normalize_or_zero();
+    let v = axis_n.cross(u).normalize_or_zero();
+    (u, v)
+}
+
+fn twist_rotate_face_antiprism(
+    brush: &mut kradiant::map::Brush,
+    face_idx: usize,
+    axis: Vec3,
+    angle_rad: f32,
+) -> Option<usize> {
+    if angle_rad.abs() <= 1.0e-8 {
+        return Some(face_idx);
+    }
+
+    let axis_len2 = axis.length_squared();
+    if axis_len2 <= 1.0e-10 || !axis_len2.is_finite() {
+        return None;
+    }
+    let axis_n = axis / axis_len2.sqrt();
+
+    let (orig_faces, selected_face, selected_face_normal) = match &brush.content {
+        kradiant::map::BrushContent::Convex(faces) => {
+            let selected_face = faces.get(face_idx)?.clone();
+            let n = face_plane_normal(selected_face.plane_points)?;
+            (faces.clone(), selected_face, n)
+        }
+        kradiant::map::BrushContent::Patch(_) => return None,
+    };
+
+    // Only handle the "twist" case: rotating a face around (roughly) its own normal.
+    if selected_face_normal.dot(axis_n).abs() < 0.95 {
+        return None;
+    }
+
+    let (top_verts, bottom_verts, bottom_idx) = {
+        let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
+            return None;
+        };
+        let (top_verts, _) = polys.get(face_idx)?;
+        if top_verts.len() < 3 {
+            return None;
+        }
+        let top_verts = top_verts.clone();
+        let top_c = centroid(&top_verts)?;
+
+        let top_t = top_c.dot(axis_n);
+        let mut best: Option<(usize, f32, Vec<Vec3>)> = None;
+        for (i, (verts, _)) in polys.iter().enumerate() {
+            if i == face_idx || verts.len() < 3 {
+                continue;
+            }
+            let c = match centroid(verts) {
+                Some(v) => v,
+                None => continue,
+            };
+            let sep = (c.dot(axis_n) - top_t).abs();
+            if sep < 1.0e-4 {
+                continue;
+            }
+            let score = sep;
+            match &best {
+                None => best = Some((i, score, verts.clone())),
+                Some((_, best_score, _)) if score > *best_score => {
+                    best = Some((i, score, verts.clone()))
+                }
+                _ => {}
+            }
+        }
+        let (bottom_idx, _score, bottom_verts) = best?;
+        (top_verts, bottom_verts, bottom_idx)
+    };
+
+    if top_verts.len() != bottom_verts.len() || top_verts.len() < 3 {
+        return None;
+    }
+    let n = top_verts.len();
+
+    let top_c = centroid(&top_verts)?;
+    let bottom_c = centroid(&bottom_verts)?;
+    let pivot = (top_c + bottom_c) * 0.5;
+
+    let (u, v) = uv_basis_from_axis(axis_n);
+    if u == Vec3::ZERO || v == Vec3::ZERO {
+        return None;
+    }
+    let angle_uv = |p: Vec3| -> f32 {
+        let d = p - pivot;
+        d.dot(v).atan2(d.dot(u))
+    };
+
+    let mut top_sorted: Vec<Vec3> = top_verts.clone();
+    top_sorted.sort_by(|a, b| {
+        angle_uv(*a)
+            .partial_cmp(&angle_uv(*b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut bottom_sorted: Vec<Vec3> = bottom_verts.clone();
+    bottom_sorted.sort_by(|a, b| {
+        angle_uv(*a)
+            .partial_cmp(&angle_uv(*b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let q = Quat::from_axis_angle(axis_n, angle_rad);
+
+    // Rotate top vertices around pivot.
+    let mut top_rot: Vec<Vec3> = top_sorted
+        .iter()
+        .map(|p| pivot + q * (*p - pivot))
+        .collect();
+
+    // Keep the rotated top face within the original 2D extents in (u,v) by scaling the
+    // perpendicular components (this matches the “keep 128x128 size” expectation in 2D view).
+    let extents_uv = |verts: &[Vec3]| -> Option<(f32, f32, f32, f32)> {
+        let mut min_u = f32::INFINITY;
+        let mut max_u = f32::NEG_INFINITY;
+        let mut min_v = f32::INFINITY;
+        let mut max_v = f32::NEG_INFINITY;
+        for p in verts {
+            let d = *p - pivot;
+            let cu = d.dot(u);
+            let cv = d.dot(v);
+            if !cu.is_finite() || !cv.is_finite() {
+                return None;
+            }
+            min_u = min_u.min(cu);
+            max_u = max_u.max(cu);
+            min_v = min_v.min(cv);
+            max_v = max_v.max(cv);
+        }
+        Some((min_u, max_u, min_v, max_v))
+    };
+    let (old_min_u, old_max_u, old_min_v, old_max_v) = extents_uv(&top_sorted)?;
+    let (new_min_u, new_max_u, new_min_v, new_max_v) = extents_uv(&top_rot)?;
+    let old_du = (old_max_u - old_min_u).abs().max(1.0e-6);
+    let old_dv = (old_max_v - old_min_v).abs().max(1.0e-6);
+    let new_du = (new_max_u - new_min_u).abs().max(1.0e-6);
+    let new_dv = (new_max_v - new_min_v).abs().max(1.0e-6);
+    let su = old_du / new_du;
+    let sv = old_dv / new_dv;
+    top_rot = top_rot
+        .into_iter()
+        .map(|p| {
+            let d = p - pivot;
+            let du = d.dot(u);
+            let dv = d.dot(v);
+            let da = d.dot(axis_n);
+            pivot + u * (du * su) + v * (dv * sv) + axis_n * da
+        })
+        .collect();
+
+    // Align bottom so top[0] sits between bottom[0] and bottom[1] in angle-space.
+    let top0 = angle_uv(top_rot[0]);
+    let mut shift = 0usize;
+    for i in 0..n {
+        let a0 = angle_uv(bottom_sorted[i]);
+        let a1 = angle_uv(bottom_sorted[(i + 1) % n]);
+        let in_range = if a0 <= a1 {
+            top0 >= a0 && top0 < a1
+        } else {
+            // wrapped interval
+            top0 >= a0 || top0 < a1
+        };
+        if in_range {
+            shift = i;
+            break;
+        }
+    }
+    let mut bottom_aligned = Vec::with_capacity(n);
+    for k in 0..n {
+        bottom_aligned.push(bottom_sorted[(shift + k) % n]);
+    }
+
+    // Build new face list: top + bottom + 2n triangle sides.
+    let mut all_points = Vec::with_capacity(n * 2);
+    all_points.extend_from_slice(&top_rot);
+    all_points.extend_from_slice(&bottom_aligned);
+    let center = centroid(&all_points)?;
+
+    let bottom_face = orig_faces.get(bottom_idx)?.clone();
+    let mut side_candidates: Vec<(Vec3, kradiant::map::Face)> = Vec::new();
+    for (i, f) in orig_faces.iter().enumerate() {
+        if i == face_idx || i == bottom_idx {
+            continue;
+        }
+        if let Some(n) = face_plane_normal(f.plane_points) {
+            side_candidates.push((n, f.clone()));
+        }
+    }
+
+    let mut new_faces: Vec<kradiant::map::Face> = Vec::with_capacity(2 + 2 * n);
+
+    // Top face (keep selected face material).
+    let top_plane = outward_plane_points([top_rot[0], top_rot[1], top_rot[2]], center);
+    new_faces.push(kradiant::map::Face {
+        plane_points: top_plane,
+        texture: selected_face.texture.clone(),
+        params: selected_face.params,
+    });
+
+    // Bottom face.
+    let bottom_plane = outward_plane_points(
+        [bottom_aligned[0], bottom_aligned[1], bottom_aligned[2]],
+        center,
+    );
+    new_faces.push(kradiant::map::Face {
+        plane_points: bottom_plane,
+        texture: bottom_face.texture.clone(),
+        params: bottom_face.params,
+    });
+
+    // Side triangles.
+    let pick_side_mat = |tri: [Vec3; 3]| -> (String, kradiant::map::TextureParams) {
+        let n = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
+        let len2 = n.length_squared();
+        if len2 <= 1.0e-10 || !len2.is_finite() || side_candidates.is_empty() {
+            return (selected_face.texture.clone(), selected_face.params);
+        }
+        let n = n / len2.sqrt();
+        let mut best = 0.0f32;
+        let mut best_face: Option<&kradiant::map::Face> = None;
+        for (cn, f) in &side_candidates {
+            let d = cn.dot(n).abs();
+            if d > best {
+                best = d;
+                best_face = Some(f);
+            }
+        }
+        if let Some(f) = best_face {
+            (f.texture.clone(), f.params)
+        } else {
+            (selected_face.texture.clone(), selected_face.params)
+        }
+    };
+
+    for i in 0..n {
+        let a = top_rot[i];
+        let b = bottom_aligned[i];
+        let c = bottom_aligned[(i + 1) % n];
+        let tri = outward_plane_points([a, b, c], center);
+        let (tex, params) = pick_side_mat(tri);
+        new_faces.push(kradiant::map::Face {
+            plane_points: tri,
+            texture: tex,
+            params,
+        });
+
+        let a = bottom_aligned[i];
+        let b = top_rot[i];
+        let c = top_rot[(i + n - 1) % n];
+        let tri = outward_plane_points([a, b, c], center);
+        let (tex, params) = pick_side_mat(tri);
+        new_faces.push(kradiant::map::Face {
+            plane_points: tri,
+            texture: tex,
+            params,
+        });
+    }
+
+    let mut tmp =
+        kradiant::map::Brush::new(brush.id, kradiant::map::BrushContent::Convex(new_faces));
+    if tmp.get_polygons_and_aabb().is_some() {
+        *brush = tmp;
+        Some(0) // top face is always index 0 in the rebuilt brush
+    } else {
+        None
+    }
+}
+
+fn translate_selected_faces(
+    map: &mut kradiant::map::Map,
+    selected_faces: &[FaceSelection],
+    delta: Vec3,
+) -> bool {
+    if selected_faces.is_empty() || delta == Vec3::ZERO {
+        return false;
+    }
+
+    use std::collections::BTreeMap;
+    let mut by_brush: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for sel in selected_faces {
+        by_brush
+            .entry((sel.entity_idx, sel.brush_idx))
+            .or_default()
+            .push(sel.face_idx);
+    }
+
+    let mut any = false;
+
+    for ((entity_idx, brush_idx), mut face_indices) in by_brush {
+        face_indices.sort_unstable();
+        face_indices.dedup();
+
+        let Some(entity) = map.entities.get_mut(entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+            continue;
+        };
+
+        let mut changed = false;
+        for face_idx in face_indices {
+            if apply_face_weighted_point_transform_to_convex_brush(brush, face_idx, |p| p + delta) {
+                changed = true;
+            }
+        }
+
+        if changed {
+            map.generation = map.generation.wrapping_add(1);
+            any = true;
+        }
+    }
+
+    any
+}
+
+fn apply_affine_scale_to_selected_faces(
+    map: &mut kradiant::map::Map,
+    selected_faces: &[FaceSelection],
+    xform: editing::AffineScale,
+) -> bool {
+    if selected_faces.is_empty() || xform.scale == Vec3::ONE {
+        return false;
+    }
+
+    use std::collections::BTreeMap;
+    let mut by_brush: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for sel in selected_faces {
+        by_brush
+            .entry((sel.entity_idx, sel.brush_idx))
+            .or_default()
+            .push(sel.face_idx);
+    }
+
+    let mut any = false;
+    for ((entity_idx, brush_idx), mut face_indices) in by_brush {
+        face_indices.sort_unstable();
+        face_indices.dedup();
+
+        let Some(entity) = map.entities.get_mut(entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+            continue;
+        };
+
+        let mut changed = false;
+        for face_idx in face_indices {
+            if apply_face_weighted_point_transform_to_convex_brush(brush, face_idx, |p| {
+                xform.apply_point(p)
+            }) {
+                changed = true;
+            }
+        }
+
+        if changed {
+            map.generation = map.generation.wrapping_add(1);
+            any = true;
+        }
+    }
+
+    any
+}
+
+fn apply_affine_rotate_to_selected_faces(
+    map: &mut kradiant::map::Map,
+    selected_faces: &mut [FaceSelection],
+    axis: Vec3,
+    angle_rad: f32,
+) -> bool {
+    if selected_faces.is_empty() {
+        return false;
+    }
+
+    use std::collections::BTreeMap;
+    let mut by_brush: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for sel in &*selected_faces {
+        by_brush
+            .entry((sel.entity_idx, sel.brush_idx))
+            .or_default()
+            .push(sel.face_idx);
+    }
+
+    let mut any = false;
+    for ((entity_idx, brush_idx), mut face_indices) in by_brush {
+        face_indices.sort_unstable();
+        face_indices.dedup();
+
+        let Some(entity) = map.entities.get_mut(entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+            continue;
+        };
+
+        let mut changed = false;
+        for face_idx in face_indices {
+            if let Some(_new_top_idx) =
+                twist_rotate_face_antiprism(brush, face_idx, axis, angle_rad)
+            {
+                changed = true;
+            } else if apply_face_weighted_twist_rotate_to_convex_brush(
+                brush,
+                face_idx,
+                (brush.aabb.min + brush.aabb.max) * 0.5,
+                axis,
+                angle_rad,
+            ) {
+                changed = true;
+            }
+        }
+
+        if changed {
+            map.generation = map.generation.wrapping_add(1);
+            any = true;
+
+            // Face indices may have changed after rebuild; re-target selection to the new "top"
+            // face (we put it at index 0).
+            for sel in selected_faces.iter_mut() {
+                if sel.entity_idx == entity_idx && sel.brush_idx == brush_idx {
+                    sel.face_idx = 0;
+                }
+            }
+        }
+    }
+
+    any
 }
 
 pub fn selection_aabb(
@@ -1148,5 +2141,47 @@ fn create_brush_from_drag(
             log_error!(console, "Failed to create brush: {e}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn twist_rotate_antiprism_cube_top_face() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("kradiant")
+            .join("test")
+            .join("cube.map");
+        let mut map =
+            kradiant::loader::map_loader::load_map(path.to_str().unwrap()).expect("load cube");
+        let brush = map.entities[0].brushes.get_mut(0).expect("brush 0");
+
+        // In `cube.map`, face 4 is the Z+ face (top).
+        let out = twist_rotate_face_antiprism(brush, 4, Vec3::Z, 45.0f32.to_radians());
+        assert!(out.is_some(), "antiprism rotate should succeed");
+
+        let face_count = match &brush.content {
+            kradiant::map::BrushContent::Convex(faces) => faces.len(),
+            kradiant::map::BrushContent::Patch(_) => 0,
+        };
+        assert!(
+            face_count >= 10,
+            "antiprism rotate should increase face count (got {face_count})"
+        );
+
+        let (_aabb, polys) = brush.get_polygons_and_aabb().expect("polys");
+        let mut min_z = f32::INFINITY;
+        let mut max_z = f32::NEG_INFINITY;
+        for (verts, _) in polys {
+            for v in verts {
+                min_z = min_z.min(v.z);
+                max_z = max_z.max(v.z);
+            }
+        }
+        assert!((min_z + 64.0).abs() < 1.0e-2, "bottom should stay at z=-64");
+        assert!((max_z - 64.0).abs() < 1.0e-2, "top should stay at z=+64");
     }
 }

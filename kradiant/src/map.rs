@@ -241,6 +241,19 @@ impl Brush {
         self.aabb.max += delta;
     }
 
+    pub fn apply_texture(&mut self, texture: &str) {
+        match &mut self.content {
+            BrushContent::Convex(faces) => {
+                for face in faces.iter_mut() {
+                    face.texture = texture.to_owned();
+                }
+            }
+            BrushContent::Patch(patch) => {
+                patch.texture = texture.to_owned();
+            }
+        }
+    }
+
     /*pub fn recompute_aabb(&mut self)
     {
         if let Some(polys) = self.get_polygons() {

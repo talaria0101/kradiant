@@ -118,8 +118,7 @@ pub struct RenderBackend<'a> {
 }
 
 impl RenderBackend<'_> {
-    pub unsafe fn draw_lines(&self, vertices: &[Vec3], color: [f32; 4], mvp: glam::Mat4)
-    {
+    pub unsafe fn draw_lines(&self, vertices: &[Vec3], color: [f32; 4], mvp: glam::Mat4) {
         unsafe {
             if vertices.is_empty() {
                 return;
@@ -194,7 +193,9 @@ impl Viewport2D {
             }
 
             // Draw into FBO.
-            backend.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+            backend
+                .gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
             backend.gl.viewport(0, 0, fbo_w as i32, fbo_h as i32);
             let view_bg = editor.palette.view2d_bg;
             backend
@@ -232,29 +233,31 @@ impl Viewport2D {
             );
 
             backend.gl.bind_vertex_array(Some(backend.vao));
-            backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo));
+            backend
+                .gl
+                .bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo));
             backend
                 .gl
                 .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
             backend.gl.enable_vertex_attrib_array(0);
 
             #[inline(always)]
-            unsafe fn draw_lines(
-                backend: &RenderBackend<'_>,
-                vertices: &[Vec3],
-                color: [f32; 4],
-            ) {
+            unsafe fn draw_lines(backend: &RenderBackend<'_>, vertices: &[Vec3], color: [f32; 4]) {
                 if vertices.is_empty() {
                     return;
                 }
                 unsafe {
-                    backend.gl.uniform_4_f32_slice(Some(&backend.color_loc), &color);
+                    backend
+                        .gl
+                        .uniform_4_f32_slice(Some(&backend.color_loc), &color);
                     backend.gl.buffer_data_u8_slice(
                         glow::ARRAY_BUFFER,
                         bytemuck::cast_slice(vertices),
                         glow::STREAM_DRAW,
                     );
-                    backend.gl.draw_arrays(glow::LINES, 0, vertices.len() as i32);
+                    backend
+                        .gl
+                        .draw_arrays(glow::LINES, 0, vertices.len() as i32);
                 }
             }
 
@@ -301,7 +304,11 @@ impl Viewport2D {
                     self.grid_vertices.push(Vec3::new(view_right, y, 0.0));
                 }
 
-                draw_lines(backend, &self.grid_vertices, editor.palette.view2d_grid_major);
+                draw_lines(
+                    backend,
+                    &self.grid_vertices,
+                    editor.palette.view2d_grid_major,
+                );
             }
 
             if major_step_px >= MIN_MINOR_STEP_PX
@@ -344,7 +351,11 @@ impl Viewport2D {
                     self.grid_vertices.push(Vec3::new(view_right, y, 0.0));
                 }
 
-                draw_lines(backend, &self.grid_vertices, editor.palette.view2d_grid_minor);
+                draw_lines(
+                    backend,
+                    &self.grid_vertices,
+                    editor.palette.view2d_grid_minor,
+                );
             }
 
             // World origin axes under map lines.
@@ -364,11 +375,7 @@ impl Viewport2D {
                 .as_ref()
                 .map(|m| (m as *const kradiant::map::Map) as usize)
                 .unwrap_or(0);
-            let map_generation = editor
-                .map
-                .as_ref()
-                .map(|m| m.generation)
-                .unwrap_or(0u64);
+            let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0u64);
             let map_revision = editor.map_revision;
             let map_present = editor.map.is_some();
 
@@ -484,7 +491,8 @@ impl Viewport2D {
                                                 continue;
                                             }
                                             if verts.len() >= 3 {
-                                                let n = (verts[1] - verts[0]).cross(verts[2] - verts[0]);
+                                                let n = (verts[1] - verts[0])
+                                                    .cross(verts[2] - verts[0]);
                                                 let n_len = n.length();
                                                 if n_len.is_finite() && n_len > 1e-6 {
                                                     let dot = (n / n_len).dot(view_dir);
@@ -513,13 +521,16 @@ impl Viewport2D {
                                                     continue;
                                                 }
 
-                                                self.line_vertices.push(Vec3::new(pa[0], pa[1], 0.0));
-                                                self.line_vertices.push(Vec3::new(pb[0], pb[1], 0.0));
+                                                self.line_vertices
+                                                    .push(Vec3::new(pa[0], pa[1], 0.0));
+                                                self.line_vertices
+                                                    .push(Vec3::new(pb[0], pb[1], 0.0));
                                             }
                                         }
                                     }
                                     BrushContent::Patch(patch) => {
-                                        let Some((mesh, patch_aabb, edges)) = patch.get_mesh_aabb_wire()
+                                        let Some((mesh, patch_aabb, edges)) =
+                                            patch.get_mesh_aabb_wire()
                                         else {
                                             continue;
                                         };
@@ -594,12 +605,12 @@ impl Viewport2D {
                 draw_lines(backend, &self.line_vertices, editor.palette.view2d_geometry);
             }
 
-	            self.selected_vertices.clear();
-	            if !editor.selected_brushes.is_empty() {
-	                let view_min_x = view_left.min(view_right);
-	                let view_max_x = view_left.max(view_right);
-	                let view_min_y = view_top.min(view_bottom);
-	                let view_max_y = view_top.max(view_bottom);
+            self.selected_vertices.clear();
+            if !editor.edit_faces && !editor.selected_brushes.is_empty() {
+                let view_min_x = view_left.min(view_right);
+                let view_max_x = view_left.max(view_right);
+                let view_min_y = view_top.min(view_bottom);
+                let view_max_y = view_top.max(view_bottom);
                 let view_dir = match axis {
                     ui::Ortho::XY => glam::Vec3::new(0.0, 0.0, -1.0),
                     ui::Ortho::XZ => glam::Vec3::new(0.0, -1.0, 0.0),
@@ -609,12 +620,12 @@ impl Viewport2D {
                 let preview_drag_mode = editor.view2d.drag_mode;
                 let preview_stretch_mode = editor.stretch_mode;
                 let preview_move_offset = editor.view2d.move_offset;
-	                let preview_stretch = editor.view2d.stretch_preview_xform();
-	                let preview_rotate = editor.view2d.rotate_preview_xform();
-	                let preview_face = editor.view2d.face_stretch_preview();
-	                let preview_point = |p: Vec3| -> Vec3 {
-	                    match preview_drag_mode {
-	                        ui::DragMode::MoveSelection => p + preview_move_offset,
+                let preview_stretch = editor.view2d.stretch_preview_xform();
+                let preview_rotate = editor.view2d.rotate_preview_xform();
+                let preview_face = editor.view2d.face_stretch_preview();
+                let preview_point = |p: Vec3| -> Vec3 {
+                    match preview_drag_mode {
+                        ui::DragMode::MoveSelection => p + preview_move_offset,
                         ui::DragMode::StretchSelection => {
                             if preview_stretch_mode == ui::StretchMode::Scale {
                                 preview_stretch.map(|x| x.apply_point(p)).unwrap_or(p)
@@ -626,188 +637,185 @@ impl Viewport2D {
                         ui::DragMode::RotateSelection => {
                             preview_rotate.map(|r| r.apply_point(p)).unwrap_or(p)
                         }
-	                    }
-	                };
-	
-	                for (entity_index, brush_index) in &editor.selected_brushes {
-	                    if let Some(map) = &mut editor.map {
-	                        if let Some(entity) = map.entities.get_mut(*entity_index) {
-	                            if let Some(brush) = entity.brushes.get_mut(*brush_index) {
-	                                if matches!(&brush.content, BrushContent::Convex(_)) {
-	                                    if preview_drag_mode == ui::DragMode::StretchSelection
-	                                        && preview_stretch_mode == ui::StretchMode::Resize
-	                                    {
-	                                        if let Some((faces, delta)) = preview_face {
-	                                            if let Some(polys) = kradiant::editing::preview_convex_face_stretch_polys(
-	                                                &*brush,
-	                                                faces,
-	                                                delta,
-	                                                editor.config.grid_minor_step as i32,
-	                                            ) {
-	                                                for (positions, _) in polys {
-	                                                    if positions.len() < 2 {
-	                                                        continue;
-	                                                    }
-	                                                    if positions.len() >= 3 {
-	                                                        let n = (positions[1] - positions[0])
-	                                                            .cross(positions[2] - positions[0]);
-	                                                        let n_len = n.length();
-	                                                        if n_len.is_finite() && n_len > 1e-6 {
-	                                                            let dot = (n / n_len).dot(view_dir);
-	                                                            if dot > 1e-4 {
-	                                                                continue;
-	                                                            }
-	                                                        }
-	                                                    }
-	                                                    for i in 0..positions.len() {
-	                                                        let a = positions[i];
-	                                                        let b = positions[(i + 1) % positions.len()];
-	                                                        let pa = util::project_to_2d(a, axis);
-	                                                        let pb = util::project_to_2d(b, axis);
+                    }
+                };
 
-	                                                        let seg_min_x = pa[0].min(pb[0]);
-	                                                        let seg_max_x = pa[0].max(pb[0]);
-	                                                        let seg_min_y = pa[1].min(pb[1]);
-	                                                        let seg_max_y = pa[1].max(pb[1]);
-	                                                        if seg_max_x < view_min_x
-	                                                            || seg_min_x > view_max_x
-	                                                            || seg_max_y < view_min_y
-	                                                            || seg_min_y > view_max_y
-	                                                        {
-	                                                            continue;
-	                                                        }
+                for (entity_index, brush_index) in &editor.selected_brushes {
+                    if let Some(map) = &mut editor.map {
+                        if let Some(entity) = map.entities.get_mut(*entity_index) {
+                            if let Some(brush) = entity.brushes.get_mut(*brush_index) {
+                                if matches!(&brush.content, BrushContent::Convex(_)) {
+                                    if preview_drag_mode == ui::DragMode::StretchSelection
+                                        && preview_stretch_mode == ui::StretchMode::Resize
+                                    {
+                                        if let Some((faces, delta)) = preview_face {
+                                            if let Some(polys) =
+                                                kradiant::editing::preview_convex_face_stretch_polys(
+                                                    &*brush,
+                                                    faces,
+                                                    delta,
+                                                    editor.config.grid_minor_step as i32,
+                                                )
+                                            {
+                                                for (positions, _) in polys {
+                                                    if positions.len() < 2 {
+                                                        continue;
+                                                    }
+                                                    if positions.len() >= 3 {
+                                                        let n = (positions[1] - positions[0])
+                                                            .cross(positions[2] - positions[0]);
+                                                        let n_len = n.length();
+                                                        if n_len.is_finite() && n_len > 1e-6 {
+                                                            let dot = (n / n_len).dot(view_dir);
+                                                            if dot > 1e-4 {
+                                                                continue;
+                                                            }
+                                                        }
+                                                    }
+                                                    for i in 0..positions.len() {
+                                                        let a = positions[i];
+                                                        let b =
+                                                            positions[(i + 1) % positions.len()];
+                                                        let pa = util::project_to_2d(a, axis);
+                                                        let pb = util::project_to_2d(b, axis);
 
-	                                                        self.selected_vertices
-	                                                            .push(Vec3::new(pa[0], pa[1], 0.0));
-	                                                        self.selected_vertices
-	                                                            .push(Vec3::new(pb[0], pb[1], 0.0));
-	                                                    }
-	                                                }
-	                                                continue;
-	                                            }
-	                                        }
-	                                    }
+                                                        let seg_min_x = pa[0].min(pb[0]);
+                                                        let seg_max_x = pa[0].max(pb[0]);
+                                                        let seg_min_y = pa[1].min(pb[1]);
+                                                        let seg_max_y = pa[1].max(pb[1]);
+                                                        if seg_max_x < view_min_x
+                                                            || seg_min_x > view_max_x
+                                                            || seg_max_y < view_min_y
+                                                            || seg_min_y > view_max_y
+                                                        {
+                                                            continue;
+                                                        }
 
-	                                    if let Some((_aabb, polys)) = brush.get_polygons_and_aabb() {
-	                                        for (positions, _) in polys {
-	                                            if positions.len() < 2 {
-	                                                continue;
-	                                            }
-	                                            if positions.len() >= 3 {
-	                                                let p0 = preview_point(positions[0]);
-	                                                let p1 = preview_point(positions[1]);
-	                                                let p2 = preview_point(positions[2]);
-	                                                let n = (p1 - p0).cross(p2 - p0);
-	                                                let n_len = n.length();
-	                                                if n_len.is_finite() && n_len > 1e-6 {
-	                                                    let dot = (n / n_len).dot(view_dir);
-	                                                    if dot > 1e-4 {
-	                                                        continue;
-	                                                    }
-	                                                }
-	                                            }
-	                                            for i in 0..positions.len() {
-	                                                let a = positions[i];
-	                                                let b = positions[(i + 1) % positions.len()];
-	                                                let pa =
-	                                                    util::project_to_2d(preview_point(a), axis);
-	                                                let pb =
-	                                                    util::project_to_2d(preview_point(b), axis);
+                                                        self.selected_vertices
+                                                            .push(Vec3::new(pa[0], pa[1], 0.0));
+                                                        self.selected_vertices
+                                                            .push(Vec3::new(pb[0], pb[1], 0.0));
+                                                    }
+                                                }
+                                                continue;
+                                            }
+                                        }
+                                    }
 
-	                                                let seg_min_x = pa[0].min(pb[0]);
-	                                                let seg_max_x = pa[0].max(pb[0]);
-	                                                let seg_min_y = pa[1].min(pb[1]);
-	                                                let seg_max_y = pa[1].max(pb[1]);
-	                                                if seg_max_x < view_min_x
-	                                                    || seg_min_x > view_max_x
-	                                                    || seg_max_y < view_min_y
-	                                                    || seg_min_y > view_max_y
-	                                                {
-	                                                    continue;
-	                                                }
+                                    if let Some((_aabb, polys)) = brush.get_polygons_and_aabb() {
+                                        for (positions, _) in polys {
+                                            if positions.len() < 2 {
+                                                continue;
+                                            }
+                                            if positions.len() >= 3 {
+                                                let p0 = preview_point(positions[0]);
+                                                let p1 = preview_point(positions[1]);
+                                                let p2 = preview_point(positions[2]);
+                                                let n = (p1 - p0).cross(p2 - p0);
+                                                let n_len = n.length();
+                                                if n_len.is_finite() && n_len > 1e-6 {
+                                                    let dot = (n / n_len).dot(view_dir);
+                                                    if dot > 1e-4 {
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                            for i in 0..positions.len() {
+                                                let a = positions[i];
+                                                let b = positions[(i + 1) % positions.len()];
+                                                let pa =
+                                                    util::project_to_2d(preview_point(a), axis);
+                                                let pb =
+                                                    util::project_to_2d(preview_point(b), axis);
 
-	                                                self.selected_vertices
-	                                                    .push(Vec3::new(pa[0], pa[1], 0.0));
-	                                                self.selected_vertices
-	                                                    .push(Vec3::new(pb[0], pb[1], 0.0));
-	                                            }
-	                                        }
-	                                    }
-	                                } else if let BrushContent::Patch(patch) = &mut brush.content {
-	                                    let Some((mesh, patch_aabb, edges)) =
-	                                        patch.get_mesh_aabb_wire()
-	                                    else {
-	                                        continue;
-	                                    };
-	                                    brush.aabb = patch_aabb.clone();
+                                                let seg_min_x = pa[0].min(pb[0]);
+                                                let seg_max_x = pa[0].max(pb[0]);
+                                                let seg_min_y = pa[1].min(pb[1]);
+                                                let seg_max_y = pa[1].max(pb[1]);
+                                                if seg_max_x < view_min_x
+                                                    || seg_min_x > view_max_x
+                                                    || seg_max_y < view_min_y
+                                                    || seg_min_y > view_max_y
+                                                {
+                                                    continue;
+                                                }
 
-	                                    let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
-	                                        ui::Ortho::XY => (
-	                                            patch_aabb.min.x as f32,
-	                                            patch_aabb.max.x as f32,
-	                                            patch_aabb.min.y as f32,
-	                                            patch_aabb.max.y as f32,
-	                                        ),
-	                                        ui::Ortho::XZ => (
-	                                            patch_aabb.min.x as f32,
-	                                            patch_aabb.max.x as f32,
-	                                            -(patch_aabb.max.z as f32),
-	                                            -(patch_aabb.min.z as f32),
-	                                        ),
-	                                        ui::Ortho::YZ => (
-	                                            patch_aabb.min.y as f32,
-	                                            patch_aabb.max.y as f32,
-	                                            -(patch_aabb.max.z as f32),
-	                                            -(patch_aabb.min.z as f32),
-	                                        ),
-	                                    };
-	                                    if a_max_x < view_min_x
-	                                        || a_min_x > view_max_x
-	                                        || a_max_y < view_min_y
-	                                        || a_min_y > view_max_y
-	                                    {
-	                                        continue;
-	                                    }
+                                                self.selected_vertices
+                                                    .push(Vec3::new(pa[0], pa[1], 0.0));
+                                                self.selected_vertices
+                                                    .push(Vec3::new(pb[0], pb[1], 0.0));
+                                            }
+                                        }
+                                    }
+                                } else if let BrushContent::Patch(patch) = &mut brush.content {
+                                    let Some((mesh, patch_aabb, edges)) =
+                                        patch.get_mesh_aabb_wire()
+                                    else {
+                                        continue;
+                                    };
+                                    brush.aabb = patch_aabb.clone();
 
-	                                    let positions = mesh.positions.as_slice();
-	                                    for &(a, b) in edges {
-	                                        let ia = a as usize;
-	                                        let ib = b as usize;
-	                                        if ia >= positions.len() || ib >= positions.len() {
-	                                            continue;
-	                                        }
-	                                        let pa = util::project_to_2d(
-	                                            preview_point(positions[ia]),
-	                                            axis,
-	                                        );
-	                                        let pb = util::project_to_2d(
-	                                            preview_point(positions[ib]),
-	                                            axis,
-	                                        );
+                                    let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
+                                        ui::Ortho::XY => (
+                                            patch_aabb.min.x as f32,
+                                            patch_aabb.max.x as f32,
+                                            patch_aabb.min.y as f32,
+                                            patch_aabb.max.y as f32,
+                                        ),
+                                        ui::Ortho::XZ => (
+                                            patch_aabb.min.x as f32,
+                                            patch_aabb.max.x as f32,
+                                            -(patch_aabb.max.z as f32),
+                                            -(patch_aabb.min.z as f32),
+                                        ),
+                                        ui::Ortho::YZ => (
+                                            patch_aabb.min.y as f32,
+                                            patch_aabb.max.y as f32,
+                                            -(patch_aabb.max.z as f32),
+                                            -(patch_aabb.min.z as f32),
+                                        ),
+                                    };
+                                    if a_max_x < view_min_x
+                                        || a_min_x > view_max_x
+                                        || a_max_y < view_min_y
+                                        || a_min_y > view_max_y
+                                    {
+                                        continue;
+                                    }
 
-	                                        let seg_min_x = pa[0].min(pb[0]);
-	                                        let seg_max_x = pa[0].max(pb[0]);
-	                                        let seg_min_y = pa[1].min(pb[1]);
-	                                        let seg_max_y = pa[1].max(pb[1]);
-	                                        if seg_max_x < view_min_x
-	                                            || seg_min_x > view_max_x
-	                                            || seg_max_y < view_min_y
-	                                            || seg_min_y > view_max_y
-	                                        {
-	                                            continue;
-	                                        }
+                                    let positions = mesh.positions.as_slice();
+                                    for &(a, b) in edges {
+                                        let ia = a as usize;
+                                        let ib = b as usize;
+                                        if ia >= positions.len() || ib >= positions.len() {
+                                            continue;
+                                        }
+                                        let pa =
+                                            util::project_to_2d(preview_point(positions[ia]), axis);
+                                        let pb =
+                                            util::project_to_2d(preview_point(positions[ib]), axis);
 
-	                                        self.selected_vertices
-	                                            .push(Vec3::new(pa[0], pa[1], 0.0));
-	                                        self.selected_vertices
-	                                            .push(Vec3::new(pb[0], pb[1], 0.0));
-	                                    }
-	                                }
-	                            }
-	                        }
-	                    }
-	                }
-	            }
+                                        let seg_min_x = pa[0].min(pb[0]);
+                                        let seg_max_x = pa[0].max(pb[0]);
+                                        let seg_min_y = pa[1].min(pb[1]);
+                                        let seg_max_y = pa[1].max(pb[1]);
+                                        if seg_max_x < view_min_x
+                                            || seg_min_x > view_max_x
+                                            || seg_max_y < view_min_y
+                                            || seg_min_y > view_max_y
+                                        {
+                                            continue;
+                                        }
+
+                                        self.selected_vertices.push(Vec3::new(pa[0], pa[1], 0.0));
+                                        self.selected_vertices.push(Vec3::new(pb[0], pb[1], 0.0));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             if !self.selected_vertices.is_empty() {
                 draw_lines(backend, &self.selected_vertices, editor.selection_rgba);
@@ -873,11 +881,7 @@ impl Viewport3D {
                 .as_ref()
                 .map(|m| m as *const _ as usize)
                 .unwrap_or(0);
-            let map_generation = editor
-                .map
-                .as_ref()
-                .map(|m| m.generation)
-                .unwrap_or(0u64);
+            let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0u64);
             let map_revision = editor.map_revision;
 
             let need_rebuild = match self.cache {
@@ -905,8 +909,7 @@ impl Viewport3D {
                         for brush in &mut ent.brushes {
                             match &mut brush.content {
                                 BrushContent::Convex(_) => {
-                                    let Some((aabb, polys)) = brush.get_polygons_and_aabb()
-                                    else {
+                                    let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
                                         continue;
                                     };
                                     bounds_min = bounds_min.min(aabb.min);
@@ -979,7 +982,9 @@ impl Viewport3D {
             }
 
             // Draw into FBO
-            backend.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+            backend
+                .gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
             backend.gl.viewport(0, 0, fbo_w as i32, fbo_h as i32);
 
             let view_bg = editor.palette.view2d_bg;
@@ -995,9 +1000,12 @@ impl Viewport3D {
 
             let cam = &editor.view3d.cam;
             let (yaw, pitch) = (cam.angles.x, cam.angles.y);
-            let forward =
-                Vec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin())
-                    .normalize();
+            let forward = Vec3::new(
+                yaw.cos() * pitch.cos(),
+                yaw.sin() * pitch.cos(),
+                pitch.sin(),
+            )
+            .normalize();
             let eye = cam.pos;
             let target = eye + forward;
             let world_up = Vec3::Z;
@@ -1375,6 +1383,9 @@ impl AppState {
             (editor_icons::ICON_LOCK_Y_DDS, "lock_y"),
             (editor_icons::ICON_LOCK_Z_DDS, "lock_z"),
             (editor_icons::ICON_SNAP_TO_GRID_DDS, "grid_snap"),
+            (editor_icons::ICON_MODIFY_FACES_DDS, "edit_face"),
+            (editor_icons::ICON_MODIFY_EDGES_DDS, "edit_edge"),
+            (editor_icons::ICON_MODIFY_VERTICES_DDS, "edit_vertex"),
         ];
 
         let mut icon_ids = Vec::new();
@@ -1434,6 +1445,9 @@ impl AppState {
         editor.icons.lock_y = icon_ids.get(7).copied();
         editor.icons.lock_z = icon_ids.get(8).copied();
         editor.icons.grid_snap = icon_ids.get(9).copied();
+        editor.icons.edit_face = icon_ids.get(10).copied();
+        editor.icons.edit_edge = icon_ids.get(11).copied();
+        editor.icons.edit_vertex = icon_ids.get(12).copied();
 
         let vp2d = Viewport2D {
             line_vertices: vec![],
@@ -1443,7 +1457,7 @@ impl AppState {
             fbo_size: view2d_fbo_size,
             tex: view2d_tex,
             rbo: view2d_rbo,
-            cache: None
+            cache: None,
         };
 
         let vp3d = Viewport3D {
@@ -1518,10 +1532,15 @@ impl AppState {
 
         const UPLOADS_PER_FRAME: usize = 4; // later would add in configuration
         let pending = &mut self.editor.tex_browser.pending_uploads;
-        let batch: Vec<_> = pending.drain(..pending.len().min(UPLOADS_PER_FRAME)).collect();
+        let batch: Vec<_> = pending
+            .drain(..pending.len().min(UPLOADS_PER_FRAME))
+            .collect();
         for (material, img) in batch {
             let tid = register_texture(&mut self.renderer, &img, "game texture");
-            self.editor.tex_browser.tex_gpu_cache.insert(material, (tid, [img.width as f32, img.height as f32]));
+            self.editor
+                .tex_browser
+                .tex_gpu_cache
+                .insert(material, (tid, [img.width as f32, img.height as f32]));
         }
 
         self.platform.prepare_frame(&self.window, &mut self.imgui);
@@ -1532,10 +1551,12 @@ impl AppState {
             let fb_scale = self.imgui.io().display_framebuffer_scale();
             let sx = fb_scale[0].max(1.0) as f64;
             let sy = fb_scale[1].max(1.0) as f64;
-            let _ = self.window.set_cursor_position(winit::dpi::PhysicalPosition::new(
-                warp[0] as f64 * sx,
-                warp[1] as f64 * sy,
-            ));
+            let _ = self
+                .window
+                .set_cursor_position(winit::dpi::PhysicalPosition::new(
+                    warp[0] as f64 * sx,
+                    warp[1] as f64 * sy,
+                ));
             self.editor.view3d.warp_pending_reset = true;
         }
 
@@ -1655,7 +1676,7 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(state) = &mut self.state {
             if state.needs_redraw {
-                state.window.request_redraw();   // keep drawing while UI is active
+                state.window.request_redraw(); // keep drawing while UI is active
             } else {
                 event_loop.set_control_flow(ControlFlow::Wait);
             }

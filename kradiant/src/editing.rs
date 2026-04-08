@@ -895,6 +895,57 @@ pub fn pick_convex_brush_by_ray(
     pick_brush_by_ray(map, ray_origin, ray_dir, PickMask::CONVEX)
 }
 
+pub fn pick_convex_face_by_ray(
+    map: &mut Map,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+) -> Option<(usize, usize, usize)> {
+    let mut best: Option<(usize, usize, usize, f32)> = None;
+
+    for (entity_index, entity) in map.entities.iter_mut().enumerate() {
+        for (brush_index, brush) in entity.brushes.iter_mut().enumerate() {
+            let BrushContent::Convex(_) = &mut brush.content else {
+                continue;
+            };
+
+            let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
+                continue;
+            };
+            let Some((t_enter, t_exit)) =
+                ray_aabb_intersection(aabb.min, aabb.max, ray_origin, ray_dir)
+            else {
+                continue;
+            };
+            if t_exit < 0.0 {
+                continue;
+            }
+
+            if let Some((_, _, _, best_t)) = best {
+                if t_enter > best_t {
+                    continue;
+                }
+            }
+
+            let Some((face_index, t)) = ray_polys_first_hit_with_index(polys, ray_origin, ray_dir)
+            else {
+                continue;
+            };
+
+            if t >= 0.0 {
+                match best {
+                    None => best = Some((entity_index, brush_index, face_index, t)),
+                    Some((_, _, _, best_t)) if t < best_t => {
+                        best = Some((entity_index, brush_index, face_index, t))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    best.map(|(e, b, f, _)| (e, b, f))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PickMask(u8);
 
@@ -1033,9 +1084,14 @@ fn ray_aabb_intersection(min: Vec3, max: Vec3, origin: Vec3, dir: Vec3) -> Optio
     Some((tmin, tmax))
 }
 
-fn ray_polys_first_hit(polys: &[(Vec<Vec3>, Vec<u32>)], origin: Vec3, dir: Vec3) -> Option<f32> {
-    let mut best = None;
-    for (positions, indices) in polys {
+fn ray_polys_first_hit_with_index(
+    polys: &[(Vec<Vec3>, Vec<u32>)],
+    origin: Vec3,
+    dir: Vec3,
+) -> Option<(usize, f32)> {
+    let mut best: Option<(usize, f32)> = None;
+
+    for (poly_index, (positions, indices)) in polys.iter().enumerate() {
         if positions.len() < 3 || indices.len() < 3 {
             continue;
         }
@@ -1054,14 +1110,19 @@ fn ray_polys_first_hit(polys: &[(Vec<Vec3>, Vec<u32>)], origin: Vec3, dir: Vec3)
             };
             if t >= 0.0 {
                 match best {
-                    None => best = Some(t),
-                    Some(best_t) if t < best_t => best = Some(t),
+                    None => best = Some((poly_index, t)),
+                    Some((_, best_t)) if t < best_t => best = Some((poly_index, t)),
                     _ => {}
                 }
             }
         }
     }
+
     best
+}
+
+fn ray_polys_first_hit(polys: &[(Vec<Vec3>, Vec<u32>)], origin: Vec3, dir: Vec3) -> Option<f32> {
+    ray_polys_first_hit_with_index(polys, origin, dir).map(|(_, t)| t)
 }
 
 fn ray_patch_mesh_first_hit(
