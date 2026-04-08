@@ -12,10 +12,12 @@ use crate::{EDITOR_THEMES, util};
 
 pub mod console;
 pub mod texbro;
+pub mod undo;
 pub mod view2d;
 pub mod view3d;
 use console::ConsoleLogger;
 use texbro::TextureBrowser;
+use undo::UndoRedo;
 pub use view2d::{AxisLock, DragMode, Ortho, StretchMode, View2D};
 use view3d::View3D;
 
@@ -78,10 +80,6 @@ fn key_combo_pressed(ui: &Ui, main_key: dear_imgui_rs::Key, modifiers: u32) -> b
     (has_ctrl == needs_ctrl) && (has_shift == needs_shift)
 }
 
-// ============================================================================
-// EditorState Definition
-// ============================================================================
-
 pub struct EditorState {
     pub config: EditorConfig,
     pub show_demo: bool,
@@ -89,6 +87,7 @@ pub struct EditorState {
     pub toolbar_height: f32,
     pub map_path: String,
     pub map_revision: u64,
+    pub undo: UndoRedo,
     pub view2d: View2D,
     pub view3d: View3D,
     pub stretch_mode: StretchMode,
@@ -152,6 +151,7 @@ impl Default for EditorState {
             toolbar_height: 0.0,
             map_path: String::new(),
             map_revision: 0,
+            undo: UndoRedo::default(),
             view2d: View2D::default(),
             view3d: View3D::default(),
             stretch_mode: StretchMode::default(),
@@ -216,6 +216,7 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         let stretch_mode = state.stretch_mode;
         let palette = &state.palette;
         let console = &mut state.console;
+        let undo = &mut state.undo;
         let selected_brushes = &mut state.selected_brushes;
         let selected_entity = &mut state.selected_entity;
         let map = &mut state.map;
@@ -229,6 +230,7 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             stretch_mode,
             palette,
             console,
+            undo,
             selected_brushes,
             selected_entity,
             map,
@@ -454,6 +456,30 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
 
     const CTRL: u32 = 1;
     const SHIFT: u32 = 2;
+
+    if !ui.io().want_text_input() {
+        if key_combo_pressed(ui, dear_imgui_rs::Key::Z, CTRL) {
+            let _ = state.undo.undo(
+                &mut state.map,
+                &mut state.selected_brushes,
+                &mut state.selected_entity,
+                &mut state.map_revision,
+                &mut state.console,
+            );
+        }
+        if key_combo_pressed(ui, dear_imgui_rs::Key::Y, CTRL)
+            || key_combo_pressed(ui, dear_imgui_rs::Key::Z, CTRL | SHIFT)
+        {
+            let _ = state.undo.redo(
+                &mut state.map,
+                &mut state.selected_brushes,
+                &mut state.selected_entity,
+                &mut state.map_revision,
+                &mut state.console,
+            );
+        }
+    }
+
     if key_combo_pressed(ui, dear_imgui_rs::Key::N, CTRL) {
         util::new_map(state);
     }
@@ -648,16 +674,23 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
     ui.window("Properties")
         .size([220.0, 280.0], Condition::FirstUseEver)
         .build(|| {
-            let (Some(map), Some(idx)) = (&mut state.map, state.selected_entity) else {
+            let Some(idx) = state.selected_entity else {
                 ui.text_disabled("(select an entity)");
                 return;
             };
-            let ent = &mut map.entities[idx];
+            let Some(map) = state.map.as_mut() else {
+                ui.text_disabled("(select an entity)");
+                return;
+            };
+            if idx >= map.entities.len() {
+                ui.text_disabled("(select an entity)");
+                return;
+            }
 
-            ui.text(format!("classname: {}", ent.classname));
+            ui.text(format!("classname: {}", map.entities[idx].classname));
             ui.separator();
 
-            let mut keys: Vec<String> = ent.properties.keys().cloned().collect();
+            let mut keys: Vec<String> = map.entities[idx].properties.keys().cloned().collect();
             keys.sort();
 
             let mut to_delete: Option<String> = None;
@@ -670,12 +703,19 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
                 ui.text(key);
                 ui.same_line();
                 ui.set_next_item_width(-1.0);
-                let value = ent.properties.get_mut(key).unwrap();
+                let value = map.entities[idx].properties.get_mut(key).unwrap();
                 ui.input_text(format!("##{key}"), value).build();
             }
 
             if let Some(k) = to_delete {
-                ent.properties.remove(&k);
+                state.undo.push_map(
+                    "Delete property",
+                    &*map,
+                    &state.selected_brushes,
+                    &state.selected_entity,
+                );
+                map.entities[idx].properties.remove(&k);
+                state.map_revision = state.map_revision.wrapping_add(1);
             }
 
             ui.separator();
@@ -697,7 +737,14 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
                  *                ui.push_style_color(StyleColor::ButtonHovered,[0.3, 0.3, 0.3, 1.0]);
             }*/
             if ui.button("Add property") && can_add {
-                ent.properties
+                state.undo.push_map(
+                    "Add property",
+                    &*map,
+                    &state.selected_brushes,
+                    &state.selected_entity,
+                );
+                map.entities[idx]
+                    .properties
                     .entry(state.new_prop_key.trim().to_string())
                     .or_insert_with(|| state.new_prop_val.clone());
                 state.new_prop_key.clear();

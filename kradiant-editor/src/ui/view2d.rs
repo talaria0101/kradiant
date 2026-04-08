@@ -192,6 +192,7 @@ impl View2D {
         stretch_mode: StretchMode,
         palette: &crate::theme::EditorPalette,
         console: &mut crate::ui::console::ConsoleLogger,
+        undo: &mut crate::ui::undo::UndoRedo,
         selected_brushes: &mut Vec<(usize, usize)>,
         selected_entity: &mut Option<usize>,
         map: &mut Option<kradiant::map::Map>,
@@ -425,6 +426,17 @@ impl View2D {
                                 let d = end - start;
                                 if d != Vec2::ZERO {
                                     let delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
+                                    if delta != Vec3::ZERO
+                                        && map.is_some()
+                                        && !selected_brushes.is_empty()
+                                    {
+                                        undo.push(
+                                            "Move selection",
+                                            map,
+                                            selected_brushes,
+                                            selected_entity,
+                                        );
+                                    }
                                     if let Some(map) = map.as_mut() {
                                         let generation = &mut map.generation;
                                         for (entity_idx, brush_idx) in selected_brushes.iter() {
@@ -445,6 +457,14 @@ impl View2D {
                             }
                             DragMode::NewBrush => {
                                 if selected_brushes.is_empty() {
+                                    if map.is_some() {
+                                        undo.push(
+                                            "Create brush",
+                                            map,
+                                            selected_brushes,
+                                            selected_entity,
+                                        );
+                                    }
                                     if let Some(created) = create_brush_from_drag(
                                         self,
                                         start,
@@ -469,6 +489,13 @@ impl View2D {
                                 if let Some(stretch) = self.stretch.take() {
                                     let delta = self.stretch_delta;
                                     if delta != Vec3::ZERO {
+                                        if map.is_some() && !selected_brushes.is_empty() {
+                                            let label = match stretch_mode {
+                                                StretchMode::Scale => "Scale selection",
+                                                StretchMode::Resize => "Resize selection",
+                                            };
+                                            undo.push(label, map, selected_brushes, selected_entity);
+                                        }
                                         let mut new_sel_aabb: Option<Aabb> = None;
                                         if let Some(map) = map.as_mut() {
                                             let mut any = false;
@@ -563,6 +590,14 @@ impl View2D {
                                     };
 
                                     if angle.abs() > 1.0e-6 {
+                                        if map.is_some() && !selected_brushes.is_empty() {
+                                            undo.push(
+                                                "Rotate selection",
+                                                map,
+                                                selected_brushes,
+                                                selected_entity,
+                                            );
+                                        }
                                         let axis = match self.ortho_axis {
                                             Ortho::XY => Vec3::Z,
                                             Ortho::XZ => Vec3::Y,
@@ -637,6 +672,14 @@ impl View2D {
                         update_last_work_from_aabb(self, &aabb);
                     }
 
+                    if map.is_some() && !selected_brushes.is_empty() {
+                        undo.push(
+                            "Delete selection",
+                            map,
+                            selected_brushes,
+                            selected_entity,
+                        );
+                    }
                     if let Some(map) = map.as_mut() {
                         let mut any = false;
                         use std::collections::BTreeMap;
