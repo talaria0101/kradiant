@@ -1,6 +1,9 @@
 //! Editor UI
 //!
 
+const CTRL: u32 = 1;
+const SHIFT: u32 = 2;
+
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 use kradiant::map::Map;
 
@@ -474,9 +477,6 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
         });
     }
 
-    const CTRL: u32 = 1;
-    const SHIFT: u32 = 2;
-
     if !ui.io().want_text_input() {
         if key_combo_pressed(ui, dear_imgui_rs::Key::Z, CTRL) {
             let _ = state.undo.undo(
@@ -488,9 +488,7 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                 &mut state.console,
             );
         }
-        if key_combo_pressed(ui, dear_imgui_rs::Key::Y, CTRL)
-            || key_combo_pressed(ui, dear_imgui_rs::Key::Z, CTRL | SHIFT)
-        {
+        if key_combo_pressed(ui, dear_imgui_rs::Key::Y, CTRL) {
             let _ = state.undo.redo(
                 &mut state.map,
                 &mut state.selected_brushes,
@@ -573,6 +571,13 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
                 &mut state.console,
             );
         }
+        if ui.is_key_pressed(dear_imgui_rs::Key::G) {
+            state.config.update(
+                "grid_snap",
+                !state.config.grid_snap as u8,
+                &mut state.console,
+            );
+        }
 
         ui.same_line();
 
@@ -585,8 +590,18 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
                 view2d::update_last_work_from_aabb(&mut state.view2d, &aabb);
             }
         }
+        if ui.is_key_pressed(dear_imgui_rs::Key::Tab)
+        {
+            let old_center = state.view2d.get_center();
+            state.view2d.ortho_axis = state.view2d.ortho_axis.next();
+            state.view2d.set_center(old_center);
 
-        if ui.is_key_down(dear_imgui_rs::Key::LeftShift) && ui.is_key_pressed(dear_imgui_rs::Key::C)
+            if let Some(aabb) = state.view2d.last_aabb.clone() {
+                view2d::update_last_work_from_aabb(&mut state.view2d, &aabb);
+            }
+        }
+
+        if key_combo_pressed(ui, dear_imgui_rs::Key::C, SHIFT)
         {
             if !state.selected_brushes.is_empty() {
                 state.view2d.center_to_work();
@@ -620,6 +635,9 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             state.rotate_mode,
             "Free Rotation",
         ) {
+            state.rotate_mode = !state.rotate_mode;
+        }
+        if ui.is_key_pressed(dear_imgui_rs::Key::R) {
             state.rotate_mode = !state.rotate_mode;
         }
 
@@ -658,6 +676,16 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             state.axis_lock.z,
             "Lock all transformations on Z-axis",
         ) {
+            state.axis_lock.z = !state.axis_lock.z;
+        }
+
+        if key_combo_pressed(ui, dear_imgui_rs::Key::X, SHIFT) {
+            state.axis_lock.x = !state.axis_lock.x;
+        }
+        if key_combo_pressed(ui, dear_imgui_rs::Key::Y, SHIFT) {
+            state.axis_lock.y = !state.axis_lock.y;
+        }
+        if key_combo_pressed(ui, dear_imgui_rs::Key::Z, SHIFT) {
             state.axis_lock.z = !state.axis_lock.z;
         }
 
@@ -700,6 +728,22 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             state.edit_vertices,
             "Manipulate Vertices",
         ) {
+            state.edit_vertices = !state.edit_vertices;
+            state.edit_faces = false;
+            state.edit_edges = false;
+        }
+
+        if ui.is_key_pressed(dear_imgui_rs::Key::F) {
+            state.edit_faces = !state.edit_faces;
+            state.edit_edges = false;
+            state.edit_vertices = false;
+        }
+        if ui.is_key_pressed(dear_imgui_rs::Key::E) {
+            state.edit_edges = !state.edit_edges;
+            state.edit_faces = false;
+            state.edit_vertices = false;
+        }
+        if ui.is_key_pressed(dear_imgui_rs::Key::V) {
             state.edit_vertices = !state.edit_vertices;
             state.edit_faces = false;
             state.edit_edges = false;
