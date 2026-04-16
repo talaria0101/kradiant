@@ -177,6 +177,10 @@ pub fn new_map(state: &mut EditorState) {
     state.map_path = "unsaved.map".to_string();
     state.map = Some(Map::default());
     state.map_revision = state.map_revision.wrapping_add(1);
+    state.selected_brushes.clear();
+    state.selected_faces.clear();
+    state.selected_patch_vertices.clear();
+    state.selected_entity = None;
     state.undo.clear();
     log_info!(state.console, "New map");
 }
@@ -195,6 +199,8 @@ pub fn open_map(state: &mut EditorState) {
         match map_loader::load_map(path_str) {
             Ok(map) => {
                 state.selected_brushes.clear();
+                state.selected_faces.clear();
+                state.selected_patch_vertices.clear();
                 state.selected_entity = None;
                 state.map_path = path_str.to_string();
                 state.map = Some(map);
@@ -538,4 +544,8 @@ pub fn center_next(ui: &Ui, item_width: f32) {
     if offset > 0.0 {
         ui.set_cursor_pos([ui.cursor_pos()[0] + offset, ui.cursor_pos()[1]]);
     }
+}
+
+pub fn other_corners(tl: [f32; 2], br: [f32; 2]) -> ([f32; 2], [f32; 2]) {
+    ([br[0], tl[1]], [tl[0], br[1]])
 }

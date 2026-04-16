@@ -1,5 +1,5 @@
-use crate::ui::FaceSelection;
 use crate::ui::console::ConsoleLogger;
+use crate::ui::{FaceSelection, PatchVertexSelection};
 use kradiant::map::Map;
 
 #[derive(Debug)]
@@ -7,6 +7,7 @@ struct Snapshot {
     map: Option<Map>,
     selected_brushes: Vec<(usize, usize)>,
     selected_faces: Vec<FaceSelection>,
+    selected_patch_vertices: Vec<PatchVertexSelection>,
     selected_entity: Option<usize>,
 }
 
@@ -57,6 +58,7 @@ impl UndoRedo {
         map: &Option<Map>,
         selected_brushes: &[(usize, usize)],
         selected_faces: &[FaceSelection],
+        selected_patch_vertices: &[PatchVertexSelection],
         selected_entity: &Option<usize>,
     ) {
         // New action invalidates the redo chain.
@@ -68,6 +70,7 @@ impl UndoRedo {
                 map: map.clone(),
                 selected_brushes: selected_brushes.to_vec(),
                 selected_faces: selected_faces.to_vec(),
+                selected_patch_vertices: selected_patch_vertices.to_vec(),
                 selected_entity: *selected_entity,
             },
         });
@@ -84,6 +87,7 @@ impl UndoRedo {
         map: &Map,
         selected_brushes: &[(usize, usize)],
         selected_faces: &[FaceSelection],
+        selected_patch_vertices: &[PatchVertexSelection],
         selected_entity: &Option<usize>,
     ) {
         self.redo.clear();
@@ -93,6 +97,7 @@ impl UndoRedo {
                 map: Some(map.clone()),
                 selected_brushes: selected_brushes.to_vec(),
                 selected_faces: selected_faces.to_vec(),
+                selected_patch_vertices: selected_patch_vertices.to_vec(),
                 selected_entity: *selected_entity,
             },
         });
@@ -107,6 +112,7 @@ impl UndoRedo {
         map: &mut Option<Map>,
         selected_brushes: &mut Vec<(usize, usize)>,
         selected_faces: &mut Vec<FaceSelection>,
+        selected_patch_vertices: &mut Vec<PatchVertexSelection>,
         selected_entity: &mut Option<usize>,
         map_revision: &mut u64,
         console: &mut ConsoleLogger,
@@ -120,6 +126,7 @@ impl UndoRedo {
             map: map.take(),
             selected_brushes: std::mem::take(selected_brushes),
             selected_faces: std::mem::take(selected_faces),
+            selected_patch_vertices: std::mem::take(selected_patch_vertices),
             selected_entity: selected_entity.take(),
         };
         self.redo.push(Entry {
@@ -130,6 +137,7 @@ impl UndoRedo {
         *map = entry.snapshot.map;
         *selected_brushes = entry.snapshot.selected_brushes;
         *selected_faces = entry.snapshot.selected_faces;
+        *selected_patch_vertices = entry.snapshot.selected_patch_vertices;
         *selected_entity = entry.snapshot.selected_entity;
         *map_revision = map_revision.wrapping_add(1);
         console.info(format!("Undo: {}", entry.label));
@@ -141,6 +149,7 @@ impl UndoRedo {
         map: &mut Option<Map>,
         selected_brushes: &mut Vec<(usize, usize)>,
         selected_faces: &mut Vec<FaceSelection>,
+        selected_patch_vertices: &mut Vec<PatchVertexSelection>,
         selected_entity: &mut Option<usize>,
         map_revision: &mut u64,
         console: &mut ConsoleLogger,
@@ -154,6 +163,7 @@ impl UndoRedo {
             map: map.take(),
             selected_brushes: std::mem::take(selected_brushes),
             selected_faces: std::mem::take(selected_faces),
+            selected_patch_vertices: std::mem::take(selected_patch_vertices),
             selected_entity: selected_entity.take(),
         };
         self.undo.push(Entry {
@@ -164,6 +174,7 @@ impl UndoRedo {
         *map = entry.snapshot.map;
         *selected_brushes = entry.snapshot.selected_brushes;
         *selected_faces = entry.snapshot.selected_faces;
+        *selected_patch_vertices = entry.snapshot.selected_patch_vertices;
         *selected_entity = entry.snapshot.selected_entity;
         *map_revision = map_revision.wrapping_add(1);
         console.info(format!("Redo: {}", entry.label));

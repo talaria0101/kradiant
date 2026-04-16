@@ -32,6 +32,14 @@ pub struct FaceSelection {
     pub face_idx: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PatchVertexSelection {
+    pub entity_idx: usize,
+    pub brush_idx: usize,
+    pub row: usize,
+    pub col: usize,
+}
+
 /// Helper function to create an icon button with fallback text and tooltip.
 fn icon_button(ui: &Ui, id: &str, icon: Option<TextureId>, tooltip: &str) -> bool {
     let clicked = if let Some(tid) = icon {
@@ -105,6 +113,7 @@ pub struct EditorState {
     pub rotate_mode: bool,
     pub axis_lock: AxisLock,
     pub selection_rgba: [f32; 4],
+    pub selection_rect_rgba: [f32; 4],
     pub tex_browser: TextureBrowser,
     pub tex_filter: String,
     pub tex_selected: Option<String>,
@@ -115,6 +124,7 @@ pub struct EditorState {
     pub selected_entity: Option<usize>,
     pub selected_brushes: Vec<(usize, usize)>,
     pub selected_faces: Vec<FaceSelection>,
+    pub selected_patch_vertices: Vec<PatchVertexSelection>,
     pub new_prop_key: String,
     pub new_prop_val: String,
     pub icons: EditorIcons,
@@ -173,6 +183,7 @@ impl Default for EditorState {
             rotate_mode: false,
             axis_lock: AxisLock::default(),
             selection_rgba: [0.3, 0.6, 1.0, 1.0],
+            selection_rect_rgba: [0.7, 0.7, 0.7, 1.0],
             tex_browser: TextureBrowser::default(),
             tex_filter: String::new(),
             tex_selected: None,
@@ -183,6 +194,7 @@ impl Default for EditorState {
             selected_entity: None,
             selected_brushes: Vec::new(),
             selected_faces: Vec::new(),
+            selected_patch_vertices: Vec::new(),
             new_prop_key: String::new(),
             new_prop_val: String::new(),
             icons: EditorIcons::default(),
@@ -238,10 +250,13 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         let undo = &mut state.undo;
         let selected_brushes = &mut state.selected_brushes;
         let selected_faces = &mut state.selected_faces;
+        let selected_patch_vertices = &mut state.selected_patch_vertices;
         let selected_entity = &mut state.selected_entity;
         let edit_faces = state.edit_faces;
+        let edit_vertices = state.edit_vertices;
         let map = &mut state.map;
         let selection_rgba = state.selection_rgba;
+        let selection_rect_rgba = state.selection_rect_rgba;
 
         view2d_ref.draw_impl(
             ui,
@@ -254,10 +269,13 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             undo,
             selected_brushes,
             selected_faces,
+            selected_patch_vertices,
             selected_entity,
             edit_faces,
+            edit_vertices,
             map,
             selection_rgba,
+            selection_rect_rgba,
             dt,
         );
     }
@@ -483,6 +501,7 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                 &mut state.map,
                 &mut state.selected_brushes,
                 &mut state.selected_faces,
+                &mut state.selected_patch_vertices,
                 &mut state.selected_entity,
                 &mut state.map_revision,
                 &mut state.console,
@@ -493,6 +512,7 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                 &mut state.map,
                 &mut state.selected_brushes,
                 &mut state.selected_faces,
+                &mut state.selected_patch_vertices,
                 &mut state.selected_entity,
                 &mut state.map_revision,
                 &mut state.console,
@@ -590,19 +610,8 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
                 view2d::update_last_work_from_aabb(&mut state.view2d, &aabb);
             }
         }
-        if ui.is_key_pressed(dear_imgui_rs::Key::Tab)
-        {
-            let old_center = state.view2d.get_center();
-            state.view2d.ortho_axis = state.view2d.ortho_axis.next();
-            state.view2d.set_center(old_center);
 
-            if let Some(aabb) = state.view2d.last_aabb.clone() {
-                view2d::update_last_work_from_aabb(&mut state.view2d, &aabb);
-            }
-        }
-
-        if key_combo_pressed(ui, dear_imgui_rs::Key::C, SHIFT)
-        {
+        if key_combo_pressed(ui, dear_imgui_rs::Key::C, SHIFT) {
             if !state.selected_brushes.is_empty() {
                 state.view2d.center_to_work();
                 log_info!(state.console, "Goto Selection");
@@ -705,6 +714,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             state.edit_faces = !state.edit_faces;
             state.edit_edges = false;
             state.edit_vertices = false;
+            state.selected_patch_vertices.clear();
         }
         ui.same_line();
         if icon_button_toggle(
@@ -718,6 +728,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             state.edit_edges = !state.edit_edges;
             state.edit_faces = false;
             state.edit_vertices = false;
+            state.selected_patch_vertices.clear();
         }
         ui.same_line();
         if icon_button_toggle(
@@ -731,22 +742,34 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             state.edit_vertices = !state.edit_vertices;
             state.edit_faces = false;
             state.edit_edges = false;
+            if !state.edit_vertices {
+                state.selected_patch_vertices.clear();
+            } else {
+                state.selected_faces.clear();
+            }
         }
 
         if ui.is_key_pressed(dear_imgui_rs::Key::F) {
             state.edit_faces = !state.edit_faces;
             state.edit_edges = false;
             state.edit_vertices = false;
+            state.selected_patch_vertices.clear();
         }
         if ui.is_key_pressed(dear_imgui_rs::Key::E) {
             state.edit_edges = !state.edit_edges;
             state.edit_faces = false;
             state.edit_vertices = false;
+            state.selected_patch_vertices.clear();
         }
         if ui.is_key_pressed(dear_imgui_rs::Key::V) {
             state.edit_vertices = !state.edit_vertices;
             state.edit_faces = false;
             state.edit_edges = false;
+            if !state.edit_vertices {
+                state.selected_patch_vertices.clear();
+            } else {
+                state.selected_faces.clear();
+            }
         }
 
         // Store the toolbar height so the dockspace can offset below it.
@@ -823,6 +846,7 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
                     &*map,
                     &state.selected_brushes,
                     &state.selected_faces,
+                    &state.selected_patch_vertices,
                     &state.selected_entity,
                 );
                 map.entities[idx].properties.remove(&k);
@@ -853,6 +877,7 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
                     &*map,
                     &state.selected_brushes,
                     &state.selected_faces,
+                    &state.selected_patch_vertices,
                     &state.selected_entity,
                 );
                 map.entities[idx]
@@ -886,6 +911,7 @@ fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
                     &*map,
                     &selected_brushes,
                     &selected_faces,
+                    &state.selected_patch_vertices,
                     &state.selected_entity,
                 );
             }
@@ -916,6 +942,7 @@ fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
                     &*map,
                     &selected_brushes,
                     &selected_faces,
+                    &state.selected_patch_vertices,
                     &state.selected_entity,
                 );
             }

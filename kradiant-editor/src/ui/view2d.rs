@@ -8,7 +8,7 @@ use crate::{log_error, log_info, log_warn, util};
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 use glam::{Quat, Vec2, Vec3};
 use kradiant::editing::{self, Aabb};
-use kradiant::map::BrushId;
+use kradiant::map::{BrushContent, BrushId, Face};
 use kradiant::map_utils::format_float;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -42,8 +42,10 @@ pub enum DragMode {
     #[default]
     NewBrush,
     MoveSelection,
+    MoveVertices,
     StretchSelection,
     RotateSelection,
+    RectangularSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +99,8 @@ pub struct View2D {
     pub rotate: Option<RotateDrag>,
     pub rotate_angle: f32,
     pub last_aabb: Option<Aabb>,
+    // Selection rectangle for rectangular selection mode
+    //pub selection_rect: Option<[Vec2; 2]>,
 }
 
 impl Default for View2D {
@@ -123,6 +127,25 @@ impl Default for View2D {
 }
 
 impl View2D {
+    /// Check if a face is facing the current orthographic view direction.
+    /// Returns true if the face normal points toward the camera.
+    fn is_face_facing_view(&self, face: &Face) -> bool {
+        // Compute face normal from plane points
+        let v0 = face.plane_points[1] - face.plane_points[0];
+        let v1 = face.plane_points[2] - face.plane_points[0];
+        let normal = v0.cross(v1).normalize();
+
+        // View direction for each ortho axis (camera looks along negative axis)
+        let view_dir = match self.ortho_axis {
+            Ortho::XY => Vec3::NEG_Z, // Top-down view, looking down -Z
+            Ortho::XZ => Vec3::NEG_Y, // Front view, looking down -Y
+            Ortho::YZ => Vec3::NEG_X, // Side view, looking down -X
+        };
+
+        // Face is visible if normal points toward camera (dot product > 0)
+        normal.dot(view_dir) > 0.0
+    }
+
     pub fn stretch_preview_xform(&self) -> Option<editing::AffineScale> {
         let stretch = self.stretch.as_ref()?;
         editing::stretch_selection_transform(
@@ -192,10 +215,13 @@ impl View2D {
         undo: &mut crate::ui::undo::UndoRedo,
         selected_brushes: &mut Vec<(usize, usize)>,
         selected_faces: &mut Vec<FaceSelection>,
+        selected_patch_vertices: &mut Vec<crate::ui::PatchVertexSelection>,
         selected_entity: &mut Option<usize>,
         edit_faces: bool,
+        edit_vertices: bool,
         map: &mut Option<kradiant::map::Map>,
         selection_rgba: [f32; 4],
+        selection_rect_rgba: [f32; 4],
         dt: f32,
     ) {
         use dear_imgui_rs::MouseButton;
@@ -217,11 +243,30 @@ impl View2D {
 
                 if edit_faces {
                     sync_selected_brushes_from_faces(selected_faces, selected_brushes);
-                } else if !selected_faces.is_empty() {
-                    selected_faces.clear();
+                    if !selected_patch_vertices.is_empty() {
+                        selected_patch_vertices.clear();
+                    }
+                } else {
+                    if !selected_faces.is_empty() {
+                        selected_faces.clear();
+                    }
+                    if !edit_vertices && !selected_patch_vertices.is_empty() {
+                        selected_patch_vertices.clear();
+                    }
                 }
 
                 if canvas_interacting {
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Tab)
+                    {
+                        let old_center = self.get_center();
+                        self.ortho_axis = self.ortho_axis.next();
+                        self.set_center(old_center);
+
+                        if let Some(aabb) = self.last_aabb.clone() {
+                            update_last_work_from_aabb(self, &aabb);
+                        }
+                    }
+
                     let wheel = ui.io().mouse_wheel();
                     if wheel != 0.0 {
                         if edit_faces
@@ -249,7 +294,14 @@ impl View2D {
                                 }
 
                                 if delta != Vec3::ZERO {
-                                    undo.push("Move faces", map, selected_brushes, selected_faces, selected_entity);
+                                    undo.push(
+                                        "Move faces",
+                                        map,
+                                        selected_brushes,
+                                        selected_faces,
+                                        selected_patch_vertices,
+                                        selected_entity,
+                                    );
                                     if let Some(map) = map.as_mut() {
                                         if translate_selected_faces(map, selected_faces, delta) {
                                             log_info!(console, "Moved selected faces");
@@ -282,6 +334,7 @@ impl View2D {
                         self.pan[1] += dy;
                         ui.reset_mouse_drag_delta(MouseButton::Right);
                     }
+                    if ui.is_mouse_clicked(MouseButton::Right) {}
                 }
 
                 let mouse = ui.io().mouse_pos();
@@ -312,6 +365,9 @@ impl View2D {
                         || ui.is_mouse_dragging(MouseButton::Left))
                     && ui.is_key_down(dear_imgui_rs::Key::LeftShift)
                 {
+                    //let z_held = ui.is_key_down(dear_imgui_rs::Key::LeftCtrl);
+                    //log_info!(console, "{}", z_held);
+
                     let ray_far = 1.0e6;
                     let (ray_origin, ray_dir) = match self.ortho_axis {
                         Ortho::XY => (
@@ -340,11 +396,56 @@ impl View2D {
                             };
                             if !selected_faces.contains(&sel) {
                                 selected_faces.push(sel);
+                            } else if let Some(i) = selected_faces.iter().position(|f| *f == sel) {
+                                selected_faces.remove(i);
                             }
                             sync_selected_brushes_from_faces(selected_faces, selected_brushes);
                             *selected_entity = Some(entity_idx);
 
                             if let Some(aabb) = selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                            {
+                                self.last_aabb = Some(aabb.clone());
+                                update_last_work_from_aabb(self, &aabb);
+                            }
+                        }
+                    } else if edit_vertices {
+                        let Some(map) = map.as_mut() else {
+                            return;
+                        };
+
+                        // Prefer picking within the current brush selection
+                        let prefer = (!selected_brushes.is_empty()).then_some(&selected_brushes[..]);
+                        if let Some(vsel) = pick_patch_control_vertex_by_screen(
+                            map,
+                            prefer,
+                            self.ortho_axis,
+                            mouse,
+                            p,
+                            [w, h],
+                            self.zoom,
+                            self.pan,
+                            10.0,
+                        ) {
+                            //log_info!(console, "{}", z_held);
+                            let z_held = ui.is_key_down(dear_imgui_rs::Key::Z);
+                            if z_held {
+                                if let Some(i) = selected_patch_vertices.iter().position(|s| *s == vsel) {
+                                    selected_patch_vertices.remove(i);
+                                } else {
+                                    selected_patch_vertices.push(vsel);
+                                }
+                            } else if !selected_patch_vertices.contains(&vsel) {
+                                selected_patch_vertices.push(vsel);
+                            }
+
+                            let brush_sel = (vsel.entity_idx, vsel.brush_idx);
+                            if !selected_brushes.contains(&brush_sel) {
+                                selected_brushes.push(brush_sel);
+                            }
+                            *selected_entity = Some(vsel.entity_idx);
+
+                            if let Some(aabb) =
+                                selection_aabb_patch_vertices_from_map(map, selected_patch_vertices)
                             {
                                 self.last_aabb = Some(aabb.clone());
                                 update_last_work_from_aabb(self, &aabb);
@@ -357,6 +458,8 @@ impl View2D {
                         if let Some(sel) = selected_brush {
                             if !selected_brushes.contains(&sel) {
                                 selected_brushes.push(sel);
+                            } else if let Some(i) = selected_brushes.iter().position(|b| b == &sel) {
+                                selected_brushes.remove(i);
                             }
                             selected_faces.clear();
                             *selected_entity = Some(sel.0);
@@ -388,13 +491,18 @@ impl View2D {
                     self.stretch_delta = Vec3::ZERO;
                     self.rotate = None;
                     self.rotate_angle = 0.0;
+                    let has_vertex_selection = edit_vertices && !selected_patch_vertices.is_empty();
                     let has_selection = if edit_faces {
                         !selected_faces.is_empty()
                     } else {
                         !selected_brushes.is_empty()
                     };
 
-                    self.drag_mode = if has_selection {
+                    self.drag_mode = if ui.is_key_down(dear_imgui_rs::Key::LeftAlt) {
+                        DragMode::RectangularSelection
+                    } else if has_vertex_selection {
+                        DragMode::MoveVertices
+                    } else if has_selection {
                         if let Some(aabb) =
                             selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
                         {
@@ -427,10 +535,18 @@ impl View2D {
                                 DragMode::StretchSelection
                             }
                         } else {
-                            DragMode::NewBrush
+                            if edit_vertices {
+                                DragMode::MoveSelection
+                            } else {
+                                DragMode::NewBrush
+                            }
                         }
                     } else {
-                        DragMode::NewBrush
+                        if edit_vertices {
+                            DragMode::MoveSelection
+                        } else {
+                            DragMode::NewBrush
+                        }
                     };
                     self.drag_start = Some(snapped_i);
                     self.drag_current = Some(snapped_i);
@@ -444,7 +560,9 @@ impl View2D {
                     if self.drag_start.is_some() {
                         self.drag_current = Some(snapped_i);
 
-                            if self.drag_mode == DragMode::MoveSelection {
+                            if self.drag_mode == DragMode::MoveSelection
+                                || self.drag_mode == DragMode::MoveVertices
+                            {
                                 let d = snapped_i - self.drag_start.unwrap();
                                 let delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
                                 self.move_offset = delta;
@@ -513,6 +631,48 @@ impl View2D {
                 if canvas_interacting && ui.is_mouse_released(MouseButton::Left) {
                     if let (Some(start), Some(end)) = (self.drag_start, self.drag_current) {
                             match self.drag_mode {
+                                    DragMode::MoveVertices => {
+                                        let d = end - start;
+                                        if d != Vec2::ZERO {
+                                            let delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
+                                            let can_apply = delta != Vec3::ZERO && !selected_patch_vertices.is_empty();
+
+                                            if can_apply {
+                                                undo.push(
+                                                    "Move vertices",
+                                                    map,
+                                                    selected_brushes,
+                                                    selected_faces,
+                                                    selected_patch_vertices,
+                                                    selected_entity,
+                                                );
+                                            }
+
+                                            if let Some(map) = map.as_mut() {
+                                                if can_apply
+                                                    && translate_selected_patch_vertices(
+                                                        map,
+                                                        selected_patch_vertices,
+                                                        delta,
+                                                    )
+                                                {
+                                                    log_info!(console, "Moved selected vertices");
+                                                }
+
+                                                if can_apply {
+                                                    if let Some(aabb) = selection_aabb_patch_vertices_from_map(
+                                                        map,
+                                                        selected_patch_vertices,
+                                                    ) {
+                                                        self.last_aabb = Some(aabb.clone());
+                                                        update_last_work_from_aabb(self, &aabb);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        self.move_offset = Vec3::ZERO;
+                                    }
                                     DragMode::MoveSelection => {
                                         let d = end - start;
                                         if d != Vec2::ZERO {
@@ -525,7 +685,14 @@ impl View2D {
 
                                             if can_apply {
                                                 let label = if edit_faces { "Move faces" } else { "Move selection" };
-                                                undo.push(label, map, selected_brushes, selected_faces, selected_entity);
+                                                undo.push(
+                                                    label,
+                                                    map,
+                                                    selected_brushes,
+                                                    selected_faces,
+                                                    selected_patch_vertices,
+                                                    selected_entity,
+                                                );
                                             }
 
                                             if let Some(map) = map.as_mut() {
@@ -562,6 +729,229 @@ impl View2D {
                                         self.move_offset = Vec3::ZERO;
                                         log_info!(console, "Dragged selection");
                                     }
+                                    DragMode::RectangularSelection => {
+                                        let min_x = start.x.min(end.x);
+                                        let max_x = start.x.max(end.x);
+                                        let min_y = start.y.min(end.y);
+                                        let max_y = start.y.max(end.y);
+
+                                        if let Some(map) = map.as_mut() {
+                                            let toggle = ui.is_key_down(dear_imgui_rs::Key::Z);
+
+                                            if edit_vertices {
+                                                // Vertex mode: select patch vertices
+                                                if toggle {
+                                                    // Toggle mode: remove vertices from selection if they're in the rect
+                                                    selected_patch_vertices.retain(|sel| {
+                                                        let Some(entity) = map.entities.get(sel.entity_idx) else {
+                                                            return true;
+                                                        };
+                                                        let Some(brush) = entity.brushes.get(sel.brush_idx) else {
+                                                            return true;
+                                                        };
+                                                        let kradiant::map::BrushContent::Patch(patch) = &brush.content else {
+                                                            return true;
+                                                        };
+                                                        let Some(row) = patch.vertices.get(sel.row) else {
+                                                            return true;
+                                                        };
+                                                        let Some(vtx) = row.get(sel.col) else {
+                                                            return true;
+                                                        };
+
+                                                        let p2 = util::project_to_2d(vtx.position, self.ortho_axis);
+
+                                                        !(p2[0] >= min_x && p2[0] <= max_x && p2[1] >= min_y && p2[1] <= max_y)
+                                                    });
+                                                } else {
+                                                    // Normal mode: clear selection and add vertices in the rect
+                                                    selected_patch_vertices.clear();
+                                                    selected_brushes.clear();
+
+                                                    for (entity_idx, entity) in map.entities.iter().enumerate() {
+                                                        for (brush_idx, brush) in entity.brushes.iter().enumerate() {
+                                                            if let kradiant::map::BrushContent::Patch(patch) = &brush.content {
+                                                                for (row_idx, row) in patch.vertices.iter().enumerate() {
+                                                                    for (col_idx, vtx) in row.iter().enumerate() {
+                                                                        let p2 = util::project_to_2d(vtx.position, self.ortho_axis);
+
+                                                                        if p2[0] >= min_x && p2[0] <= max_x && p2[1] >= min_y && p2[1] <= max_y {
+                                                                            let sel = crate::ui::PatchVertexSelection {
+                                                                                entity_idx,
+                                                                                brush_idx,
+                                                                                row: row_idx,
+                                                                                col: col_idx,
+                                                                            };
+                                                                            selected_patch_vertices.push(sel);
+
+                                                                            let brush_sel = (entity_idx, brush_idx);
+                                                                            if !selected_brushes.contains(&brush_sel) {
+                                                                                selected_brushes.push(brush_sel);
+                                                                            }
+                                                                            *selected_entity = Some(entity_idx);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if let Some(aabb) = selection_aabb_patch_vertices_from_map(
+                                                    map,
+                                                    selected_patch_vertices,
+                                                ) {
+                                                    self.last_aabb = Some(aabb.clone());
+                                                    update_last_work_from_aabb(self, &aabb);
+                                                }
+                                            } else if edit_faces {
+                                                // Face mode: select faces within the rectangle
+                                                if toggle {
+                                                    // Toggle mode: remove faces from selection if they're in the rect
+                                                    selected_faces.retain(|sel| {
+                                                        let Some(entity) = map.entities.get(sel.entity_idx) else {
+                                                            return true;
+                                                        };
+                                                        let Some(brush) = entity.brushes.get(sel.brush_idx) else {
+                                                            return true;
+                                                        };
+                                                        let faces: Option<&Vec<Face>> = match &brush.content {
+                                                            BrushContent::Convex(convex) => Some(convex),
+                                                            _ => None,
+                                                        };
+                                                        let Some(faces) = faces else {
+                                                            return true;
+                                                        };
+                                                        if sel.face_idx >= faces.len() {
+                                                            return true;
+                                                        }
+                                                        let face = &faces[sel.face_idx];
+
+                                                        // Only consider faces facing the view
+                                                        if !self.is_face_facing_view(face) {
+                                                            return true; // Keep the face in selection (not in rect)
+                                                        }
+
+                                                        // Check if any vertex of the face is in the rectangle
+                                                        let mut any_in_rect = false;
+                                                        for pos in &face.plane_points {
+                                                            let p2 = util::project_to_2d(*pos, self.ortho_axis);
+                                                            if p2[0] >= min_x && p2[0] <= max_x && p2[1] >= min_y && p2[1] <= max_y {
+                                                                any_in_rect = true;
+                                                                break;
+                                                            }
+                                                        }
+
+                                                        !any_in_rect
+                                                    });
+                                                } else {
+                                                    // Normal mode: clear selection and add faces in the rect
+                                                    selected_faces.clear();
+                                                    selected_brushes.clear();
+
+                                                    for (entity_idx, entity) in map.entities.iter().enumerate() {
+                                                        for (brush_idx, brush) in entity.brushes.iter().enumerate() {
+                                                            let faces: Option<&Vec<Face>> = match &brush.content {
+                                                                BrushContent::Convex(convex) => Some(convex),
+                                                                _ => None,
+                                                            };
+                                                            let Some(faces) = faces else {
+                                                                continue;
+                                                            };
+                                                            for (face_idx, face) in faces.iter().enumerate() {
+                                                                // Only select faces facing the view (not back faces)
+                                                                if !self.is_face_facing_view(face) {
+                                                                    continue;
+                                                                }
+
+                                                                // Check if any vertex of the face is in the rectangle
+                                                                let mut any_in_rect = false;
+                                                                for pos in &face.plane_points {
+                                                                    let p2 = util::project_to_2d(*pos, self.ortho_axis);
+                                                                    if p2[0] >= min_x && p2[0] <= max_x && p2[1] >= min_y && p2[1] <= max_y {
+                                                                        any_in_rect = true;
+                                                                        break;
+                                                                    }
+                                                                }
+
+                                                                if any_in_rect {
+                                                                    let sel = FaceSelection {
+                                                                        entity_idx,
+                                                                        brush_idx,
+                                                                        face_idx,
+                                                                    };
+                                                                    selected_faces.push(sel);
+
+                                                                    let brush_sel = (entity_idx, brush_idx);
+                                                                    if !selected_brushes.contains(&brush_sel) {
+                                                                        selected_brushes.push(brush_sel);
+                                                                    }
+                                                                    *selected_entity = Some(entity_idx);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                sync_selected_brushes_from_faces(selected_faces, selected_brushes);
+                                                if let Some(aabb) = selection_aabb_active(&mut Some(map.clone()), selected_brushes, selected_faces, edit_faces) {
+                                                    self.last_aabb = Some(aabb.clone());
+                                                    update_last_work_from_aabb(self, &aabb);
+                                                }
+                                            } else {
+                                                // Normal mode: select brushes within the rectangle
+                                                if toggle {
+                                                    // Toggle mode: remove brushes from selection if they're in the rect
+                                                    selected_brushes.retain(|&(entity_idx, brush_idx)| {
+                                                        let Some(entity) = map.entities.get(entity_idx) else {
+                                                            return true;
+                                                        };
+                                                        let Some(brush) = entity.brushes.get(brush_idx) else {
+                                                            return true;
+                                                        };
+                                                        let aabb = &brush.aabb;
+
+                                                        // Check if AABB is in the rectangle
+                                                        let (min2, max2) = crate::util::project_aabb_to_2d(&aabb, self.ortho_axis);
+                                                        let aabb_min_x = min2.x as f32;
+                                                        let aabb_max_x = max2.x as f32;
+                                                        let aabb_min_y = min2.y as f32;
+                                                        let aabb_max_y = max2.y as f32;
+
+                                                        // Check if AABB overlaps with selection rectangle
+                                                        !(aabb_max_x >= min_x && aabb_min_x <= max_x && aabb_max_y >= min_y && aabb_min_y <= max_y)
+                                                    });
+                                                } else {
+                                                    // Normal mode: clear selection and add brushes in the rect
+                                                    selected_brushes.clear();
+                                                    selected_faces.clear();
+
+                                                    for (entity_idx, entity) in map.entities.iter().enumerate() {
+                                                        for (brush_idx, brush) in entity.brushes.iter().enumerate() {
+                                                            let aabb = &brush.aabb;
+                                                            // Check if AABB is in the rectangle
+                                                            let (min2, max2) = crate::util::project_aabb_to_2d(&aabb, self.ortho_axis);
+                                                            let aabb_min_x = min2.x as f32;
+                                                            let aabb_max_x = max2.x as f32;
+                                                            let aabb_min_y = min2.y as f32;
+                                                            let aabb_max_y = max2.y as f32;
+
+                                                            // Check if AABB overlaps with selection rectangle
+                                                            if aabb_max_x >= min_x && aabb_min_x <= max_x && aabb_max_y >= min_y && aabb_min_y <= max_y {
+                                                                selected_brushes.push((entity_idx, brush_idx));
+                                                                *selected_entity = Some(entity_idx);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if let Some(aabb) = selection_aabb_from_map(map, selected_brushes) {
+                                                    self.last_aabb = Some(aabb.clone());
+                                                    update_last_work_from_aabb(self, &aabb);
+                                                }
+                                            }
+                                        }
+                                    }
                                 DragMode::NewBrush => {
                                     let can_create = if edit_faces {
                                         selected_faces.is_empty()
@@ -575,6 +965,7 @@ impl View2D {
                                                 map,
                                                 selected_brushes,
                                                 selected_faces,
+                                                selected_patch_vertices,
                                                 selected_entity,
                                             );
                                         }
@@ -623,7 +1014,14 @@ impl View2D {
                                                     StretchMode::Resize => "Resize selection",
                                                 }
                                             };
-                                            undo.push(label, map, selected_brushes, selected_faces, selected_entity);
+                                            undo.push(
+                                                label,
+                                                map,
+                                                selected_brushes,
+                                                selected_faces,
+                                                selected_patch_vertices,
+                                                selected_entity,
+                                            );
                                         }
 
                                         if let Some(map) = map.as_mut() {
@@ -805,7 +1203,14 @@ impl View2D {
                                         };
                                         if map.is_some() && has_selection {
                                             let label = if edit_faces { "Rotate faces" } else { "Rotate selection" };
-                                            undo.push(label, map, selected_brushes, selected_faces, selected_entity);
+                                            undo.push(
+                                                label,
+                                                map,
+                                                selected_brushes,
+                                                selected_faces,
+                                                selected_patch_vertices,
+                                                selected_entity,
+                                            );
                                         }
                                         let axis = rot.axis;
                                         let mut new_sel_aabb: Option<Aabb> = None;
@@ -900,7 +1305,14 @@ impl View2D {
                     }
 
                     if delta != Vec3::ZERO {
-                        undo.push("Move faces", map, selected_brushes, selected_faces, selected_entity);
+                        undo.push(
+                            "Move faces",
+                            map,
+                            selected_brushes,
+                            selected_faces,
+                            selected_patch_vertices,
+                            selected_entity,
+                        );
                         if let Some(map) = map.as_mut() {
                             if translate_selected_faces(map, selected_faces, delta) {
                                 log_info!(console, "Moved selected faces");
@@ -928,6 +1340,9 @@ impl View2D {
                     } else {
                         selected_brushes.clear();
                     }
+                    if edit_vertices {
+                        selected_patch_vertices.clear();
+                    }
                     self.stretch = None;
                     self.stretch_delta = Vec3::ZERO;
                     self.rotate = None;
@@ -953,6 +1368,7 @@ impl View2D {
                                 map,
                                 selected_brushes,
                                 selected_faces,
+                                selected_patch_vertices,
                                 selected_entity,
                             );
                         }
@@ -991,6 +1407,7 @@ impl View2D {
                         }
 
                         selected_brushes.clear();
+                        selected_patch_vertices.clear();
                         *selected_entity = None;
                     }
                 }
@@ -1072,7 +1489,7 @@ impl View2D {
                         };
 
                         match self.drag_mode {
-                                DragMode::MoveSelection => {
+                                DragMode::MoveSelection | DragMode::MoveVertices => {
                                     let (a, b) = if let Some(sel) =
                                         selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
                                     {
@@ -1190,6 +1607,15 @@ impl View2D {
                                         delta_info,
                                     );
                                 }
+                            }
+                            DragMode::RectangularSelection => {
+                                let min = start.min(end);
+                                let max = start.max(end);
+                                let tl = to_screen(min);
+                                let br = to_screen(max);
+                                let (tr, bl) = util::other_corners(tl, br);
+                                let rect_col = util::adjust_color_opacity(util::imgui_color_to_u32(selection_rect_rgba), 0.4);
+                                draw.add_quad_filled(tl, tr, br, bl, rect_col);
                             }
                         }
                     }
@@ -1368,6 +1794,166 @@ fn selection_aabb_active(
     } else {
         selection_aabb(&*map, selected_brushes)
     }
+}
+
+fn selection_aabb_patch_vertices_from_map(
+    map: &kradiant::map::Map,
+    selected: &[crate::ui::PatchVertexSelection],
+) -> Option<Aabb> {
+    if selected.is_empty() {
+        return None;
+    }
+
+    let mut out = Aabb {
+        min: Vec3::splat(f32::MAX),
+        max: Vec3::splat(f32::MIN),
+    };
+    let mut any = false;
+
+    for sel in selected {
+        let Some(entity) = map.entities.get(sel.entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get(sel.brush_idx) else {
+            continue;
+        };
+        let kradiant::map::BrushContent::Patch(patch) = &brush.content else {
+            continue;
+        };
+        let Some(row) = patch.vertices.get(sel.row) else {
+            continue;
+        };
+        let Some(vtx) = row.get(sel.col) else {
+            continue;
+        };
+        out.min = out.min.min(vtx.position);
+        out.max = out.max.max(vtx.position);
+        any = true;
+    }
+
+    any.then_some(out)
+}
+
+fn translate_selected_patch_vertices(
+    map: &mut kradiant::map::Map,
+    selected: &[crate::ui::PatchVertexSelection],
+    delta: Vec3,
+) -> bool {
+    if selected.is_empty() || delta == Vec3::ZERO {
+        return false;
+    }
+
+    use std::collections::BTreeMap;
+    let mut by_brush: BTreeMap<(usize, usize), Vec<(usize, usize)>> = BTreeMap::new();
+    for sel in selected {
+        by_brush
+            .entry((sel.entity_idx, sel.brush_idx))
+            .or_default()
+            .push((sel.row, sel.col));
+    }
+
+    let mut any = false;
+    for ((entity_idx, brush_idx), mut verts) in by_brush {
+        verts.sort_unstable();
+        verts.dedup();
+
+        let Some(entity) = map.entities.get_mut(entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+            continue;
+        };
+        let kradiant::map::BrushContent::Patch(patch) = &mut brush.content else {
+            continue;
+        };
+
+        let mut brush_any = false;
+        for (row, col) in verts {
+            let Some(mut vtx) = patch.vertices.get(row).and_then(|r| r.get(col)).copied() else {
+                continue;
+            };
+            vtx.position += delta;
+            patch.update_vertex(&mut map.generation, row, col, vtx);
+            brush_any = true;
+        }
+
+        if brush_any {
+            if let Some((_mesh, aabb, _edges)) = patch.get_mesh_aabb_wire() {
+                brush.aabb = aabb.clone();
+            }
+            any = true;
+        }
+    }
+
+    any
+}
+
+fn pick_patch_control_vertex_by_screen(
+    map: &kradiant::map::Map,
+    prefer: Option<&[(usize, usize)]>,
+    axis: Ortho,
+    mouse_screen: [f32; 2],
+    origin: [f32; 2],
+    size: [f32; 2],
+    zoom: f32,
+    pan: [f32; 2],
+    radius_px: f32,
+) -> Option<crate::ui::PatchVertexSelection> {
+    let r2 = radius_px.max(1.0) * radius_px.max(1.0);
+    let mut best: Option<(crate::ui::PatchVertexSelection, f32)> = None;
+
+    let mut visit_patch = |entity_idx: usize, brush_idx: usize, patch: &kradiant::map::Patch| {
+        for (row_idx, row) in patch.vertices.iter().enumerate() {
+            for (col_idx, v) in row.iter().enumerate() {
+                let p2 = crate::util::project_to_2d(v.position, axis);
+                let s = crate::util::world_to_screen(p2, origin, size[0], size[1], zoom, pan);
+                let dx = s[0] - mouse_screen[0];
+                let dy = s[1] - mouse_screen[1];
+                let d2 = dx * dx + dy * dy;
+                if d2 > r2 {
+                    continue;
+                }
+
+                let sel = crate::ui::PatchVertexSelection {
+                    entity_idx,
+                    brush_idx,
+                    row: row_idx,
+                    col: col_idx,
+                };
+                match best {
+                    None => best = Some((sel, d2)),
+                    Some((_, best_d2)) if d2 < best_d2 => best = Some((sel, d2)),
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    if let Some(prefer) = prefer {
+        for &(entity_idx, brush_idx) in prefer {
+            let Some(entity) = map.entities.get(entity_idx) else {
+                continue;
+            };
+            let Some(brush) = entity.brushes.get(brush_idx) else {
+                continue;
+            };
+            let kradiant::map::BrushContent::Patch(patch) = &brush.content else {
+                continue;
+            };
+            visit_patch(entity_idx, brush_idx, patch);
+        }
+    } else {
+        for (entity_idx, entity) in map.entities.iter().enumerate() {
+            for (brush_idx, brush) in entity.brushes.iter().enumerate() {
+                let kradiant::map::BrushContent::Patch(patch) = &brush.content else {
+                    continue;
+                };
+                visit_patch(entity_idx, brush_idx, patch);
+            }
+        }
+    }
+
+    best.map(|(sel, _)| sel)
 }
 
 fn click_in_aabb_2d(aabb: &Aabb, pt: Vec2, ortho: Ortho) -> bool {

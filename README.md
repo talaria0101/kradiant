@@ -11,6 +11,13 @@ A mapping tool for CoD 1/UO written in Rust, inspired by [netradiant-custom](htt
 ## Work in Progress
 - The editor
 
+## TODO
+- **Vertex deletion with welding**: Implement algorithm to delete selected patch vertices and weld the remaining vertices together
+- **Face deletion with joining**: Implement algorithm to delete selected faces and join the remaining faces at the center of the deleted face
+- **Context menu in 2D view**
+- **Flat shading in 3D view**
+- **Selection highlight in 3D view**
+
 ## FAQs
 <details><summary>FAQs</summary>
 No questions yet...
