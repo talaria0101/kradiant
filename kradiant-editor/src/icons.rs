@@ -15,6 +15,7 @@ pub struct EditorIcons {
     pub edit_face: Option<TextureId>,
     pub edit_edge: Option<TextureId>,
     pub edit_vertex: Option<TextureId>,
+    pub donate: Option<TextureId>,
 }
 
 impl EditorIcons {
@@ -39,6 +40,7 @@ impl Default for EditorIcons {
             edit_face: None,
             edit_edge: None,
             edit_vertex: None,
+            donate: None,
         }
     }
 }

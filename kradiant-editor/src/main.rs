@@ -19,7 +19,6 @@ use glutin::display::GetGlDisplay;
 use glutin::prelude::*;
 use glutin::surface::{SurfaceAttributesBuilder, WindowSurface};
 use glutin_winit::DisplayBuilder;
-use kradiant::map::BrushContent;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -31,6 +30,7 @@ use crate::config::EditorConfig;
 use crate::icons::EditorIcons;
 use crate::images::EditorImages;
 use crate::viewport2d::Viewport2D;
+use crate::viewport3d::{LitVertex, Viewport3D};
 
 #[macro_use]
 mod ui;
@@ -88,14 +88,6 @@ struct AppState {
     needs_redraw: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct View3dCache {
-    map_present: bool,
-    map_ptr: usize,
-    map_generation: u64,
-    map_revision: u64,
-}
-
 pub struct RenderBackend<'a> {
     pub gl: &'a glow::Context,
     pub wire_program: glow::Program,
@@ -103,6 +95,11 @@ pub struct RenderBackend<'a> {
     pub color_loc: glow::UniformLocation,
     pub vao: glow::NativeVertexArray,
     pub vbo: glow::Buffer,
+    pub lit_program: glow::NativeProgram,
+    pub lit_mvp_loc: glow::NativeUniformLocation,
+    pub lit_color_loc: glow::NativeUniformLocation,
+    pub lit_ldir_loc: glow::NativeUniformLocation,
+    pub lit_amb_loc: glow::NativeUniformLocation,
 }
 
 impl RenderBackend<'_> {
@@ -128,210 +125,74 @@ impl RenderBackend<'_> {
             self.gl.draw_arrays(glow::LINES, 0, vertices.len() as i32);
         }
     }
-}
 
-pub struct Viewport3D {
-    line_vertices: Vec<Vec3>,
-    fbo: glow::Framebuffer,
-    tex: glow::Texture,
-    rbo: glow::Renderbuffer, // depth
-    fbo_size: [u32; 2],
-    cache: Option<View3dCache>,
-}
+    /*pub unsafe fn draw_triangles(
+        &self,
+        vertices: &[Vec3],
+        color: [f32; 4],
+        mvp: glam::Mat4,
+    ) {
+        if vertices.is_empty() {
+            return;
+        }
 
-impl Viewport3D {
-    pub fn render(&mut self, backend: &mut RenderBackend<'_>, editor: &mut ui::EditorState) {
         unsafe {
-            use glow::HasContext;
+            self.gl.use_program(Some(self.wire_program)); // fine for now
+            self.gl
+            .uniform_matrix_4_f32_slice(Some(&self.mvp_loc), false, &mvp.to_cols_array());
+            self.gl.uniform_4_f32_slice(Some(&self.color_loc), &color);
 
-            let r3 = editor.view3d.rect;
-            if r3[2] <= 10.0 || r3[3] <= 10.0 {
-                return;
-            }
+            self.gl.bind_vertex_array(Some(self.vao));
+            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
 
-            let fbo_w = r3[2] as u32;
-            let fbo_h = r3[3] as u32;
+            self.gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(vertices),
+                                         glow::STREAM_DRAW,
+            );
 
-            if [fbo_w, fbo_h] != self.fbo_size {
-                self.fbo_size = [fbo_w, fbo_h];
-                backend.gl.bind_texture(glow::TEXTURE_2D, Some(self.tex));
-                backend.gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::RGBA as i32,
-                    fbo_w as i32,
-                    fbo_h as i32,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(None),
-                );
-                backend
-                    .gl
-                    .bind_renderbuffer(glow::RENDERBUFFER, Some(self.rbo));
-                backend.gl.renderbuffer_storage(
-                    glow::RENDERBUFFER,
-                    glow::DEPTH_COMPONENT16,
-                    fbo_w as i32,
-                    fbo_h as i32,
-                );
-            }
+            self.gl
+            .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
+            self.gl.enable_vertex_attrib_array(0);
 
-            // Geometry cache
-            let map_present = editor.map.is_some();
-            let map_ptr = editor
-                .map
-                .as_ref()
-                .map(|m| m as *const _ as usize)
-                .unwrap_or(0);
-            let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0u64);
-            let map_revision = editor.map_revision;
+            self.gl.draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
+        }
+    }*/
 
-            let need_rebuild = match self.cache {
-                Some(c) => {
-                    c.map_present != map_present
-                        || c.map_ptr != map_ptr
-                        || c.map_generation != map_generation
-                        || c.map_revision != map_revision
-                }
-                None => true,
-            };
+    pub unsafe fn draw_triangles_lit(
+        &self,
+        vertices: &[LitVertex],
+        color: [f32; 4],
+        mvp: glam::Mat4,
+        ambient: f32,
+        light_dir: Vec3,
+    ) {
+        if vertices.is_empty() { return; }
 
-            if need_rebuild {
-                let prev_revision = self.cache.map(|c| c.map_revision).unwrap_or(0);
-                self.line_vertices.clear();
+        unsafe {
+            self.gl.use_program(Some(self.lit_program));
+            self.gl.uniform_matrix_4_f32_slice(Some(&self.lit_mvp_loc), false, &mvp.to_cols_array());
+            self.gl.uniform_4_f32_slice(Some(&self.lit_color_loc), &color);
+            self.gl.uniform_3_f32(Some(&self.lit_ldir_loc), light_dir.x, light_dir.y, light_dir.z);
+            self.gl.uniform_1_f32(Some(&self.lit_amb_loc), ambient);
 
-                let mut bounds_min = Vec3::splat(f32::INFINITY);
-                let mut bounds_max = Vec3::splat(f32::NEG_INFINITY);
+            self.gl.bind_vertex_array(Some(self.vao));
+            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+            self.gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(vertices),
+                                         glow::STREAM_DRAW,
+            );
 
-                if let Some(map) = editor.map.as_mut() {
-                    // Cheap reserve to reduce reallocs on medium maps
-                    self.line_vertices.reserve(32_768);
+            // stride = 24, pos at offset 0, normal at offset 12
+            self.gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 24, 0);
+            self.gl.enable_vertex_attrib_array(0);
+            self.gl.vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, 24, 12);
+            self.gl.enable_vertex_attrib_array(1);
 
-                    for ent in &mut map.entities {
-                        for brush in &mut ent.brushes {
-                            match &mut brush.content {
-                                BrushContent::Convex(_) => {
-                                    let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
-                                        continue;
-                                    };
-                                    bounds_min = bounds_min.min(aabb.min);
-                                    bounds_max = bounds_max.max(aabb.max);
-                                    for (positions, _) in polys {
-                                        if positions.len() < 2 {
-                                            continue;
-                                        }
-                                        for i in 0..positions.len() {
-                                            let a = positions[i];
-                                            let b = positions[(i + 1) % positions.len()];
-                                            self.line_vertices.push(a);
-                                            self.line_vertices.push(b);
-                                        }
-                                    }
-                                }
-                                BrushContent::Patch(patch) => {
-                                    let Some((mesh, patch_aabb, edges)) =
-                                        patch.get_mesh_aabb_wire()
-                                    else {
-                                        continue;
-                                    };
-                                    bounds_min = bounds_min.min(patch_aabb.min);
-                                    bounds_max = bounds_max.max(patch_aabb.max);
-                                    let positions = mesh.positions.as_slice();
-                                    for &(a, b) in edges {
-                                        let ia = a as usize;
-                                        let ib = b as usize;
-                                        if ia >= positions.len() || ib >= positions.len() {
-                                            continue;
-                                        }
-                                        self.line_vertices.push(positions[ia]);
-                                        self.line_vertices.push(positions[ib]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            self.gl.draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
 
-                self.cache = Some(View3dCache {
-                    map_present,
-                    map_ptr,
-                    map_generation,
-                    map_revision,
-                });
-
-                // Auto-frame camera on new map load (pointer change)
-                if map_ptr != 0
-                    && map_revision != prev_revision
-                    && bounds_min.x.is_finite()
-                    && bounds_max.x.is_finite()
-                {
-                    let center = (bounds_min + bounds_max) * 0.5;
-                    let ext = bounds_max - bounds_min;
-                    let radius = (ext.length() * 0.5).max(64.0);
-
-                    let offset = Vec3::new(-1.0, -1.0, 0.65).normalize() * (radius * 2.5);
-                    let eye = center + offset;
-                    let dir = (center - eye).normalize();
-                    let yaw = dir.y.atan2(dir.x);
-                    let pitch = dir.z.asin();
-
-                    editor.view3d.cam.pos = eye;
-                    editor.view3d.cam.angles = Vec3::new(yaw, pitch, 0.0);
-                    if editor.view3d.cam.zoom <= 1.0 {
-                        editor.view3d.cam.zoom = (radius * 0.08).clamp(16.0, 512.0);
-                    }
-                }
-            }
-
-            // Draw into FBO
-            backend
-                .gl
-                .bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
-            backend.gl.viewport(0, 0, fbo_w as i32, fbo_h as i32);
-
-            let view_bg = editor.palette.view2d_bg;
-            backend
-                .gl
-                .clear_color(view_bg[0], view_bg[1], view_bg[2], view_bg[3]);
-            backend
-                .gl
-                .clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-
-            backend.gl.enable(glow::DEPTH_TEST);
-            backend.gl.depth_func(glow::LEQUAL);
-
-            let cam = &editor.view3d.cam;
-            let (yaw, pitch) = (cam.angles.x, cam.angles.y);
-            let forward = Vec3::new(
-                yaw.cos() * pitch.cos(),
-                yaw.sin() * pitch.cos(),
-                pitch.sin(),
-            )
-            .normalize();
-            let eye = cam.pos;
-            let target = eye + forward;
-            let world_up = Vec3::Z;
-            let mut right = forward.cross(world_up);
-            if right.length_squared() <= 1e-8 {
-                right = Vec3::X;
-            }
-            right = right.normalize();
-            let up = right.cross(forward).normalize_or_zero();
-
-            let view = glam::Mat4::look_at_rh(eye, target, up);
-            let aspect = fbo_w as f32 / (fbo_h as f32).max(1.0);
-            let fov = editor.config.view3d_fov.to_radians().clamp(0.1, 3.0);
-            let proj = glam::Mat4::perspective_rh_gl(fov, aspect, 4.0, 100_000.0);
-            let mvp = proj * view;
-
-            // Map wire
-            let geom_col = editor.palette.view2d_geometry;
-            backend.draw_lines(&self.line_vertices, geom_col, mvp);
-
-            backend.gl.disable(glow::DEPTH_TEST);
-            backend.gl.use_program(None);
-            backend.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.disable_vertex_attrib_array(1); // don't leave attrib 1 enabled for wire draws
         }
     }
 }
@@ -689,6 +550,7 @@ impl AppState {
             (editor_icons::ICON_MODIFY_FACES_DDS, "edit_face"),
             (editor_icons::ICON_MODIFY_EDGES_DDS, "edit_edge"),
             (editor_icons::ICON_MODIFY_VERTICES_DDS, "edit_vertex"),
+            (editor_icons::ICON_DONATE_DDS, "donate"),
         ];
 
         let mut icon_ids = Vec::new();
@@ -751,17 +613,11 @@ impl AppState {
         editor.icons.edit_face = icon_ids.get(10).copied();
         editor.icons.edit_edge = icon_ids.get(11).copied();
         editor.icons.edit_vertex = icon_ids.get(12).copied();
+        editor.icons.donate = icon_ids.get(13).copied();
 
         let vp2d = Viewport2D::new(view2d_fbo, view2d_fbo_size, view2d_rbo, view2d_tex);
 
-        let vp3d = Viewport3D {
-            line_vertices: vec![],
-            fbo: view3d_fbo,
-            fbo_size: view3d_fbo_size,
-            tex: view3d_tex,
-            rbo: view3d_rbo,
-            cache: None,
-        };
+        let vp3d = Viewport3D::new(vec![], vec![], view3d_fbo, view3d_fbo_size, view3d_tex, view3d_rbo, None);
 
         Self {
             window,
@@ -837,6 +693,52 @@ impl AppState {
                 .insert(material, (tid, [img.width as f32, img.height as f32]));
         }
 
+        let lit_program = unsafe {
+            let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
+            self.gl.shader_source(vert, r#"
+            #version 120
+            attribute vec3 a_pos;
+            attribute vec3 a_normal;
+            uniform mat4 u_mvp;
+            varying vec3 v_normal;
+            void main() {
+            gl_Position = u_mvp * vec4(a_pos, 1.0);
+            v_normal = a_normal;
+        }
+        "#);
+            self.gl.compile_shader(vert);
+
+            let frag = self.gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
+            self.gl.shader_source(frag, r#"
+            #version 120
+            uniform vec4 u_color;
+            uniform vec3 u_light_dir;   // normalized, world space
+            uniform float u_ambient;
+            varying vec3 v_normal;
+            void main() {
+            vec3 n = normalize(v_normal);
+            // Sample both sides so back-faces aren't black
+            float d = max(dot(n, u_light_dir), max(dot(-n, u_light_dir), 0.0));
+            float light = u_ambient + (1.0 - u_ambient) * d;
+            gl_FragColor = vec4(u_color.rgb * light, u_color.a);
+        }
+        "#);
+            self.gl.compile_shader(frag);
+
+            let prog = self.gl.create_program().unwrap();
+            self.gl.attach_shader(prog, vert);
+            self.gl.attach_shader(prog, frag);
+            self.gl.bind_attrib_location(prog, 0, "a_pos");
+            self.gl.bind_attrib_location(prog, 1, "a_normal");
+            self.gl.link_program(prog);
+            prog
+        };
+
+        let lit_mvp_loc   = unsafe { self.gl.get_uniform_location(lit_program, "u_mvp").unwrap() };
+        let lit_color_loc = unsafe { self.gl.get_uniform_location(lit_program, "u_color").unwrap() };
+        let lit_ldir_loc  = unsafe { self.gl.get_uniform_location(lit_program, "u_light_dir").unwrap() };
+        let lit_amb_loc   = unsafe { self.gl.get_uniform_location(lit_program, "u_ambient").unwrap() };
+
         self.platform.prepare_frame(&self.window, &mut self.imgui);
         let ui = self.imgui.frame();
         ui::draw_editor(ui, &mut self.editor, delta);
@@ -880,6 +782,11 @@ impl AppState {
                 color_loc: self.color_loc.clone(),
                 vao: self.vao,
                 vbo: self.vbo,
+                lit_program,
+                lit_mvp_loc,
+                lit_color_loc,
+                lit_ldir_loc,
+                lit_amb_loc,
             };
             self.vp3d.render(&mut backend, &mut self.editor);
             self.vp2d.render(&mut backend, &mut self.editor);

@@ -80,6 +80,19 @@ fn icon_button_toggle(
     clicked
 }
 
+fn icon_button_click(ui: &Ui, id: &str, icon: Option<TextureId>, fallback_label: &str, tooltip: &str) -> bool
+{
+    let clicked = if let Some(tid) = icon {
+        ui.image_button_config(id, tid, [24.0, 24.0]).build()
+    } else {
+        ui.button(fallback_label)
+    };
+    if ui.is_item_hovered() {
+        ui.tooltip_text(tooltip);
+    }
+    clicked
+}
+
 /// Helper function to check if a key combination was pressed.
 fn key_combo_pressed(ui: &Ui, main_key: dear_imgui_rs::Key, modifiers: u32) -> bool {
     if !ui.is_key_pressed(main_key) {
@@ -116,7 +129,7 @@ pub struct EditorState {
     pub selection_rect_rgba: [f32; 4],
     pub tex_browser: TextureBrowser,
     pub tex_filter: String,
-    pub tex_selected: Option<String>,
+    //pub tex_selected: Option<String>, // useless for now
     pub tex_tile_size: f32,
     pub console: ConsoleLogger,
     pub con_filter: String,
@@ -186,7 +199,7 @@ impl Default for EditorState {
             selection_rect_rgba: [0.7, 0.7, 0.7, 1.0],
             tex_browser: TextureBrowser::default(),
             tex_filter: String::new(),
-            tex_selected: None,
+            //tex_selected: None,
             tex_tile_size: 64.0,
             console: ConsoleLogger::default(),
             con_filter: String::new(),
@@ -747,6 +760,14 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             } else {
                 state.selected_faces.clear();
             }
+        }
+
+        ui.same_line();
+        ui.separator_vertical();
+        ui.same_line();
+
+        if icon_button_click(ui, "##donate", state.icons.donate, "Donate", "Support the development by donating") {
+            state.show_about = true;
         }
 
         if ui.is_key_pressed(dear_imgui_rs::Key::F) {
