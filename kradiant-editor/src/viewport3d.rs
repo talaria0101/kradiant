@@ -249,7 +249,7 @@ impl Viewport3D {
                 }
                 h
             };
-            println!("current_selection_hash: {}\nlast_selection_hash: {}", current_selection_hash, self.last_selection_hash);
+            //println!("current_selection_hash: {}\nlast_selection_hash: {}", current_selection_hash, self.last_selection_hash);
 
             if current_selection_hash != self.last_selection_hash {
                 self.tri_vertices_selected.clear();
@@ -342,6 +342,8 @@ impl Viewport3D {
 
             backend.gl.enable(glow::DEPTH_TEST);
             backend.gl.depth_func(glow::LEQUAL);
+            backend.gl.enable(glow::CULL_FACE);
+            backend.gl.cull_face(glow::BACK);
 
             let cam = &editor.view3d.cam;
             let (yaw, pitch) = (cam.angles.x, cam.angles.y);
@@ -377,8 +379,8 @@ impl Viewport3D {
             if !self.tri_vertices_selected.is_empty() {
                 backend.gl.enable(glow::BLEND);
                 backend.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-                // Disable depth write so the tint doesn't occlude the wire on top
-                backend.gl.depth_mask(false);
+                // Disable depth test so the tint is visible through geometry
+                backend.gl.disable(glow::DEPTH_TEST);
 
                 let red_tint = [1.0, 0.25, 0.25, 0.65];
                 backend.draw_triangles_lit(
@@ -389,10 +391,11 @@ impl Viewport3D {
                     light_dir,
                 );
 
-                backend.gl.depth_mask(true);
+                backend.gl.enable(glow::DEPTH_TEST);
                 backend.gl.disable(glow::BLEND);
             }
 
+            backend.gl.disable(glow::CULL_FACE);
             backend.gl.disable(glow::DEPTH_TEST);
             backend.gl.use_program(None);
             backend.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
