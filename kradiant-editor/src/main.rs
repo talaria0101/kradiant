@@ -617,7 +617,7 @@ impl AppState {
 
         let vp2d = Viewport2D::new(view2d_fbo, view2d_fbo_size, view2d_rbo, view2d_tex);
 
-        let vp3d = Viewport3D::new(vec![], vec![], view3d_fbo, view3d_fbo_size, view3d_tex, view3d_rbo, None);
+        let vp3d = Viewport3D::new(vec![], vec![], vec![], view3d_fbo, view3d_fbo_size, view3d_tex, view3d_rbo, None);
 
         Self {
             window,

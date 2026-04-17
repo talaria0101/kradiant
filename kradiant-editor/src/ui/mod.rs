@@ -119,6 +119,7 @@ pub struct EditorState {
     pub toolbar_height: f32,
     pub map_path: String,
     pub map_revision: u64,
+    //pub map_selection: u64,
     pub undo: UndoRedo,
     pub view2d: View2D,
     pub view3d: View3D,
@@ -189,6 +190,7 @@ impl Default for EditorState {
             toolbar_height: 0.0,
             map_path: String::new(),
             map_revision: 0,
+            //map_selection: 0,
             undo: UndoRedo::default(),
             view2d: View2D::default(),
             view3d: View3D::default(),
@@ -270,6 +272,7 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         let map = &mut state.map;
         let selection_rgba = state.selection_rgba;
         let selection_rect_rgba = state.selection_rect_rgba;
+        //let map_selection = &mut state.map_selection;
 
         view2d_ref.draw_impl(
             ui,
@@ -290,6 +293,7 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             selection_rgba,
             selection_rect_rgba,
             dt,
+            //map_selection,
         );
     }
 

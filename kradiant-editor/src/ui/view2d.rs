@@ -10,6 +10,7 @@ use glam::{Quat, Vec2, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::map::{BrushContent, BrushId, Face};
 use kradiant::map_utils::format_float;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Ortho {
@@ -101,6 +102,12 @@ pub struct View2D {
     pub last_aabb: Option<Aabb>,
     // Selection rectangle for rectangular selection mode
     //pub selection_rect: Option<[Vec2; 2]>,
+    /// Brushes touched during current selection drag (to avoid toggling multiple times)
+    pub selection_drag_touched: Option<HashSet<(usize, usize)>>,
+    /// Faces touched during current selection drag
+    pub selection_drag_touched_faces: Option<HashSet<FaceSelection>>,
+    /// Patch vertices touched during current selection drag
+    pub selection_drag_touched_verts: Option<HashSet<usize>>, // stores hashed selection
 }
 
 impl Default for View2D {
@@ -122,6 +129,9 @@ impl Default for View2D {
             work_pos: Vec3::ZERO,
             work_depth: Vec3::ZERO,
             last_aabb: None,
+            selection_drag_touched: None,
+            selection_drag_touched_faces: None,
+            selection_drag_touched_verts: None,
         }
     }
 }
@@ -360,14 +370,19 @@ impl View2D {
                 };
 
                 // Shift+LMouse for selection
-                if canvas_interacting
+                let shift_selecting = canvas_interacting
                     && (ui.is_mouse_clicked(MouseButton::Left)
                         || ui.is_mouse_dragging(MouseButton::Left))
-                    && ui.is_key_down(dear_imgui_rs::Key::LeftShift)
-                {
-                    //let z_held = ui.is_key_down(dear_imgui_rs::Key::LeftCtrl);
-                    //log_info!(console, "{}", z_held);
+                    && ui.is_key_down(dear_imgui_rs::Key::LeftShift);
 
+                if shift_selecting && ui.is_mouse_clicked(MouseButton::Left) {
+                    // Start new selection drag - clear touched sets
+                    self.selection_drag_touched = Some(HashSet::new());
+                    self.selection_drag_touched_faces = Some(HashSet::new());
+                    self.selection_drag_touched_verts = Some(HashSet::new());
+                }
+
+                if shift_selecting {
                     let ray_far = 1.0e6;
                     let (ray_origin, ray_dir) = match self.ortho_axis {
                         Ortho::XY => (
@@ -394,10 +409,14 @@ impl View2D {
                                 brush_idx,
                                 face_idx,
                             };
-                            if !selected_faces.contains(&sel) {
-                                selected_faces.push(sel);
-                            } else if let Some(i) = selected_faces.iter().position(|f| *f == sel) {
-                                selected_faces.remove(i);
+                            // Only toggle if not already touched this drag
+                            let touched = self.selection_drag_touched_faces.get_or_insert_with(HashSet::new);
+                            if touched.insert(sel) {
+                                if !selected_faces.contains(&sel) {
+                                    selected_faces.push(sel);
+                                } else if let Some(i) = selected_faces.iter().position(|f| *f == sel) {
+                                    selected_faces.remove(i);
+                                }
                             }
                             sync_selected_brushes_from_faces(selected_faces, selected_brushes);
                             *selected_entity = Some(entity_idx);
@@ -456,10 +475,14 @@ impl View2D {
                             editing::pick_brush_by_ray(m, ray_origin, ray_dir, editing::PickMask::ALL)
                         });
                         if let Some(sel) = selected_brush {
-                            if !selected_brushes.contains(&sel) {
-                                selected_brushes.push(sel);
-                            } else if let Some(i) = selected_brushes.iter().position(|b| b == &sel) {
-                                selected_brushes.remove(i);
+                            // Only toggle if not already touched this drag
+                            let touched = self.selection_drag_touched.get_or_insert_with(HashSet::new);
+                            if touched.insert(sel) {
+                                if !selected_brushes.contains(&sel) {
+                                    selected_brushes.push(sel);
+                                } else if let Some(i) = selected_brushes.iter().position(|b| b == &sel) {
+                                    selected_brushes.remove(i);
+                                }
                             }
                             selected_faces.clear();
                             *selected_entity = Some(sel.0);
@@ -1273,6 +1296,9 @@ impl View2D {
                     self.stretch_delta = Vec3::ZERO;
                     self.rotate = None;
                     self.rotate_angle = 0.0;
+                    self.selection_drag_touched = None;
+                    self.selection_drag_touched_faces = None;
+                    self.selection_drag_touched_verts = None;
                 }
 
                 if ui.is_window_hovered()
