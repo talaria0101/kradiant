@@ -1,5 +1,7 @@
 //! 3D Viewport
 
+use std::collections::HashSet;
+
 use glam::Vec3;
 use kradiant::map::BrushContent;
 use kradiant::geometry::tessellate_patch;
@@ -247,6 +249,16 @@ impl Viewport3D {
                 for &&(e, b) in &items {
                     h = h.wrapping_mul(31).wrapping_add((e as u64) * 1000003 + (b as u64));
                 }
+
+                let mut faces: Vec<_> = editor.selected_faces.iter().collect();
+                faces.sort_by_key(|f| (f.entity_idx, f.brush_idx, f.face_idx));
+                for f in &faces {
+                    h = h.wrapping_mul(31)
+                    .wrapping_add((f.entity_idx as u64) * 1000003)
+                    .wrapping_add((f.brush_idx as u64) * 1000001)
+                    .wrapping_add(f.face_idx as u64);
+                }
+
                 h
             };
             //println!("current_selection_hash: {}\nlast_selection_hash: {}", current_selection_hash, self.last_selection_hash);
@@ -255,11 +267,40 @@ impl Viewport3D {
                 self.tri_vertices_selected.clear();
 
                 if let Some(map) = editor.map.as_mut() {
+                    let selected_face_set: HashSet<(usize, usize, usize)> = editor
+                    .selected_faces
+                    .iter()
+                    .map(|f| (f.entity_idx, f.brush_idx, f.face_idx))
+                    .collect();
+
                     for (entity_idx, ent) in map.entities.iter_mut().enumerate() {
                         for (brush_idx, brush) in ent.brushes.iter_mut().enumerate() {
-                            let is_selected = editor.selected_brushes.contains(&(entity_idx, brush_idx));
+                            let is_brush_selected = editor.selected_brushes.contains(&(entity_idx, brush_idx));
 
-                            if !is_selected {
+                            let mut faces_to_highlight: Vec<usize> = Vec::new();
+
+                            if editor.edit_faces {
+                                // Face edit mode: ONLY highlight selected faces
+                                for face_sel in &editor.selected_faces {
+                                    if face_sel.entity_idx == entity_idx && face_sel.brush_idx == brush_idx {
+                                        faces_to_highlight.push(face_sel.face_idx);
+                                    }
+                                }
+                            } else {
+                                // Brush edit mode: highlight all faces of selected brushes
+                                if is_brush_selected {
+                                    match &brush.content {
+                                        BrushContent::Convex(faces) => {
+                                            faces_to_highlight.extend(0..faces.len());
+                                        }
+                                        BrushContent::Patch(_) => {
+                                            faces_to_highlight.push(0); // whole patch
+                                        }
+                                    }
+                                }
+                            }
+
+                            if faces_to_highlight.is_empty() {
                                 continue;
                             }
 
@@ -269,10 +310,15 @@ impl Viewport3D {
                                         continue;
                                     };
 
-                                    // replace the existing tri_vertices push block:
-                                    for (positions, _) in polys {
-                                        if positions.len() < 3 { continue; }
-                                        // face normal from first triangle of this polygon
+                                    for &face_idx in &faces_to_highlight {
+                                        if face_idx >= polys.len() {
+                                            continue;
+                                        }
+                                        let (positions, _) = &polys[face_idx];
+                                        if positions.len() < 3 {
+                                            continue;
+                                        }
+
                                         let e1 = positions[1] - positions[0];
                                         let e2 = positions[2] - positions[0];
                                         let n = e1.cross(e2).normalize_or_zero();
@@ -289,8 +335,6 @@ impl Viewport3D {
                                     }
                                 }
                                 BrushContent::Patch(patch) => {
-                                    //let positions = mesh.positions.as_slice();
-
                                     if let Ok(tess) = tessellate_patch(patch) {
                                         let pos = &tess.positions;
                                         let indices = &tess.indices;
@@ -308,7 +352,6 @@ impl Viewport3D {
                                             let v1 = pos[i1];
                                             let v2 = pos[i2];
 
-                                            // Flat face normal (same as convex brushes)
                                             let n = (v1 - v0).cross(v2 - v0).normalize_or_zero();
                                             let nf = [n.x, n.y, n.z];
 
