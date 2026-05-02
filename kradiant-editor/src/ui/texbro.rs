@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use crate::config::RenderMode;
 use crate::util;
 
 /// GPU texture handle + metadata needed for 3D viewport rendering.
@@ -354,31 +355,48 @@ impl TextureBrowser {
         self.pending_render_uploads.clear();
     }
 
+    pub fn clear_render_texture_caches(&mut self) {
+        self.tex_render_cache.clear();
+        self.pending_render_uploads.clear();
+    }
+
     /// Enqueue a texture for GPU upload if not already cached or pending.
     /// Note: browser textures (tex_gpu_cache) are loaded independently of 3D render textures
     /// (tex_render_cache) so that navigating directories doesn't affect 3D viewport rendering.
     pub fn request_texture_load(&mut self, material: &str) {
+        // Check if this material has a shader with qer_editorimage
+        let texture_to_load = self
+            .shader_db
+            .as_ref()
+            .and_then(|db| db.get(material))
+            .and_then(|sh| sh.qer.editor_image.clone())
+            .unwrap_or_else(|| material.to_string());
+
+        // Use material name as cache key (for viewport lookups), but load the resolved texture path
+        let cache_key = material;
+        let load_path = texture_to_load.as_str();
+
         // Only check browser-specific caches - 3D render cache is independent
-        if self.tex_gpu_cache.contains_key(material)
-            || self.tex_cache.contains_key(material)
-            || self.pending_uploads.iter().any(|(k, _)| k == material)
+        if self.tex_gpu_cache.contains_key(cache_key)
+            || self.tex_cache.contains_key(cache_key)
+            || self.pending_uploads.iter().any(|(k, _)| k == cache_key)
         {
             return;
         }
-        match self.load_texture(material) {
+        match self.load_texture(load_path) {
             Ok(img) => {
-                self.tex_cache.insert(material.to_string(), img.clone());
+                self.tex_cache.insert(cache_key.to_string(), img.clone());
                 self.pending_uploads
-                    .push((material.to_string(), img.clone()));
+                    .push((cache_key.to_string(), img.clone()));
                 // Also enqueue for 3D render cache in case it's needed there too
-                if !self.tex_render_cache.contains_key(material)
-                    && !self.pending_render_uploads.iter().any(|(k, _)| k == material)
+                if !self.tex_render_cache.contains_key(cache_key)
+                    && !self.pending_render_uploads.iter().any(|(k, _)| k == cache_key)
                 {
                     self.pending_render_uploads
-                        .push((material.to_string(), img));
+                        .push((cache_key.to_string(), img));
                 }
             }
-            Err(e) => eprintln!("tex load failed {material}: {e}"),
+            Err(e) => eprintln!("tex load failed {load_path} (for material {material}): {e}"),
         }
     }
 
@@ -390,7 +408,8 @@ impl TextureBrowser {
         &mut self,
         gl: &glow::Context,
         uploads_per_frame: usize,
-        upload_texture_mipmaps: unsafe fn(&glow::Context, [u32; 2], &[u8]) -> glow::Texture,
+        rendermode: &RenderMode,
+        upload_texture_mipmaps: unsafe fn(&glow::Context, [u32; 2], &[u8], &RenderMode) -> glow::Texture,
     ) {
         let batch: Vec<_> = self
             .pending_render_uploads
@@ -398,7 +417,7 @@ impl TextureBrowser {
             .collect();
 
         for (material, img) in batch {
-            let tex = unsafe { upload_texture_mipmaps(gl, [img.width, img.height], &img.rgba8) };
+            let tex = unsafe { upload_texture_mipmaps(gl, [img.width, img.height], &img.rgba8, rendermode) };
             let qer = self
                 .shader_db
                 .as_ref()

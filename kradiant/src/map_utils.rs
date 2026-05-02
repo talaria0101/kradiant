@@ -5,7 +5,6 @@ use std::fmt::Display;
 use num_traits::{Float, NumCast};
 
 use crate::Vec3;
-use crate::assets::resolve_editor_image_name;
 use crate::map::{BrushContent, Map};
 use crate::shader::ShaderDb;
 
@@ -20,20 +19,22 @@ impl Map {
         self.entities.len()
     }
 
-    /// Collect a de-duplicated list of materials/shaders used by the map, using `qer_editorimage`
-    /// when available.
-    pub fn collect_used_materials(&self, shader_db: Option<&ShaderDb>) -> Vec<String> {
+    /// Collect a de-duplicated list of materials/shaders used by the map.
+    /// Returns original material names (not resolved qer_editorimage paths) so that
+    /// viewport texture lookups work correctly. The qer_editorimage resolution happens
+    /// during texture loading in request_texture_load().
+    pub fn collect_used_materials(&self, _shader_db: Option<&ShaderDb>) -> Vec<String> {
         let mut out = Vec::<String>::new();
         for ent in &self.entities {
             for b in &ent.brushes {
                 match &b.content {
                     BrushContent::Convex(faces) => {
                         for f in faces {
-                            out.push(resolve_editor_image_name(&f.texture, shader_db));
+                            out.push(f.texture.clone());
                         }
                     }
                     BrushContent::Patch(p) => {
-                        out.push(resolve_editor_image_name(&p.texture, shader_db));
+                        out.push(p.texture.clone());
                     }
                 }
             }

@@ -122,7 +122,7 @@ fn key_combo_pressed(ui: &Ui, main_key: dear_imgui_rs::Key, modifiers: u32) -> b
 
 pub struct EditorState {
     pub config: EditorConfig,
-    //pub view_config_rev: u64,
+    pub view_config_rev: u64,
     pub show_demo: bool,
     pub show_about: bool,
     pub toolbar_height: f32,
@@ -194,6 +194,7 @@ impl Default for EditorState {
 
         let mut s = Self {
             config: EditorConfig::default(),
+            view_config_rev: 0,
             show_demo: false,
             show_about: false,
             toolbar_height: 0.0,
@@ -285,6 +286,7 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         let map = &mut state.map;
         let selection_rgba = state.selection_rgba;
         let selection_rect_rgba = state.selection_rect_rgba;
+        let view_config_rev = &mut state.view_config_rev;
 
         view2d_ref.draw_impl(
             ui,
@@ -304,6 +306,7 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             map,
             selection_rgba,
             selection_rect_rgba,
+            view_config_rev,
             dt,
         );
     }
@@ -507,14 +510,14 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                     ) {
                         state
                             .config
-                            .update("grid_minor_step", step_u8, &mut state.console);
+                            .update("grid_minor_step", step_u8, &mut state.console, &mut state.view_config_rev);
                     }
                 }
             });
             ui.menu("3D Rendering", || {
                 let mut selected = state.config.view.wireframe;
                 if ui.menu_item_toggle_no_shortcut("Wireframe", &mut selected, true) {
-                    state.config.update("wireframe", !state.config.view.wireframe as u8, &mut state.console);
+                    state.config.update("wireframe", !state.config.view.wireframe as u8, &mut state.console, &mut state.view_config_rev);
                 }
                 ui.separator_horizontal();
                 for mode in config::RenderMode::all() {
@@ -522,7 +525,7 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                     let active = !selected;
                     if ui.menu_item_toggle_no_shortcut(mode.as_ref(), &mut selected, active) {
                         let num = mode as i32;
-                        state.config.update("rendermode", num, &mut state.console);
+                        state.config.update("rendermode", num, &mut state.console, &mut state.view_config_rev);
                     }
                 }
             });
@@ -680,6 +683,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
                 "grid_snap",
                 !state.config.view.grid_snap as u8,
                 &mut state.console,
+                &mut state.view_config_rev
             );
         }
         if ui.is_key_pressed(dear_imgui_rs::Key::G) {
@@ -687,6 +691,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
                 "grid_snap",
                 !state.config.view.grid_snap as u8,
                 &mut state.console,
+                &mut state.view_config_rev
             );
         }
 

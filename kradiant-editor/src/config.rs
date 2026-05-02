@@ -109,7 +109,7 @@ impl EditorConfig {
         }
     }
 
-    pub fn update(&mut self, key: &str, value: impl NumCast, console: &mut ConsoleLogger) {
+    pub fn update(&mut self, key: &str, value: impl NumCast, console: &mut ConsoleLogger, view_config_rev: &mut u64) {
         match key {
             "grid_snap" => {
                 let value_u8: u8 = util::to_num(value);
@@ -134,12 +134,14 @@ impl EditorConfig {
                 let value_u8: u8 = util::to_num(value);
                 let b = value_u8 == 1;
                 self.view.wireframe = b;
+                *view_config_rev = view_config_rev.wrapping_add(1);
                 log_info!(console, "Set wireframe to {}", self.view.wireframe);
             }
             "rendermode" => {
                 let value_usize: usize = util::to_num(value);
                 let mode = RenderMode::VARIANTS.get(value_usize).unwrap_or(&RenderMode::Flat);
                 self.view.rendermode = mode.to_owned();
+                *view_config_rev = view_config_rev.wrapping_add(1);
                 log_info!(console, "Set rendermode to {}", self.view.rendermode.as_ref());
             }
             _ => (),

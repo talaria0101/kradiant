@@ -26,7 +26,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use crate::config::EditorConfig;
+use crate::config::{EditorConfig, RenderMode};
 use crate::icons::EditorIcons;
 use crate::images::EditorImages;
 use crate::viewport2d::Viewport2D;
@@ -299,19 +299,10 @@ fn register_texture(
 
 /// Upload texture to GPU with mipmaps and filtering
 ///
-/// Some todos:
+/// Filtering modes copied from q3radiant:
+/// https://github.com/id-Software/Quake-III-Arena/blob/master/q3radiant/TexWnd.cpp#L302-L324
 ///
-/// TODO: Alternative filtering options
-///
-/// Filtering modes explained:
-///
-/// - GL_LINEAR_MIPMAP_LINEAR: Trilinear filtering—interpolates between 2 mipmap levels, each bilinearly filtered (best quality)
-/// - GL_LINEAR_MIPMAP_NEAREST: Bilinear within nearest mipmap level (faster, lower quality)
-/// - GL_NEAREST_MIPMAP_LINEAR: Linear interpolation between mipmap levels, nearest within each
-/// - GL_NEAREST_MIPMAP_NEAREST: Nearest mipmap level, nearest pixel (fastest, pixelated)
-///
-/// TODO: Togglable repeat mode
-unsafe fn upload_texture_mipmaps(gl: &glow::Context, size: [u32; 2], rgba: &[u8]) -> glow::Texture {
+unsafe fn upload_texture_mipmaps(gl: &glow::Context, size: [u32; 2], rgba: &[u8], mode: &RenderMode) -> glow::Texture {
     unsafe {
         let tex = gl.create_texture().unwrap();
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -328,18 +319,87 @@ unsafe fn upload_texture_mipmaps(gl: &glow::Context, size: [u32; 2], rgba: &[u8]
             glow::PixelUnpackData::Slice(Some(rgba)),
         );
 
-        gl.generate_mipmap(glow::TEXTURE_2D);
-
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MIN_FILTER,
-            glow::LINEAR_MIPMAP_NEAREST as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MAG_FILTER,
-            glow::LINEAR as i32,
-        );
+        match mode {
+            RenderMode::Nearest => {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::NEAREST as i32,
+                );
+            }
+            RenderMode::NearestMipmap => {
+                gl.generate_mipmap(glow::TEXTURE_2D);
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST_MIPMAP_NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::NEAREST as i32,
+                );
+            }
+            RenderMode::Linear => {
+                gl.generate_mipmap(glow::TEXTURE_2D);
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST_MIPMAP_LINEAR as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+            }
+            RenderMode::Bilinear => {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+            }
+            RenderMode::BilinearMipmap => {
+                gl.generate_mipmap(glow::TEXTURE_2D);
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR_MIPMAP_NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+            }
+            RenderMode::Trilinear => {
+                gl.generate_mipmap(glow::TEXTURE_2D);
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR_MIPMAP_LINEAR as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+            }
+            _ => {
+                return tex;
+            }
+        }
 
         // repeat
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
@@ -718,7 +778,7 @@ impl AppState {
                 .min(editor.themes.len().saturating_sub(1));
             if let Some(entry) = editor.themes.get(idx) {
                 theme::apply_theme(&mut imgui, &entry.data);
-                EditorConfig::update(&mut editor.config, "active_theme", idx, &mut editor.console);
+                EditorConfig::update(&mut editor.config, "active_theme", idx, &mut editor.console, &mut editor.view_config_rev);
             }
         }
         editor.palette = theme::palette_from_theme(
@@ -817,6 +877,7 @@ impl AppState {
                     "active_theme",
                     idx,
                     &mut self.editor.console,
+                    &mut self.editor.view_config_rev
                 );
             }
         }
@@ -844,6 +905,7 @@ impl AppState {
         self.editor.tex_browser.process_pending_render_uploads(
             &self.gl,
             UPLOADS_PER_FRAME,
+            &self.editor.config.view.rendermode,
             upload_texture_mipmaps,
         );
 

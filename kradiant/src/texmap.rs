@@ -78,25 +78,27 @@ pub fn face_plane_normal(face: &Face) -> Vec3 {
 
 /// Quake3-style axis selection: pick a stable basis for texture projection from the dominant normal axis.
 ///
-/// Returns (S axis, T axis) in map space, forming a right-handed basis w.r.t `n`.
+/// Returns (S axis, T axis) in map space. Uses consistent axes regardless of normal direction
+/// to prevent texture mirroring on opposite faces of a brush (matching CoDRadiant behavior).
 pub fn q3_texture_axes_from_normal(n: Vec3) -> (Vec3, Vec3) {
     let ax = n.x.abs();
     let ay = n.y.abs();
     let az = n.z.abs();
 
-    let (s, mut t) = if az >= ax && az >= ay {
+    // Use consistent axes based only on which component is dominant (absolute value).
+    // Do NOT flip based on normal sign - this ensures opposite faces have the same
+    // texture orientation and don't appear mirrored.
+    // T-axis is negated to flip V coordinate (textures were upside down).
+    if az >= ax && az >= ay {
+        // Z-dominant (floor/ceiling): project onto XY plane
         (Vec3::X, -Vec3::Y)
     } else if ax >= ay {
+        // X-dominant (east/west walls): project onto YZ plane
         (Vec3::Y, -Vec3::Z)
     } else {
+        // Y-dominant (north/south walls): project onto XZ plane
         (Vec3::X, -Vec3::Z)
-    };
-
-    // Ensure the basis is right-handed with respect to the face normal.
-    if s.cross(t).dot(n) < 0.0 {
-        t = -t;
     }
-    (s, t)
 }
 
 /// Rotate the (S,T) texture axes in their plane by `angle_rad`.

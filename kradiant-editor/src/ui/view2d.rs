@@ -232,6 +232,7 @@ impl View2D {
         map: &mut Option<kradiant::map::Map>,
         selection_rgba: [f32; 4],
         selection_rect_rgba: [f32; 4],
+        view_config_rev: &mut u64,
         dt: f32,
     ) {
         use dear_imgui_rs::MouseButton;
@@ -1476,28 +1477,28 @@ impl View2D {
 
                     if ui.is_window_hovered() {
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key1) {
-                            config.update("grid_minor_step", 1u8, console);
+                            config.update("grid_minor_step", 1u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key2) {
-                            config.update("grid_minor_step", 2u8, console);
+                            config.update("grid_minor_step", 2u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key3) {
-                            config.update("grid_minor_step", 4u8, console);
+                            config.update("grid_minor_step", 4u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key4) {
-                            config.update("grid_minor_step", 8u8, console);
+                            config.update("grid_minor_step", 8u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key5) {
-                            config.update("grid_minor_step", 16u8, console);
+                            config.update("grid_minor_step", 16u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key6) {
-                            config.update("grid_minor_step", 32u8, console);
+                            config.update("grid_minor_step", 32u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key7) {
-                            config.update("grid_minor_step", 64u8, console);
+                            config.update("grid_minor_step", 64u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key8) {
-                            config.update("grid_minor_step", 128u8, console);
+                            config.update("grid_minor_step", 128u8, console, view_config_rev);
                         }
                     }
 

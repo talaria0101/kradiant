@@ -16,7 +16,7 @@ pub struct View3dCache {
     map_generation: u64,
     map_revision: u64,
     map_load_count: u64,
-    //view_config_rev: u64,
+    view_config_rev: u64,
 }
 
 #[repr(C)]
@@ -119,7 +119,7 @@ impl Viewport3D {
             let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0u64);
             let map_revision = editor.map_revision;
             let map_load_count = editor.map_load_count;
-            //let view_config_rev = editor.view_config_rev;
+            let view_config_rev = editor.view_config_rev;
 
             let need_rebuild = match self.cache {
                 Some(c) => {
@@ -127,8 +127,15 @@ impl Viewport3D {
                         || c.map_ptr != map_ptr
                         || c.map_generation != map_generation
                         || c.map_revision != map_revision
+                        || c.view_config_rev != view_config_rev
                 }
                 None => true,
+            };
+            let tex_reload = match self.cache {
+                Some(c) => {
+                    c.view_config_rev != view_config_rev
+                }
+                None => false
             };
 
             let mut bounds_min = Vec3::splat(f32::INFINITY);
@@ -140,6 +147,10 @@ impl Viewport3D {
                 self.tri_vertices_tex.clear();
 
                 if let Some(map) = editor.map.as_mut() {
+                    if tex_reload {
+                        //editor.tex_browser.clear_render_texture_caches();
+                        editor.tex_browser.clear_texture_caches();
+                    }
                     // Request all textures used by the map for 3D rendering. This leverages
                     // Map::collect_used_materials() which de-duplicates and normalizes names.
                     let shader_db = editor.tex_browser.shader_db.as_ref();
@@ -348,7 +359,7 @@ impl Viewport3D {
                     map_generation,
                     map_revision,
                     map_load_count,
-                    //view_config_rev,
+                    view_config_rev,
                 });
 
                 // Auto-frame camera on new map load

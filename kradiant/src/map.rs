@@ -173,8 +173,8 @@ impl Face {
         let u = delta.dot(u_axis);
         let v = delta.dot(v_axis);
 
-        let u = u / self.params.scale.x;
-        let v = v / self.params.scale.y;
+        let u = u * self.params.scale.x;
+        let v = v * self.params.scale.y;
 
         let u = u + self.params.shift.x as f32;
         let v = v + self.params.shift.y as f32;
@@ -185,12 +185,13 @@ impl Face {
     fn best_fit_axes(normal: Vec3) -> (Vec3, Vec3) {
         let abs_n = normal.abs();
 
+        // T-axis is negated to flip V coordinate (textures were upside down)
         if abs_n.z > abs_n.x && abs_n.z > abs_n.y {
-            (Vec3::X, Vec3::Y)
+            (Vec3::X, -Vec3::Y)
         } else if abs_n.x > abs_n.y {
-            (Vec3::Y, Vec3::Z)
+            (Vec3::Y, -Vec3::Z)
         } else {
-            (Vec3::X, Vec3::Z)
+            (Vec3::X, -Vec3::Z)
         }
     }
 }
