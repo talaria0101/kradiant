@@ -131,9 +131,14 @@ impl Viewport3D {
                 }
                 None => true,
             };
+            // Only reload textures when map changes, not when view config changes
             let tex_reload = match self.cache {
-                Some(c) => c.view_config_rev != view_config_rev,
-                None => false,
+                Some(c) => {
+                    c.map_ptr != map_ptr
+                        || c.map_generation != map_generation
+                        || c.map_load_count != map_load_count
+                }
+                None => true,
             };
 
             let mut bounds_min = Vec3::splat(f32::INFINITY);
@@ -146,8 +151,7 @@ impl Viewport3D {
 
                 if let Some(map) = editor.map.as_mut() {
                     if tex_reload {
-                        //editor.tex_browser.clear_render_texture_caches();
-                        editor.tex_browser.clear_texture_caches();
+                        editor.tex_browser.clear_render_texture_caches();
                     }
                     // Request all textures used by the map for 3D rendering. This leverages
                     // Map::collect_used_materials() which de-duplicates and normalizes names.

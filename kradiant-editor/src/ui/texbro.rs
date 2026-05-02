@@ -381,6 +381,18 @@ impl TextureBrowser {
             || self.tex_cache.contains_key(cache_key)
             || self.pending_uploads.iter().any(|(k, _)| k == cache_key)
         {
+            // If in browser cache but not render cache, add to render pending
+            if !self.tex_render_cache.contains_key(cache_key)
+                && !self
+                    .pending_render_uploads
+                    .iter()
+                    .any(|(k, _)| k == cache_key)
+            {
+                if let Some(img) = self.tex_cache.get(cache_key) {
+                    self.pending_render_uploads
+                        .push((cache_key.to_string(), img.clone()));
+                }
+            }
             return;
         }
         match self.load_texture(load_path) {

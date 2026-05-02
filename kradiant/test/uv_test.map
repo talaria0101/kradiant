@@ -1,0 +1,19 @@
+{
+"k2" "v2"
+"classname" "worldspawn"
+}
+// entity 1
+{
+"a" "c"
+"targetname" "finish_button"
+"classname" "trigger_use"
+// brush 0
+{
+( 576 64 64 ) ( 540 64 64 ) ( 540 20 64 ) common/trigger 0 0 0 0.25 0.25 0 0 0 0
+( 532 20 128 ) ( 532 64 128 ) ( 568 64 128 ) common/trigger 0 0 0 0.25 0.25 0 0 0 0
+( 552 0 68 ) ( 588 0 68 ) ( 588 0 64 ) common/trigger 0 8 0 0.25 0.25 0 0 0 0
+( 576 20 68 ) ( 576 64 68 ) ( 576 64 64 ) common/trigger 0 8 0 0.25 0.25 0 0 0 0
+( 576 64 68 ) ( 540 64 68 ) ( 540 64 64 ) common/trigger 0 8 0 0.25 0.25 0 0 0 0
+( 512 76 68 ) ( 512 32 68 ) ( 512 32 64 ) common/trigger 0 8 0 0.25 0.25 0 0 0 0
+}
+}

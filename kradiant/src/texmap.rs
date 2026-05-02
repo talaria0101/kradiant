@@ -14,8 +14,8 @@ use crate::{IVec2, Vec2, Vec3};
 pub struct FaceUvMapper {
     s_axis: Vec3,
     t_axis: Vec3,
-    inv_scale_x: f32,
-    inv_scale_y: f32,
+    scale_x: f32,
+    scale_y: f32,
     shift: IVec2,
     inv_tex_w: f32,
     inv_tex_h: f32,
@@ -45,8 +45,8 @@ impl FaceUvMapper {
         Self {
             s_axis,
             t_axis,
-            inv_scale_x: 1.0 / scale_x,
-            inv_scale_y: 1.0 / scale_y,
+            scale_x,
+            scale_y,
             shift: face.params.shift,
             inv_tex_w: 1.0 / tex_w,
             inv_tex_h: 1.0 / tex_h,
@@ -55,8 +55,13 @@ impl FaceUvMapper {
 
     /// Compute UVs in "repeat" space (not clamped to 0..1).
     pub fn uv(&self, point: Vec3) -> Vec2 {
-        let u = (point.dot(self.s_axis) * self.inv_scale_x + self.shift.x as f32) * self.inv_tex_w;
-        let v = (point.dot(self.t_axis) * self.inv_scale_y + self.shift.y as f32) * self.inv_tex_h;
+        // Scale makes texture appear smaller/larger on surface:
+        // scale=0.25 means texture is 1/4 size, so 4× more repeats
+        // Formula: (world_units / (tex_size * scale)) + (shift / tex_size)
+        let world_scale_x = self.inv_tex_w / self.scale_x;  // = 1 / (tex_w * scale_x)
+        let world_scale_y = self.inv_tex_h / self.scale_y;  // = 1 / (tex_h * scale_y)
+        let u = point.dot(self.s_axis) * world_scale_x + self.shift.x as f32 * self.inv_tex_w;
+        let v = point.dot(self.t_axis) * world_scale_y + self.shift.y as f32 * self.inv_tex_h;
         Vec2::new(u, v)
     }
 }
