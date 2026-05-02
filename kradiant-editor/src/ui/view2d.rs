@@ -332,7 +332,8 @@ impl View2D {
                         let f = if wheel > 0.0 { 1.15f32 } else { 1.0 / 1.15 };
                         let new_zoom = (old_zoom * f).clamp(0.025, 64.0);
                         if (new_zoom - old_zoom).abs() > f32::EPSILON {
-                            let world = crate::util::screen_to_world(mouse, p, [w, h], old_zoom, self.pan);
+                            let world =
+                                crate::util::screen_to_world(mouse, p, [w, h], old_zoom, self.pan);
                             self.zoom = new_zoom;
                             self.pan[0] = (mouse[0] - (p[0] + w * 0.5)) - world[0] * new_zoom;
                             self.pan[1] = (mouse[1] - (p[1] + h * 0.5)) - world[1] * new_zoom;
@@ -350,10 +351,8 @@ impl View2D {
 
                 let mouse = ui.io().mouse_pos();
                 let world = crate::util::screen_to_world(mouse, p, [w, h], self.zoom, self.pan);
-                let world_axis = match self.ortho_axis {
-                    Ortho::XY => world,
-                    Ortho::XZ | Ortho::YZ => [world[0], -world[1]],
-                };
+                // `screen_to_world` returns View2D coordinates (Y-down). Convert to axis labels.
+                let world_axis = [world[0], -world[1]];
 
                 let step = config.view.grid_minor_step as f32;
                 let my_snapping = if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) {
@@ -387,7 +386,7 @@ impl View2D {
                     let ray_far = 1.0e6;
                     let (ray_origin, ray_dir) = match self.ortho_axis {
                         Ortho::XY => (
-                            Vec3::new(world[0], world[1], ray_far),
+                            Vec3::new(world[0], -world[1], ray_far),
                             Vec3::new(0.0, 0.0, -1.0),
                         ),
                         Ortho::XZ => (
@@ -1688,8 +1687,8 @@ impl View2D {
                             Ortho::XY => (
                                 selection_aabb.min.x + off[0],
                                 selection_aabb.max.x + off[0],
-                                selection_aabb.min.y + off[1],
-                                selection_aabb.max.y + off[1],
+                                -selection_aabb.max.y + off[1],
+                                -selection_aabb.min.y + off[1],
                             ),
                             Ortho::XZ => (
                                 selection_aabb.min.x + off[0],
@@ -2732,7 +2731,7 @@ pub fn stretch_faces_from_start(
     start: Vec2,
 ) -> Vec<editing::StretchFace> {
     let (min_u, max_u, min_v, max_v) = match axis {
-        Ortho::XY => (aabb.min.x, aabb.max.x, aabb.min.y, aabb.max.y),
+        Ortho::XY => (aabb.min.x, aabb.max.x, -aabb.max.y, -aabb.min.y),
         Ortho::XZ => (aabb.min.x, aabb.max.x, -aabb.max.z, -aabb.min.z),
         Ortho::YZ => (aabb.min.y, aabb.max.y, -aabb.max.z, -aabb.min.z),
     };
@@ -2796,7 +2795,10 @@ fn create_brush_from_drag(
     let (min3, max3) = match view.ortho_axis {
         Ortho::XY => {
             let (z0, z1) = last.map(|a| (a.min.z, a.max.z)).unwrap_or((0.0, fallback));
-            (Vec3::new(min2.x, min2.y, z0), Vec3::new(max2.x, max2.y, z1))
+            (
+                Vec3::new(min2.x, -max2.y, z0),
+                Vec3::new(max2.x, -min2.y, z1),
+            )
         }
         Ortho::XZ => {
             let (y0, y1) = last.map(|a| (a.min.y, a.max.y)).unwrap_or((0.0, fallback));

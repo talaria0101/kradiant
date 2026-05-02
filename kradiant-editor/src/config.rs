@@ -1,5 +1,7 @@
 use std::{
-    fs::OpenOptions, io::{Read, Write}, path::PathBuf
+    fs::OpenOptions,
+    io::{Read, Write},
+    path::PathBuf,
 };
 
 use crate::{ui::console::ConsoleLogger, util};
@@ -7,7 +9,9 @@ use num_traits::NumCast;
 use serde::{Deserialize, Serialize};
 use strum::VariantArray;
 
-#[derive(Clone, Deserialize, Serialize, strum_macros::AsRefStr, strum_macros::VariantArray, PartialEq)]
+#[derive(
+    Clone, Deserialize, Serialize, strum_macros::AsRefStr, strum_macros::VariantArray, PartialEq,
+)]
 pub enum RenderMode {
     /// No triangles
     None,
@@ -17,16 +21,23 @@ pub enum RenderMode {
     Linear,
     Bilinear,
     BilinearMipmap,
-    Trilinear
+    Trilinear,
 }
 
 impl RenderMode {
-    pub fn all() -> [Self; 8]
-    {
-        [Self::None, Self::Flat, Self::Nearest, Self::NearestMipmap, Self::Linear, Self::Bilinear, Self::BilinearMipmap, Self::Trilinear]
+    pub fn all() -> [Self; 8] {
+        [
+            Self::None,
+            Self::Flat,
+            Self::Nearest,
+            Self::NearestMipmap,
+            Self::Linear,
+            Self::Bilinear,
+            Self::BilinearMipmap,
+            Self::Trilinear,
+        ]
     }
 }
-
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct ViewConfig {
@@ -109,7 +120,13 @@ impl EditorConfig {
         }
     }
 
-    pub fn update(&mut self, key: &str, value: impl NumCast, console: &mut ConsoleLogger, view_config_rev: &mut u64) {
+    pub fn update(
+        &mut self,
+        key: &str,
+        value: impl NumCast,
+        console: &mut ConsoleLogger,
+        view_config_rev: &mut u64,
+    ) {
         match key {
             "grid_snap" => {
                 let value_u8: u8 = util::to_num(value);
@@ -139,10 +156,16 @@ impl EditorConfig {
             }
             "rendermode" => {
                 let value_usize: usize = util::to_num(value);
-                let mode = RenderMode::VARIANTS.get(value_usize).unwrap_or(&RenderMode::Flat);
+                let mode = RenderMode::VARIANTS
+                    .get(value_usize)
+                    .unwrap_or(&RenderMode::Flat);
                 self.view.rendermode = mode.to_owned();
                 *view_config_rev = view_config_rev.wrapping_add(1);
-                log_info!(console, "Set rendermode to {}", self.view.rendermode.as_ref());
+                log_info!(
+                    console,
+                    "Set rendermode to {}",
+                    self.view.rendermode.as_ref()
+                );
             }
             _ => (),
         }

@@ -123,12 +123,14 @@ pub fn screen_to_world(
     let cx = origin[0] + size[0] * 0.5 + pan[0];
     let cy = origin[1] + size[1] * 0.5 + pan[1];
 
+    // View2D "screen space" is Y-down (matches ImGui).
     [(mouse[0] - cx) / zoom, (mouse[1] - cy) / zoom]
 }
 
 pub fn project_to_2d(v: Vec3, axis: Ortho) -> [f32; 2] {
     match axis {
-        Ortho::XY => [v.x, v.y],
+        // Flip Y so +Y is up on screen (ImGui Y+ is down).
+        Ortho::XY => [v.x, -v.y],
         // Flip Z so +Z is up on screen (ImGui Y+ is down).
         Ortho::XZ => [v.x, -v.z],
         Ortho::YZ => [v.y, -v.z],
@@ -366,7 +368,7 @@ pub fn click_in_selection_aabb(
     }
 
     let (min_x, max_x, min_y, max_y) = match ortho {
-        Ortho::XY => (min.x, max.x, min.y, max.y),
+        Ortho::XY => (min.x, max.x, -max.y, -min.y),
         Ortho::XZ => (min.x, max.x, -max.z, -min.z),
         Ortho::YZ => (min.y, max.y, -max.z, -min.z),
     };
@@ -379,7 +381,8 @@ pub fn drag_delta_to_3d(d: Vec2, axis: Ortho, lock: &AxisLock) -> Vec3 {
     match axis {
         Ortho::XY => {
             let x = if lock.x { 0.0 } else { d.x };
-            let y = if lock.y { 0.0 } else { d.y };
+            // Screen-space drag is Y-down; world-space is Y-up.
+            let y = if lock.y { 0.0 } else { -d.y };
             Vec3 { x, y, z: 0.0 }
         }
         Ortho::XZ => {
@@ -408,8 +411,8 @@ pub fn normalize_depth(v: f32, fallback: f32) -> f32 {
 pub fn project_aabb_to_2d(aabb: &Aabb, axis: Ortho) -> (Vec2, Vec2) {
     match axis {
         Ortho::XY => (
-            Vec2::new(aabb.min.x, aabb.min.y),
-            Vec2::new(aabb.max.x, aabb.max.y),
+            Vec2::new(aabb.min.x, -aabb.max.y),
+            Vec2::new(aabb.max.x, -aabb.min.y),
         ),
         Ortho::XZ => (
             Vec2::new(aabb.min.x, -aabb.max.z),

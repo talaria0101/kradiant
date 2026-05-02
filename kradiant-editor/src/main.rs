@@ -302,7 +302,12 @@ fn register_texture(
 /// Filtering modes copied from q3radiant:
 /// https://github.com/id-Software/Quake-III-Arena/blob/master/q3radiant/TexWnd.cpp#L302-L324
 ///
-unsafe fn upload_texture_mipmaps(gl: &glow::Context, size: [u32; 2], rgba: &[u8], mode: &RenderMode) -> glow::Texture {
+unsafe fn upload_texture_mipmaps(
+    gl: &glow::Context,
+    size: [u32; 2],
+    rgba: &[u8],
+    mode: &RenderMode,
+) -> glow::Texture {
     unsafe {
         let tex = gl.create_texture().unwrap();
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -778,7 +783,13 @@ impl AppState {
                 .min(editor.themes.len().saturating_sub(1));
             if let Some(entry) = editor.themes.get(idx) {
                 theme::apply_theme(&mut imgui, &entry.data);
-                EditorConfig::update(&mut editor.config, "active_theme", idx, &mut editor.console, &mut editor.view_config_rev);
+                EditorConfig::update(
+                    &mut editor.config,
+                    "active_theme",
+                    idx,
+                    &mut editor.console,
+                    &mut editor.view_config_rev,
+                );
             }
         }
         editor.palette = theme::palette_from_theme(
@@ -877,7 +888,7 @@ impl AppState {
                     "active_theme",
                     idx,
                     &mut self.editor.console,
-                    &mut self.editor.view_config_rev
+                    &mut self.editor.view_config_rev,
                 );
             }
         }

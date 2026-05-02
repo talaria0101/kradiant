@@ -508,16 +508,24 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                         &mut selected,
                         active,
                     ) {
-                        state
-                            .config
-                            .update("grid_minor_step", step_u8, &mut state.console, &mut state.view_config_rev);
+                        state.config.update(
+                            "grid_minor_step",
+                            step_u8,
+                            &mut state.console,
+                            &mut state.view_config_rev,
+                        );
                     }
                 }
             });
             ui.menu("3D Rendering", || {
                 let mut selected = state.config.view.wireframe;
                 if ui.menu_item_toggle_no_shortcut("Wireframe", &mut selected, true) {
-                    state.config.update("wireframe", !state.config.view.wireframe as u8, &mut state.console, &mut state.view_config_rev);
+                    state.config.update(
+                        "wireframe",
+                        !state.config.view.wireframe as u8,
+                        &mut state.console,
+                        &mut state.view_config_rev,
+                    );
                 }
                 ui.separator_horizontal();
                 for mode in config::RenderMode::all() {
@@ -525,7 +533,12 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                     let active = !selected;
                     if ui.menu_item_toggle_no_shortcut(mode.as_ref(), &mut selected, active) {
                         let num = mode as i32;
-                        state.config.update("rendermode", num, &mut state.console, &mut state.view_config_rev);
+                        state.config.update(
+                            "rendermode",
+                            num,
+                            &mut state.console,
+                            &mut state.view_config_rev,
+                        );
                     }
                 }
             });
@@ -683,7 +696,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
                 "grid_snap",
                 !state.config.view.grid_snap as u8,
                 &mut state.console,
-                &mut state.view_config_rev
+                &mut state.view_config_rev,
             );
         }
         if ui.is_key_pressed(dear_imgui_rs::Key::G) {
@@ -691,7 +704,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
                 "grid_snap",
                 !state.config.view.grid_snap as u8,
                 &mut state.console,
-                &mut state.view_config_rev
+                &mut state.view_config_rev,
             );
         }
 

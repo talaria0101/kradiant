@@ -390,7 +390,10 @@ impl TextureBrowser {
                     .push((cache_key.to_string(), img.clone()));
                 // Also enqueue for 3D render cache in case it's needed there too
                 if !self.tex_render_cache.contains_key(cache_key)
-                    && !self.pending_render_uploads.iter().any(|(k, _)| k == cache_key)
+                    && !self
+                        .pending_render_uploads
+                        .iter()
+                        .any(|(k, _)| k == cache_key)
                 {
                     self.pending_render_uploads
                         .push((cache_key.to_string(), img));
@@ -409,7 +412,12 @@ impl TextureBrowser {
         gl: &glow::Context,
         uploads_per_frame: usize,
         rendermode: &RenderMode,
-        upload_texture_mipmaps: unsafe fn(&glow::Context, [u32; 2], &[u8], &RenderMode) -> glow::Texture,
+        upload_texture_mipmaps: unsafe fn(
+            &glow::Context,
+            [u32; 2],
+            &[u8],
+            &RenderMode,
+        ) -> glow::Texture,
     ) {
         let batch: Vec<_> = self
             .pending_render_uploads
@@ -417,7 +425,9 @@ impl TextureBrowser {
             .collect();
 
         for (material, img) in batch {
-            let tex = unsafe { upload_texture_mipmaps(gl, [img.width, img.height], &img.rgba8, rendermode) };
+            let tex = unsafe {
+                upload_texture_mipmaps(gl, [img.width, img.height], &img.rgba8, rendermode)
+            };
             let qer = self
                 .shader_db
                 .as_ref()

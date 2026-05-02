@@ -132,10 +132,8 @@ impl Viewport3D {
                 None => true,
             };
             let tex_reload = match self.cache {
-                Some(c) => {
-                    c.view_config_rev != view_config_rev
-                }
-                None => false
+                Some(c) => c.view_config_rev != view_config_rev,
+                None => false,
             };
 
             let mut bounds_min = Vec3::splat(f32::INFINITY);
@@ -259,7 +257,8 @@ impl Viewport3D {
                                 }
                             } else if let BrushContent::Patch(patch) = &mut brush.content {
                                 if editor.config.view.wireframe {
-                                    let Some((mesh, patch_aabb, edges)) = patch.get_mesh_aabb_wire()
+                                    let Some((mesh, patch_aabb, edges)) =
+                                        patch.get_mesh_aabb_wire()
                                     else {
                                         continue;
                                     };

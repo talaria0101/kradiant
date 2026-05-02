@@ -111,7 +111,8 @@ impl Viewport2D {
 
             let zoom = editor.view2d.zoom.max(0.001);
             // `view2d_pan` is in pixels (screen space). Convert to world units here.
-            // Also flip Y so positive world Y goes down (matching ImGui + screen_to_world).
+            // Note: view_top/view_bottom are swapped in ortho matrix to render flipped Y
+            // so the texture matches ImGui's Y-down coordinate system.
             let half_w = fbo_w as f32 / (2.0 * zoom);
             let half_h = fbo_h as f32 / (2.0 * zoom);
             let pan_x = editor.view2d.pan[0] / zoom;
@@ -364,8 +365,8 @@ impl Viewport2D {
                                             ui::Ortho::XY => (
                                                 aabb.min.x as f32,
                                                 aabb.max.x as f32,
-                                                aabb.min.y as f32,
-                                                aabb.max.y as f32,
+                                                -(aabb.max.y as f32),
+                                                -(aabb.min.y as f32),
                                             ),
                                             ui::Ortho::XZ => (
                                                 aabb.min.x as f32,
@@ -443,8 +444,8 @@ impl Viewport2D {
                                             ui::Ortho::XY => (
                                                 patch_aabb.min.x as f32,
                                                 patch_aabb.max.x as f32,
-                                                patch_aabb.min.y as f32,
-                                                patch_aabb.max.y as f32,
+                                                -(patch_aabb.max.y as f32),
+                                                -(patch_aabb.min.y as f32),
                                             ),
                                             ui::Ortho::XZ => (
                                                 patch_aabb.min.x as f32,
@@ -665,8 +666,8 @@ impl Viewport2D {
                                         ui::Ortho::XY => (
                                             patch_aabb.min.x as f32,
                                             patch_aabb.max.x as f32,
-                                            patch_aabb.min.y as f32,
-                                            patch_aabb.max.y as f32,
+                                            -(patch_aabb.max.y as f32),
+                                            -(patch_aabb.min.y as f32),
                                         ),
                                         ui::Ortho::XZ => (
                                             patch_aabb.min.x as f32,
