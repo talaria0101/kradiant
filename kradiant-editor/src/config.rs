@@ -1,36 +1,109 @@
-use std::path::PathBuf;
+use std::{
+    fs::OpenOptions, io::{Read, Write}, path::PathBuf
+};
 
 use crate::{ui::console::ConsoleLogger, util};
-use ini::Ini;
 use num_traits::NumCast;
+use serde::{Deserialize, Serialize};
+use strum::VariantArray;
 
-#[derive(Clone)]
-pub struct EditorConfig {
-    // view
+#[derive(Clone, Deserialize, Serialize, strum_macros::AsRefStr, strum_macros::VariantArray, PartialEq)]
+pub enum RenderMode {
+    /// No triangles
+    None,
+    Flat,
+    Nearest,
+    NearestMipmap,
+    Linear,
+    Bilinear,
+    BilinearMipmap,
+    Trilinear
+}
+
+impl RenderMode {
+    pub fn all() -> [Self; 8]
+    {
+        [Self::None, Self::Flat, Self::Nearest, Self::NearestMipmap, Self::Linear, Self::Bilinear, Self::BilinearMipmap, Self::Trilinear]
+    }
+}
+
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ViewConfig {
     pub grid_snap: bool,
     pub grid_minor_step: u8,
-    pub view3d_fov: f32,
+    pub fov: f32,
+    pub wireframe: bool,
+    pub rendermode: RenderMode,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct MiscConfig {
+    pub theme: usize,
+    pub recent_maps: Vec<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct PathsConfig {
+    pub main: PathBuf,
+    pub texdir: PathBuf,
+    pub scrdir: PathBuf,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct EditorConfig {
+    // view
+    pub view: ViewConfig,
     // misc
-    pub active_theme: usize,
+    pub misc: MiscConfig,
     // paths
-    pub game_main: PathBuf,
-    pub game_texdir: PathBuf,
-    pub game_scrdir: PathBuf,
+    pub paths: PathsConfig,
 }
 
 impl EditorConfig {
-    pub fn load() -> Result<Self, ini::Error> {
-        let cfg_file = util::get_config_dir()?.join("prefs.ini");
-        Ini::load_from_file(&cfg_file).map(Self::from)
+    pub fn load() -> (Self, Option<String>) {
+        let cfg_path = util::get_config_dir()
+            .expect("Failed to get config dir")
+            .join("prefs.toml");
+        if !cfg_path.exists() {
+            return (Self::default(), None);
+        }
+        let mut cfg_file = OpenOptions::new()
+            .read(true)
+            .open(&cfg_path)
+            .expect("Failed to open config");
+        let mut cfg_str = String::new();
+        cfg_file
+            .read_to_string(&mut cfg_str)
+            .expect("Failed to read config");
+        match toml::from_str::<Self>(&cfg_str) {
+            Ok(cfg) => (cfg, None),
+            Err(e) => (
+                Self::default(),
+                Some(format!(
+                    "Failed to load config from {}: {e}",
+                    cfg_path.display()
+                )),
+            ),
+        }
     }
 
-    pub fn save(cfg: Self) -> String {
-        let cfg_file = util::get_config_dir().unwrap().join("prefs.ini");
-        match Ini::write_to_file(&cfg.into(), &cfg_file) {
-            Ok(_) => format!("Saved configuration to {}", cfg_file.display()),
+    pub fn save(&self) -> String {
+        let cfg_str: String = toml::to_string(self).expect("Serialize config");
+        let cfg_path = util::get_config_dir()
+            .expect("Failed to get config dir")
+            .join("prefs.toml");
+        let mut cfg_file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(&cfg_path)
+            .expect("Failed to open config");
+        match cfg_file.write(cfg_str.as_bytes()) {
+            Ok(_) => format!("Saved configuration to {}", cfg_path.display()),
             Err(e) => format!(
                 "Error saving configuration to {}: {}",
-                cfg_file.display(),
+                cfg_path.display(),
                 e
             ),
         }
@@ -41,21 +114,33 @@ impl EditorConfig {
             "grid_snap" => {
                 let value_u8: u8 = util::to_num(value);
                 let b = value_u8 == 1;
-                self.grid_snap = b;
-                log_info!(console, "Set grid snap to {}", self.grid_snap);
+                self.view.grid_snap = b;
+                log_info!(console, "Set grid snap to {}", self.view.grid_snap);
             }
             "grid_minor_step" => {
-                self.grid_minor_step = util::to_num(value);
-                log_info!(console, "Set grid step to {}", self.grid_minor_step);
+                self.view.grid_minor_step = util::to_num(value);
+                log_info!(console, "Set grid step to {}", self.view.grid_minor_step);
             }
             "view3d_fov" => {
-                self.view3d_fov = util::to_num(value);
-                log_info!(console, "Set 3d view fov to {}", self.view3d_fov);
+                self.view.fov = util::to_num(value);
+                log_info!(console, "Set 3d view fov to {}", self.view.fov);
                 //
             }
             "active_theme" => {
-                self.active_theme = util::to_num(value);
-                log_info!(console, "Set active theme index to {}", self.active_theme);
+                self.misc.theme = util::to_num(value);
+                log_info!(console, "Set active theme index to {}", self.misc.theme);
+            }
+            "wireframe" => {
+                let value_u8: u8 = util::to_num(value);
+                let b = value_u8 == 1;
+                self.view.wireframe = b;
+                log_info!(console, "Set wireframe to {}", self.view.wireframe);
+            }
+            "rendermode" => {
+                let value_usize: usize = util::to_num(value);
+                let mode = RenderMode::VARIANTS.get(value_usize).unwrap_or(&RenderMode::Flat);
+                self.view.rendermode = mode.to_owned();
+                log_info!(console, "Set rendermode to {}", self.view.rendermode.as_ref());
             }
             _ => (),
         }
@@ -64,21 +149,31 @@ impl EditorConfig {
 
 impl Default for EditorConfig {
     fn default() -> Self {
-        let game_main = PathBuf::new();
+        let game_main = PathBuf::from(".");
         let game_texdir = game_main.join("textures");
         let game_scrdir = game_main.join("scripts");
         Self {
-            grid_snap: true,
-            grid_minor_step: 4,
-            view3d_fov: 80.0,
-            active_theme: 0,
-            game_main,
-            game_texdir,
-            game_scrdir,
+            view: ViewConfig {
+                grid_snap: true,
+                grid_minor_step: 4,
+                fov: 80.0,
+                wireframe: true,
+                rendermode: RenderMode::Flat,
+            },
+            misc: MiscConfig {
+                recent_maps: vec![],
+                theme: 0,
+            },
+            paths: PathsConfig {
+                main: game_main,
+                texdir: game_texdir,
+                scrdir: game_scrdir,
+            },
         }
     }
 }
 
+/*
 impl From<Ini> for EditorConfig {
     fn from(value: Ini) -> Self {
         // view
@@ -88,6 +183,8 @@ impl From<Ini> for EditorConfig {
 
         // misc
         let theme = value.get_from(Some("misc"), "active_theme").unwrap_or("0");
+
+        //println!("{:#?}", value.get_from(Some("paths"), "main"));
 
         // paths
         let game_main = value
@@ -138,3 +235,4 @@ impl From<EditorConfig> for Ini {
         conf
     }
 }
+*/

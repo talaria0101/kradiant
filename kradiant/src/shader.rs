@@ -33,7 +33,17 @@ pub struct ShaderDb {
 
 impl ShaderDb {
     pub fn get(&self, name: &str) -> Option<&ShaderDef> {
-        self.by_name.get(&normalize_name(name))
+        let key = normalize_name(name);
+        if let Some(def) = self.by_name.get(&key) {
+            return Some(def);
+        }
+        if !key.starts_with("textures/") {
+            let prefixed = format!("textures/{key}");
+            if let Some(def) = self.by_name.get(&prefixed) {
+                return Some(def);
+            }
+        }
+        None
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &ShaderDef> {
@@ -390,5 +400,21 @@ textures/common/caulk
         );
         assert_eq!(sh.qer.trans, Some(0.35));
         assert!(sh.qer.no_draw);
+    }
+
+    #[test]
+    fn lookup_falls_back_to_textures_prefix() {
+        let mut db = ShaderDb::default();
+        parse_shader_file_into_db(
+            "textures/common/trigger\n{\nqer_trans 0.5\n}",
+            Path::new("test.shader"),
+            &mut db,
+        )
+        .unwrap();
+        // map faces store material without "textures/" prefix
+        let sh = db.get("common/trigger").expect("lookup should fall back");
+        assert_eq!(sh.qer.trans, Some(0.5));
+        // exact key still works
+        assert!(db.get("textures/common/trigger").is_some());
     }
 }

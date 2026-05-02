@@ -5,6 +5,7 @@
 //! - Faces carry texture and classic "9‑number" surface parameters as written by level editors.
 
 use crate::editing::{Aabb, aabb_from_polys, aabb_from_positions};
+use crate::map_utils::rotate_vector;
 use crate::{IVec2, Vec2, Vec3};
 use std::collections::{HashMap, HashSet};
 
@@ -147,6 +148,51 @@ pub struct Patch {
     //dirty: bool,
     //generation: u64,
     //last_generation: u64
+}
+
+impl Face {
+    pub fn calculate_uv(&self, pos: Vec3) -> [f32; 2] {
+        let p0 = self.plane_points[0];
+        let p1 = self.plane_points[1];
+        let p2 = self.plane_points[2];
+        let e1 = p1 - p0;
+        let e2 = p2 - p0;
+        let normal = e1.cross(e2).normalize();
+
+        let (mut u_axis, mut v_axis) = Self::best_fit_axes(normal);
+
+        println!("texture params: {:#?}", self.params);
+
+        if self.params.rotate != 0 {
+            let angle = self.params.rotate as f32;
+            u_axis = rotate_vector(u_axis, normal, angle);
+            v_axis = rotate_vector(v_axis, normal, angle);
+        }
+
+        let delta = pos - p0;
+        let u = delta.dot(u_axis);
+        let v = delta.dot(v_axis);
+
+        let u = u / self.params.scale.x;
+        let v = v / self.params.scale.y;
+
+        let u = u + self.params.shift.x as f32;
+        let v = v + self.params.shift.y as f32;
+
+        [u, v]
+    }
+
+    fn best_fit_axes(normal: Vec3) -> (Vec3, Vec3) {
+        let abs_n = normal.abs();
+
+        if abs_n.z > abs_n.x && abs_n.z > abs_n.y {
+            (Vec3::X, Vec3::Y)
+        } else if abs_n.x > abs_n.y {
+            (Vec3::Y, Vec3::Z)
+        } else {
+            (Vec3::X, Vec3::Z)
+        }
+    }
 }
 
 impl Brush {

@@ -30,7 +30,7 @@ use crate::config::EditorConfig;
 use crate::icons::EditorIcons;
 use crate::images::EditorImages;
 use crate::viewport2d::Viewport2D;
-use crate::viewport3d::{LitVertex, Viewport3D};
+use crate::viewport3d::{LitVertex, TexVertex, Viewport3D};
 
 #[macro_use]
 mod ui;
@@ -100,6 +100,12 @@ pub struct RenderBackend<'a> {
     pub lit_color_loc: glow::NativeUniformLocation,
     pub lit_ldir_loc: glow::NativeUniformLocation,
     pub lit_amb_loc: glow::NativeUniformLocation,
+    pub tex_program: glow::NativeProgram,
+    pub tex_mvp_loc: glow::NativeUniformLocation,
+    pub tex_color_loc: glow::NativeUniformLocation,
+    pub tex_ldir_loc: glow::NativeUniformLocation,
+    pub tex_amb_loc: glow::NativeUniformLocation,
+    pub tex_sampler_loc: glow::NativeUniformLocation,
 }
 
 impl RenderBackend<'_> {
@@ -167,13 +173,25 @@ impl RenderBackend<'_> {
         ambient: f32,
         light_dir: Vec3,
     ) {
-        if vertices.is_empty() { return; }
+        if vertices.is_empty() {
+            return;
+        }
 
         unsafe {
             self.gl.use_program(Some(self.lit_program));
-            self.gl.uniform_matrix_4_f32_slice(Some(&self.lit_mvp_loc), false, &mvp.to_cols_array());
-            self.gl.uniform_4_f32_slice(Some(&self.lit_color_loc), &color);
-            self.gl.uniform_3_f32(Some(&self.lit_ldir_loc), light_dir.x, light_dir.y, light_dir.z);
+            self.gl.uniform_matrix_4_f32_slice(
+                Some(&self.lit_mvp_loc),
+                false,
+                &mvp.to_cols_array(),
+            );
+            self.gl
+                .uniform_4_f32_slice(Some(&self.lit_color_loc), &color);
+            self.gl.uniform_3_f32(
+                Some(&self.lit_ldir_loc),
+                light_dir.x,
+                light_dir.y,
+                light_dir.z,
+            );
             self.gl.uniform_1_f32(Some(&self.lit_amb_loc), ambient);
 
             self.gl.bind_vertex_array(Some(self.vao));
@@ -181,18 +199,89 @@ impl RenderBackend<'_> {
             self.gl.buffer_data_u8_slice(
                 glow::ARRAY_BUFFER,
                 bytemuck::cast_slice(vertices),
-                                         glow::STREAM_DRAW,
+                glow::STREAM_DRAW,
             );
 
             // stride = 24, pos at offset 0, normal at offset 12
-            self.gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 24, 0);
+            self.gl
+                .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 24, 0);
             self.gl.enable_vertex_attrib_array(0);
-            self.gl.vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, 24, 12);
+            self.gl
+                .vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, 24, 12);
             self.gl.enable_vertex_attrib_array(1);
 
-            self.gl.draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
+            self.gl
+                .draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
 
             self.gl.disable_vertex_attrib_array(1); // don't leave attrib 1 enabled for wire draws
+        }
+    }
+
+    pub unsafe fn draw_triangles_tex(
+        &self,
+        vertices: &[TexVertex],
+        texture: glow::Texture,
+        color: [f32; 4],
+        mvp: glam::Mat4,
+        ambient: f32,
+        light_dir: Vec3,
+    ) {
+        if vertices.is_empty() {
+            return;
+        }
+
+        unsafe {
+            self.gl.use_program(Some(self.tex_program));
+
+            self.gl.uniform_matrix_4_f32_slice(
+                Some(&self.tex_mvp_loc),
+                false,
+                &mvp.to_cols_array(),
+            );
+            self.gl
+                .uniform_4_f32_slice(Some(&self.tex_color_loc), &color);
+            self.gl.uniform_3_f32(
+                Some(&self.tex_ldir_loc),
+                light_dir.x,
+                light_dir.y,
+                light_dir.z,
+            );
+            self.gl.uniform_1_f32(Some(&self.tex_amb_loc), ambient);
+            self.gl.uniform_1_i32(Some(&self.tex_sampler_loc), 0);
+
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+
+            self.gl.bind_vertex_array(Some(self.vao));
+            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+
+            self.gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(vertices),
+                glow::STREAM_DRAW,
+            );
+
+            self.gl
+                .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 32, 0);
+            self.gl.enable_vertex_attrib_array(0);
+
+            // Normal at offset 12
+            self.gl
+                .vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, 32, 12);
+            self.gl.enable_vertex_attrib_array(1);
+
+            // UV at offset 24
+            self.gl
+                .vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, 32, 24);
+            self.gl.enable_vertex_attrib_array(2);
+
+            self.gl
+                .draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
+
+            // Cleanup
+            self.gl.disable_vertex_attrib_array(2);
+            self.gl.disable_vertex_attrib_array(1);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
         }
     }
 }
@@ -206,6 +295,58 @@ fn register_texture(
     renderer
         .register_texture(img.width, img.height, TextureFormat::RGBA32, &img.rgba8)
         .unwrap_or_else(|_| panic!("failed to register {}", label))
+}
+
+/// Upload texture to GPU with mipmaps and filtering
+///
+/// Some todos:
+///
+/// TODO: Alternative filtering options
+///
+/// Filtering modes explained:
+///
+/// - GL_LINEAR_MIPMAP_LINEAR: Trilinear filtering—interpolates between 2 mipmap levels, each bilinearly filtered (best quality)
+/// - GL_LINEAR_MIPMAP_NEAREST: Bilinear within nearest mipmap level (faster, lower quality)
+/// - GL_NEAREST_MIPMAP_LINEAR: Linear interpolation between mipmap levels, nearest within each
+/// - GL_NEAREST_MIPMAP_NEAREST: Nearest mipmap level, nearest pixel (fastest, pixelated)
+///
+/// TODO: Togglable repeat mode
+unsafe fn upload_texture_mipmaps(gl: &glow::Context, size: [u32; 2], rgba: &[u8]) -> glow::Texture {
+    unsafe {
+        let tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            size[0] as i32,
+            size[1] as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(rgba)),
+        );
+
+        gl.generate_mipmap(glow::TEXTURE_2D);
+
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR_MIPMAP_NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+
+        // repeat
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::REPEAT as i32);
+
+        tex
+    }
 }
 
 /// Compile the 2D wire shader program (GL 2.1 compatible).
@@ -563,8 +704,8 @@ impl AppState {
         editor.console.info(gl_info);
 
         // Initialize texture browser with game main directory
-        if !editor.config.game_main.as_os_str().is_empty() {
-            editor.tex_browser.init(&editor.config.game_main);
+        if !editor.config.paths.main.as_os_str().is_empty() {
+            editor.tex_browser.init(&editor.config.paths.main);
             editor.console.info("Asset database loaded".to_string());
         }
 
@@ -572,7 +713,8 @@ impl AppState {
         if !editor.themes.is_empty() {
             let idx = editor
                 .config
-                .active_theme
+                .misc
+                .theme
                 .min(editor.themes.len().saturating_sub(1));
             if let Some(entry) = editor.themes.get(idx) {
                 theme::apply_theme(&mut imgui, &entry.data);
@@ -581,10 +723,7 @@ impl AppState {
         }
         editor.palette = theme::palette_from_theme(
             &imgui,
-            editor
-                .themes
-                .get(editor.config.active_theme)
-                .map(|e| &e.data),
+            editor.themes.get(editor.config.misc.theme).map(|e| &e.data),
         );
 
         let view2d_imgui_tex =
@@ -617,7 +756,17 @@ impl AppState {
 
         let vp2d = Viewport2D::new(view2d_fbo, view2d_fbo_size, view2d_rbo, view2d_tex);
 
-        let vp3d = Viewport3D::new(vec![], vec![], vec![], view3d_fbo, view3d_fbo_size, view3d_tex, view3d_rbo, None);
+        let vp3d = Viewport3D::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            view3d_fbo,
+            view3d_fbo_size,
+            view3d_tex,
+            view3d_rbo,
+            None,
+        );
 
         Self {
             window,
@@ -676,7 +825,7 @@ impl AppState {
             &self.imgui,
             self.editor
                 .themes
-                .get(self.editor.config.active_theme)
+                .get(self.editor.config.misc.theme)
                 .map(|e| &e.data),
         );
 
@@ -692,10 +841,17 @@ impl AppState {
                 .tex_gpu_cache
                 .insert(material, (tid, [img.width as f32, img.height as f32]));
         }
+        self.editor.tex_browser.process_pending_render_uploads(
+            &self.gl,
+            UPLOADS_PER_FRAME,
+            upload_texture_mipmaps,
+        );
 
         let lit_program = unsafe {
             let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
-            self.gl.shader_source(vert, r#"
+            self.gl.shader_source(
+                vert,
+                r#"
             #version 120
             attribute vec3 a_pos;
             attribute vec3 a_normal;
@@ -705,11 +861,14 @@ impl AppState {
             gl_Position = u_mvp * vec4(a_pos, 1.0);
             v_normal = a_normal;
         }
-        "#);
+        "#,
+            );
             self.gl.compile_shader(vert);
 
             let frag = self.gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
-            self.gl.shader_source(frag, r#"
+            self.gl.shader_source(
+                frag,
+                r#"
             #version 120
             uniform vec4 u_color;
             uniform vec3 u_light_dir;   // normalized, world space
@@ -722,7 +881,8 @@ impl AppState {
             float light = u_ambient + (1.0 - u_ambient) * d;
             gl_FragColor = vec4(u_color.rgb * light, u_color.a);
         }
-        "#);
+        "#,
+            );
             self.gl.compile_shader(frag);
 
             let prog = self.gl.create_program().unwrap();
@@ -734,10 +894,95 @@ impl AppState {
             prog
         };
 
-        let lit_mvp_loc   = unsafe { self.gl.get_uniform_location(lit_program, "u_mvp").unwrap() };
-        let lit_color_loc = unsafe { self.gl.get_uniform_location(lit_program, "u_color").unwrap() };
-        let lit_ldir_loc  = unsafe { self.gl.get_uniform_location(lit_program, "u_light_dir").unwrap() };
-        let lit_amb_loc   = unsafe { self.gl.get_uniform_location(lit_program, "u_ambient").unwrap() };
+        let lit_mvp_loc = unsafe { self.gl.get_uniform_location(lit_program, "u_mvp").unwrap() };
+        let lit_color_loc = unsafe {
+            self.gl
+                .get_uniform_location(lit_program, "u_color")
+                .unwrap()
+        };
+        let lit_ldir_loc = unsafe {
+            self.gl
+                .get_uniform_location(lit_program, "u_light_dir")
+                .unwrap()
+        };
+        let lit_amb_loc = unsafe {
+            self.gl
+                .get_uniform_location(lit_program, "u_ambient")
+                .unwrap()
+        };
+
+        let tex_program = unsafe {
+            let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
+            self.gl.shader_source(
+                vert,
+                r#"
+                #version 120
+                attribute vec3 a_pos;
+                attribute vec3 a_normal;
+                attribute vec2 a_uv;        // New: texture coordinates
+                uniform mat4 u_mvp;
+                varying vec3 v_normal;
+                varying vec2 v_uv;          // Pass to fragment shader
+                void main() {
+                    gl_Position = u_mvp * vec4(a_pos, 1.0);
+                    v_normal = a_normal;
+                    v_uv = a_uv;
+                }
+                "#,
+            );
+            self.gl.compile_shader(vert);
+
+            let frag = self.gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
+            self.gl.shader_source(
+                frag,
+                r#"
+                #version 120
+                uniform sampler2D u_tex;  // Texture sampler
+                uniform vec4 u_color;
+                uniform vec3 u_light_dir;
+                uniform float u_ambient;
+                varying vec3 v_normal;
+                varying vec2 v_uv;
+                void main() {
+                    vec3 n = normalize(v_normal);
+                    float d = max(dot(n, u_light_dir), max(dot(-n, u_light_dir), 0.0));
+                    float light = u_ambient + (1.0 - u_ambient) * d;
+
+                    vec4 tex_color = texture2D(u_tex, v_uv);  // Sample texture
+                    gl_FragColor = vec4(tex_color.rgb * u_color.rgb * light, tex_color.a * u_color.a);
+                }
+                "#
+            );
+            self.gl.compile_shader(frag);
+
+            let prog = self.gl.create_program().unwrap();
+            self.gl.attach_shader(prog, vert);
+            self.gl.attach_shader(prog, frag);
+            self.gl.bind_attrib_location(prog, 0, "a_pos");
+            self.gl.bind_attrib_location(prog, 1, "a_normal");
+            self.gl.bind_attrib_location(prog, 2, "a_uv");
+            self.gl.link_program(prog);
+            prog
+        };
+
+        let tex_mvp_loc = unsafe { self.gl.get_uniform_location(tex_program, "u_mvp").unwrap() };
+        let tex_color_loc = unsafe {
+            self.gl
+                .get_uniform_location(tex_program, "u_color")
+                .unwrap()
+        };
+        let tex_ldir_loc = unsafe {
+            self.gl
+                .get_uniform_location(tex_program, "u_light_dir")
+                .unwrap()
+        };
+        let tex_amb_loc = unsafe {
+            self.gl
+                .get_uniform_location(tex_program, "u_ambient")
+                .unwrap()
+        };
+        let tex_sampler_loc =
+            unsafe { self.gl.get_uniform_location(tex_program, "u_tex").unwrap() };
 
         self.platform.prepare_frame(&self.window, &mut self.imgui);
         let ui = self.imgui.frame();
@@ -787,6 +1032,12 @@ impl AppState {
                 lit_color_loc,
                 lit_ldir_loc,
                 lit_amb_loc,
+                tex_program,
+                tex_mvp_loc,
+                tex_color_loc,
+                tex_ldir_loc,
+                tex_amb_loc,
+                tex_sampler_loc,
             };
             self.vp3d.render(&mut backend, &mut self.editor);
             self.vp2d.render(&mut backend, &mut self.editor);
@@ -829,8 +1080,8 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => {
-                let cfg = state.editor.config.clone();
-                let _ = EditorConfig::save(cfg);
+                //let cfg = state.editor.config.clone();
+                let _ = state.editor.config.save(); //EditorConfig::save(cfg);
                 event_loop.exit()
             }
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {

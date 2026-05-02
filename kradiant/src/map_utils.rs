@@ -4,6 +4,7 @@ use std::fmt::Display;
 
 use num_traits::{Float, NumCast};
 
+use crate::Vec3;
 use crate::assets::resolve_editor_image_name;
 use crate::map::{BrushContent, Map};
 use crate::shader::ShaderDb;
@@ -66,4 +67,23 @@ pub fn format_float_trim<T: Float + Display>(value: T, points: u8) -> String {
     let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
 
     if trimmed.is_empty() { "0" } else { trimmed }.to_string()
+}
+
+pub fn rotate_vector(v: Vec3, axis: Vec3, degree: f32) -> Vec3 {
+    let radians = degree.to_radians();
+    let sin = radians.sin();
+    let cos = radians.cos();
+    let one_minus_cos = 1.0 - cos;
+
+    // Rodrigues' rotation formula
+    let k = axis.normalize();
+    let rotated = v * cos + k.cross(v) * sin + k * k.dot(v) * one_minus_cos;
+    rotated
+}
+
+pub fn compute_normal(plane_points: [Vec3; 3]) -> Vec3 {
+    let e1 = plane_points[1] - plane_points[0];
+    let e2 = plane_points[2] - plane_points[0];
+
+    e1.cross(e2).normalize_or_zero()
 }

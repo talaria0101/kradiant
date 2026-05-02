@@ -3,6 +3,7 @@
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui};
 use kradiant::loader::asset_loader::{AssetDb, AssetDbOptions};
 use kradiant::map::Map;
+use kradiant::shader::{QerParams, ShaderDb};
 use kradiant::texture::TextureImage;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -11,10 +12,20 @@ use std::path::PathBuf;
 
 use crate::util;
 
+/// GPU texture handle + metadata needed for 3D viewport rendering.
+#[derive(Debug, Clone)]
+pub struct RenderTextureInfo {
+    pub tex: glow::Texture,
+    pub size: [f32; 2],
+    pub qer: QerParams,
+}
+
 /// Manages asset loading and filesystem navigation for texture browsing.
 #[derive(Debug)]
 pub struct TextureBrowser {
     asset_db: Option<AssetDb>,
+    /// Cached shader database for qer_* parameter lookups.
+    pub shader_db: Option<ShaderDb>,
     current_path: String,
     /// Cached list of subdirectories under current path
     subdirs: Vec<String>,
@@ -28,8 +39,12 @@ pub struct TextureBrowser {
     pub tex_cache: HashMap<String, TextureImage>,
     /// GPU IDs for textures
     pub tex_gpu_cache: HashMap<String, (TextureId, [f32; 2])>,
+    /// GPU textures for 3D rendering (OpenGL texture object + size + shader params).
+    pub tex_render_cache: HashMap<String, RenderTextureInfo>,
     /// Textures waiting for upload to GPU
     pub pending_uploads: Vec<(String, TextureImage)>,
+    /// Textures waiting for upload to GPU for 3D rendering (mipmapped GL textures).
+    pub pending_render_uploads: Vec<(String, TextureImage)>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +169,7 @@ impl Default for TextureBrowser {
     fn default() -> Self {
         Self {
             asset_db: None,
+            shader_db: None,
             current_path: String::new(),
             subdirs: Vec::new(),
             textures: Vec::new(),
@@ -161,7 +177,9 @@ impl Default for TextureBrowser {
             selected: None,
             tex_cache: HashMap::new(),
             tex_gpu_cache: HashMap::new(),
+            tex_render_cache: HashMap::new(),
             pending_uploads: Vec::new(),
+            pending_render_uploads: Vec::new(),
         }
     }
 }
@@ -178,6 +196,7 @@ impl TextureBrowser {
             },
         ) {
             Ok(db) => {
+                self.shader_db = db.load_shader_db_cached().ok();
                 self.asset_db = Some(db);
                 self.refresh_contents();
             }
@@ -194,6 +213,8 @@ impl TextureBrowser {
         self.tex_cache.clear();
         self.tex_gpu_cache.clear();
         self.pending_uploads.clear();
+        // Note: tex_render_cache is NOT cleared here because textures used by the map
+        // for 3D rendering should persist when navigating directories.
 
         let Some(db) = &self.asset_db else {
             return;
@@ -328,11 +349,16 @@ impl TextureBrowser {
     pub fn clear_texture_caches(&mut self) {
         self.tex_cache.clear();
         self.tex_gpu_cache.clear();
+        self.tex_render_cache.clear();
         self.pending_uploads.clear();
+        self.pending_render_uploads.clear();
     }
 
     /// Enqueue a texture for GPU upload if not already cached or pending.
+    /// Note: browser textures (tex_gpu_cache) are loaded independently of 3D render textures
+    /// (tex_render_cache) so that navigating directories doesn't affect 3D viewport rendering.
     pub fn request_texture_load(&mut self, material: &str) {
+        // Only check browser-specific caches - 3D render cache is independent
         if self.tex_gpu_cache.contains_key(material)
             || self.tex_cache.contains_key(material)
             || self.pending_uploads.iter().any(|(k, _)| k == material)
@@ -342,9 +368,52 @@ impl TextureBrowser {
         match self.load_texture(material) {
             Ok(img) => {
                 self.tex_cache.insert(material.to_string(), img.clone());
-                self.pending_uploads.push((material.to_string(), img));
+                self.pending_uploads
+                    .push((material.to_string(), img.clone()));
+                // Also enqueue for 3D render cache in case it's needed there too
+                if !self.tex_render_cache.contains_key(material)
+                    && !self.pending_render_uploads.iter().any(|(k, _)| k == material)
+                {
+                    self.pending_render_uploads
+                        .push((material.to_string(), img));
+                }
             }
             Err(e) => eprintln!("tex load failed {material}: {e}"),
+        }
+    }
+
+    /// Upload pending render textures to OpenGL with mipmaps.
+    ///
+    /// This is separate from ImGui texture registration; it builds real GL texture objects
+    /// suitable for sampling in the 3D viewport.
+    pub fn process_pending_render_uploads(
+        &mut self,
+        gl: &glow::Context,
+        uploads_per_frame: usize,
+        upload_texture_mipmaps: unsafe fn(&glow::Context, [u32; 2], &[u8]) -> glow::Texture,
+    ) {
+        let batch: Vec<_> = self
+            .pending_render_uploads
+            .drain(..self.pending_render_uploads.len().min(uploads_per_frame))
+            .collect();
+
+        for (material, img) in batch {
+            let tex = unsafe { upload_texture_mipmaps(gl, [img.width, img.height], &img.rgba8) };
+            let qer = self
+                .shader_db
+                .as_ref()
+                .and_then(|db| db.get(&material))
+                .map(|sh| sh.qer.clone())
+                .unwrap_or_default();
+            //println!("{material} qer: {:#?}", &qer);
+            self.tex_render_cache.insert(
+                material,
+                RenderTextureInfo {
+                    tex,
+                    size: [img.width as f32, img.height as f32],
+                    qer,
+                },
+            );
         }
     }
 }

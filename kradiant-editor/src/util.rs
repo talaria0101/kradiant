@@ -7,7 +7,9 @@ use std::fs::create_dir_all;
 use std::io;
 use std::path::PathBuf;
 
-use crate::ui::{EditorState, Ortho};
+use crate::ui::console::ConsoleLogger;
+use crate::ui::undo::UndoRedo;
+use crate::ui::{EditorState, FaceSelection, Ortho, PatchVertexSelection};
 use glam::{Vec2, Vec3};
 
 pub fn get_config_dir() -> io::Result<PathBuf> {
@@ -182,40 +184,93 @@ pub fn new_map(state: &mut EditorState) {
     state.selected_patch_vertices.clear();
     state.selected_entity = None;
     state.undo.clear();
+    state.map_load_count = state.map_load_count.wrapping_add(1);
     log_info!(state.console, "New map");
 }
 
 pub fn open_map(state: &mut EditorState) {
-    let cwd = std::env::current_dir().unwrap();
+    let cwd = {
+        if !state.config.misc.recent_maps.is_empty() {
+            let last = state.config.misc.recent_maps.last().unwrap(); //.clone();
+            PathBuf::from(last).parent().unwrap().to_path_buf()
+        } else {
+            std::env::current_dir().unwrap()
+        }
+    };
     let p = rfd::FileDialog::new()
         .set_title("Open a map")
         .add_filter("CoD Map", &["map", "bak"])
         .set_directory(cwd)
         .pick_file();
 
-    if p.is_some() {
-        let path = p.unwrap();
+    if let Some(path) = p {
         let path_str = path.to_str().unwrap();
-        match map_loader::load_map(path_str) {
-            Ok(map) => {
-                state.selected_brushes.clear();
-                state.selected_faces.clear();
-                state.selected_patch_vertices.clear();
-                state.selected_entity = None;
-                state.map_path = path_str.to_string();
-                state.map = Some(map);
-                state.map_revision = state.map_revision.wrapping_add(1);
-                state.undo.clear();
-                log_info!(state.console, "Loaded map: {}", path_str);
-            }
-            Err(e) => {
-                log_error!(
-                    state.console,
-                    "Failed to load {}: {}",
-                    path_str,
-                    e.to_string()
-                );
-            }
+        perform_open_map(
+            &mut state.selected_brushes,
+            &mut state.selected_faces,
+            &mut state.selected_patch_vertices,
+            &mut state.selected_entity,
+            &mut state.map_path,
+            &mut state.map,
+            &mut state.map_revision,
+            &mut state.undo,
+            &mut state.map_load_count,
+            &mut state.config.misc.recent_maps,
+            &mut state.console,
+            path_str,
+        );
+    }
+}
+
+pub fn open_recent_map(state: &mut EditorState, path: &str) {
+    perform_open_map(
+        &mut state.selected_brushes,
+        &mut state.selected_faces,
+        &mut state.selected_patch_vertices,
+        &mut state.selected_entity,
+        &mut state.map_path,
+        &mut state.map,
+        &mut state.map_revision,
+        &mut state.undo,
+        &mut state.map_load_count,
+        &mut state.config.misc.recent_maps,
+        &mut state.console,
+        path,
+    );
+}
+
+fn perform_open_map(
+    selected_brushes: &mut Vec<(usize, usize)>,
+    selected_faces: &mut Vec<FaceSelection>,
+    selected_patch_vertices: &mut Vec<PatchVertexSelection>,
+    selected_entity: &mut Option<usize>,
+    map_path: &mut String,
+    map: &mut Option<Map>,
+    map_revision: &mut u64,
+    undo: &mut UndoRedo,
+    map_load_count: &mut u64,
+    recent_maps: &mut Vec<String>,
+    console: &mut ConsoleLogger,
+    path: &str,
+) {
+    match map_loader::load_map(path) {
+        Ok(loaded_map) => {
+            selected_brushes.clear();
+            selected_faces.clear();
+            selected_patch_vertices.clear();
+            *selected_entity = None;
+            *map_path = path.to_string();
+            *map = Some(loaded_map);
+            *map_revision = map_revision.wrapping_add(1);
+            undo.clear();
+            *map_load_count = map_load_count.wrapping_add(1);
+            let path_str = path.to_string();
+            recent_maps.retain(|p| p != &path_str);
+            recent_maps.push(path_str);
+            log_info!(console, "Loaded map: {}", path);
+        }
+        Err(e) => {
+            log_error!(console, "Failed to load {}: {}", path, e.to_string());
         }
     }
 }

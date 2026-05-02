@@ -1,6 +1,7 @@
 use crate::map::{
     Brush, BrushContent, BrushId, Entity, EntityId, Face, Map, SurfaceFlags, TextureParams,
 };
+use crate::texmap::face_plane_normal;
 use crate::{Quat, Vec3};
 
 #[derive(Debug, Clone, Copy)]
@@ -1185,9 +1186,261 @@ fn ray_triangle_intersection(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Ve
     Some(t)
 }
 
+/// Find brushes that touch (adjacent or overlapping) the target brush.
+/// Uses epsilon to handle floating point precision.
+pub fn find_touching_brushes(
+    map: &mut Map,
+    target_entity: usize,
+    target_brush: usize,
+    eps: f32,
+) -> Vec<(usize, usize)> {
+    let mut touching = Vec::new();
+
+    // Get target brush AABB and polygons
+    let (target_aabb, target_polys) = {
+        let brush = &mut map.entities[target_entity].brushes[target_brush];
+        match brush.get_polygons_and_aabb() {
+            Some((aabb, polys)) => (aabb.clone(), polys.to_vec()),
+            None => return touching,
+        }
+    };
+
+    for (e_idx, entity) in map.entities.iter_mut().enumerate() {
+        for (b_idx, brush) in entity.brushes.iter_mut().enumerate() {
+            if e_idx == target_entity && b_idx == target_brush {
+                continue;
+            }
+
+            // Get AABB and polygons (computes if not cached)
+            let Some((other_aabb, other_polys)) = brush.get_polygons_and_aabb() else {
+                continue;
+            };
+
+            // AABB proximity first
+            if !aabb_within_distance(&target_aabb, other_aabb, eps) {
+                continue;
+            }
+
+            // Detailed geometry check
+            if brush_surfaces_within_distance(&target_polys, other_polys, eps) {
+                touching.push((e_idx, b_idx));
+            }
+        }
+    }
+    touching
+}
+
+/// Check if AABBs are within distance eps of each other (touch or nearly touch)
+fn aabb_within_distance(a: &Aabb, b: &Aabb, eps: f32) -> bool {
+    a.min.x <= b.max.x + eps
+        && a.max.x + eps >= b.min.x
+        && a.min.y <= b.max.y + eps
+        && a.max.y + eps >= b.min.y
+        && a.min.z <= b.max.z + eps
+        && a.max.z + eps >= b.min.z
+}
+
+/// Check if two brush polygon surfaces are within epsilon distance of each other.
+/// This detects touching/adjacent brushes by checking vertex-to-triangle distances.
+fn brush_surfaces_within_distance(
+    polys_a: &[(Vec<Vec3>, Vec<u32>)],
+    polys_b: &[(Vec<Vec3>, Vec<u32>)],
+    eps: f32,
+) -> bool {
+    let eps_sq = eps * eps;
+
+    // Collect all vertices and triangles from both brushes
+    let mut verts_a: Vec<Vec3> = Vec::new();
+    let mut tris_a: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+    for (verts, indices) in polys_a {
+        verts_a.extend(verts);
+        for tri in indices.chunks_exact(3) {
+            tris_a.push((
+                verts[tri[0] as usize],
+                verts[tri[1] as usize],
+                verts[tri[2] as usize],
+            ));
+        }
+    }
+
+    let mut verts_b: Vec<Vec3> = Vec::new();
+    let mut tris_b: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+    for (verts, indices) in polys_b {
+        verts_b.extend(verts);
+        for tri in indices.chunks_exact(3) {
+            tris_b.push((
+                verts[tri[0] as usize],
+                verts[tri[1] as usize],
+                verts[tri[2] as usize],
+            ));
+        }
+    }
+
+    // Check if any vertex of A is close to any triangle of B
+    for va in &verts_a {
+        for (v0, v1, v2) in &tris_b {
+            if point_triangle_distance_sq(*va, *v0, *v1, *v2) <= eps_sq {
+                return true;
+            }
+        }
+    }
+
+    // Check if any vertex of B is close to any triangle of A
+    for vb in &verts_b {
+        for (v0, v1, v2) in &tris_a {
+            if point_triangle_distance_sq(*vb, *v0, *v1, *v2) <= eps_sq {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Compute squared distance from point p to triangle (v0, v1, v2).
+fn point_triangle_distance_sq(p: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> f32 {
+    // Compute triangle normal and plane distance
+    let e1 = v1 - v0;
+    let e2 = v2 - v0;
+    let n = e1.cross(e2);
+    let n_len_sq = n.length_squared();
+
+    if n_len_sq < 1e-12 {
+        // Degenerate triangle
+        return f32::MAX;
+    }
+
+    // Project point onto triangle plane
+    let n = n / n_len_sq.sqrt();
+    let plane_dist = (p - v0).dot(n);
+    let p_proj = p - n * plane_dist;
+
+    // Check if projected point is inside triangle using barycentric coordinates
+    let w = p_proj - v0;
+
+    let dot00 = e2.dot(e2);
+    let dot01 = e2.dot(e1);
+    let dot02 = e2.dot(w);
+    let dot11 = e1.dot(e1);
+    let dot12 = e1.dot(w);
+
+    let inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01);
+    let u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
+    let v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
+
+    if u >= 0.0 && v >= 0.0 && (u + v) <= 1.0 {
+        // Point projects inside triangle - distance is just plane distance
+        return plane_dist * plane_dist;
+    }
+
+    // Point is outside triangle - find closest point on triangle edges
+    let d0 = point_segment_distance_sq(p, v0, v1);
+    let d1 = point_segment_distance_sq(p, v1, v2);
+    let d2 = point_segment_distance_sq(p, v2, v0);
+
+    d0.min(d1).min(d2)
+}
+
+/// Compute squared distance from point p to line segment (a, b).
+fn point_segment_distance_sq(p: Vec3, a: Vec3, b: Vec3) -> f32 {
+    let ab = b - a;
+    let ap = p - a;
+    let ab_len_sq = ab.length_squared();
+
+    if ab_len_sq < 1e-12 {
+        // Degenerate segment
+        return ap.length_squared();
+    }
+
+    let t = ap.dot(ab) / ab_len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let closest = a + ab * t;
+    (p - closest).length_squared()
+}
+
+/// Find brushes that are completely inside the target brush's volume.
+/// Uses AABB for early-out, then checks if all vertices are inside all target faces.
+pub fn find_inside_brushes(
+    map: &mut Map,
+    target_entity: usize,
+    target_brush: usize,
+) -> Vec<(usize, usize)> {
+    // Get target brush data
+    let (target_aabb, target_planes) = {
+        let brush = &map.entities[target_entity].brushes[target_brush];
+
+        // Compute plane equations from faces (for Convex brushes)
+        let planes: Vec<(Vec3, f32)> = match &brush.content {
+            BrushContent::Convex(faces) => faces
+                .iter()
+                .map(|f| {
+                    let n = face_plane_normal(f);
+                    let d = -n.dot(f.plane_points[0]);
+                    (n, d)
+                })
+                .collect(),
+            BrushContent::Patch(_) => return Vec::new(), // Skip patches
+        };
+
+        // Now get AABB (needs mutable borrow for caching)
+        let brush_mut = &mut map.entities[target_entity].brushes[target_brush];
+        let Some((aabb, _)) = brush_mut.get_polygons_and_aabb() else {
+            return Vec::new();
+        };
+
+        (aabb.clone(), planes)
+    };
+
+    let mut inside = Vec::new();
+
+    for (entity_idx, entity) in map.entities.iter_mut().enumerate() {
+        for (brush_idx, brush) in entity.brushes.iter_mut().enumerate() {
+            if entity_idx == target_entity && brush_idx == target_brush {
+                continue;
+            }
+
+            // AABB early-out: must be inside target AABB
+            if !(brush.aabb.min.x >= target_aabb.min.x
+                && brush.aabb.max.x <= target_aabb.max.x
+                && brush.aabb.min.y >= target_aabb.min.y
+                && brush.aabb.max.y <= target_aabb.max.y
+                && brush.aabb.min.z >= target_aabb.min.z
+                && brush.aabb.max.z <= target_aabb.max.z)
+            {
+                continue;
+            }
+
+            // Get candidate brush vertices
+            let Some((_, other_polys)) = brush.get_polygons_and_aabb() else {
+                continue;
+            };
+
+            // Collect all vertices from this brush
+            let mut verts = Vec::new();
+            for (v, _) in other_polys {
+                verts.extend(v.iter().copied());
+            }
+
+            // Check if ALL vertices are inside ALL target planes
+            let all_inside = verts.iter().all(|v| {
+                target_planes.iter().all(|(n, d)| {
+                    n.dot(*v) + d >= -0.001 // epsilon for floating point
+                })
+            });
+
+            if all_inside {
+                inside.push((entity_idx, brush_idx));
+            }
+        }
+    }
+
+    inside
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::parse_map_string;
 
     #[test]
     fn convex_brush_from_aabb_is_inward_by_default() {
@@ -1210,5 +1463,153 @@ mod tests {
             &mut brush,
             &mut generation
         ));
+    }
+
+    #[test]
+    fn find_touching_brushes_detects_touching_in_multi_entity_map() {
+        let map_content = include_str!("../test/multi_entity.map");
+        let mut map = parse_map_string(map_content).expect("failed to parse map");
+
+        // Brush 0 sits on top of brush 1 (face 1 at z=0)
+        let touching = find_touching_brushes(&mut map, 0, 0, 1.0);
+        assert!(
+            touching.contains(&(0, 1)),
+            "brush 0 should touch brush 1 (sits on top). Found: {:?}",
+            touching
+        );
+
+        // Same from brush 1's perspective
+        let touching = find_touching_brushes(&mut map, 0, 1, 0.1);
+        assert!(
+            touching.contains(&(0, 0)),
+            "brush 1 should detect brush 0 touching it"
+        );
+
+        // Brush 1 has a face at x=576 (face 3), so it extends to touch brush 2 at x=160-224
+        let touching = find_touching_brushes(&mut map, 0, 1, 0.1);
+        assert!(
+            touching.contains(&(0, 2)),
+            "brush 1 should touch brush 2 (extends to x=576)"
+        );
+
+        // Entity 0 (worldspawn) and Entity 3 (trigger) don't touch (z ranges differ)
+        let touching = find_touching_brushes(&mut map, 0, 0, 0.1);
+        let touches_entity3 = touching.iter().any(|(e, b)| *e == 3 && *b == 0);
+        assert!(
+            !touches_entity3,
+            "worldspawn brush should not touch entity 3 trigger"
+        );
+
+        // Entity 3 and Entity 4 are far apart in X (558-576 vs -50 to -32)
+        let touching = find_touching_brushes(&mut map, 3, 0, 0.1);
+        let touches_entity4 = touching.iter().any(|(e, b)| *e == 4 && *b == 0);
+        assert!(
+            !touches_entity4,
+            "entity 3 trigger should not touch entity 4 trigger"
+        );
+    }
+
+    #[test]
+    fn find_touching_brushes_detects_adjacent_brushes() {
+        // Create two adjacent brushes that share a face
+        let brush1 = convex_brush_from_aabb(
+            BrushId(0),
+            Aabb::from_points(Vec3::new(0.0, 0.0, 0.0), Vec3::new(64.0, 64.0, 64.0)),
+            "common/caulk",
+        );
+        let brush2 = convex_brush_from_aabb(
+            BrushId(1),
+            Aabb::from_points(Vec3::new(64.0, 0.0, 0.0), Vec3::new(128.0, 64.0, 64.0)),
+            "common/caulk",
+        );
+
+        let mut map = Map::default();
+        map.entities.push(Entity {
+            id: EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: std::collections::HashMap::new(),
+            brushes: vec![brush1],
+        });
+        map.entities.push(Entity {
+            id: EntityId(1),
+            classname: "func_group".to_string(),
+            properties: std::collections::HashMap::new(),
+            brushes: vec![brush2],
+        });
+
+        // Brush at entity 0, brush 0 should touch brush at entity 1, brush 0
+        let touching = find_touching_brushes(&mut map, 0, 0, 0.1);
+        assert!(touching.contains(&(1, 0)), "adjacent brushes should touch");
+
+        // Same test from the other direction
+        let touching = find_touching_brushes(&mut map, 1, 0, 0.1);
+        assert!(
+            touching.contains(&(0, 0)),
+            "adjacent brushes should touch (reverse)"
+        );
+    }
+
+    #[test]
+    fn find_touching_brushes_with_epsilon_gap() {
+        // Create two brushes with a small gap between them
+        let brush1 = convex_brush_from_aabb(
+            BrushId(0),
+            Aabb::from_points(Vec3::new(0.0, 0.0, 0.0), Vec3::new(64.0, 64.0, 64.0)),
+            "common/caulk",
+        );
+        let brush2 = convex_brush_from_aabb(
+            BrushId(1),
+            Aabb::from_points(Vec3::new(65.0, 0.0, 0.0), Vec3::new(129.0, 64.0, 64.0)),
+            "common/caulk",
+        );
+
+        let mut map = Map::default();
+        map.entities.push(Entity {
+            id: EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: std::collections::HashMap::new(),
+            brushes: vec![brush1],
+        });
+        map.entities.push(Entity {
+            id: EntityId(1),
+            classname: "func_group".to_string(),
+            properties: std::collections::HashMap::new(),
+            brushes: vec![brush2],
+        });
+
+        // With small epsilon, they don't touch (gap of 1 unit)
+        let touching = find_touching_brushes(&mut map, 0, 0, 0.5);
+        assert!(
+            !touching.contains(&(1, 0)),
+            "brushes with 1-unit gap should not touch with eps=0.5"
+        );
+
+        // With larger epsilon, they should touch
+        let touching = find_touching_brushes(&mut map, 0, 0, 2.0);
+        assert!(
+            touching.contains(&(1, 0)),
+            "brushes with 1-unit gap should touch with eps=2.0"
+        );
+    }
+
+    #[test]
+    fn find_touching_brushes_excludes_self() {
+        // Create a single brush
+        let brush = convex_brush_from_aabb(
+            BrushId(0),
+            Aabb::from_points(Vec3::new(0.0, 0.0, 0.0), Vec3::new(64.0, 64.0, 64.0)),
+            "common/caulk",
+        );
+
+        let mut map = Map::default();
+        map.entities.push(Entity {
+            id: EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: std::collections::HashMap::new(),
+            brushes: vec![brush],
+        });
+
+        let touching = find_touching_brushes(&mut map, 0, 0, 0.1);
+        assert!(touching.is_empty(), "brush should not touch itself");
     }
 }

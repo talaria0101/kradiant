@@ -4,10 +4,13 @@
 const CTRL: u32 = 1;
 const SHIFT: u32 = 2;
 
+use std::collections::HashSet;
+
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
+use kradiant::editing;
 use kradiant::map::Map;
 
-use crate::config::EditorConfig;
+use crate::config::{self, EditorConfig};
 use crate::icons::EditorIcons;
 use crate::images::EditorImages;
 use crate::theme::{EditorPalette, ThemeEntry, theme_from_str};
@@ -80,8 +83,13 @@ fn icon_button_toggle(
     clicked
 }
 
-fn icon_button_click(ui: &Ui, id: &str, icon: Option<TextureId>, fallback_label: &str, tooltip: &str) -> bool
-{
+fn icon_button_click(
+    ui: &Ui,
+    id: &str,
+    icon: Option<TextureId>,
+    fallback_label: &str,
+    tooltip: &str,
+) -> bool {
     let clicked = if let Some(tid) = icon {
         ui.image_button_config(id, tid, [24.0, 24.0]).build()
     } else {
@@ -114,12 +122,12 @@ fn key_combo_pressed(ui: &Ui, main_key: dear_imgui_rs::Key, modifiers: u32) -> b
 
 pub struct EditorState {
     pub config: EditorConfig,
+    //pub view_config_rev: u64,
     pub show_demo: bool,
     pub show_about: bool,
     pub toolbar_height: f32,
     pub map_path: String,
     pub map_revision: u64,
-    //pub map_selection: u64,
     pub undo: UndoRedo,
     pub view2d: View2D,
     pub view3d: View3D,
@@ -135,6 +143,7 @@ pub struct EditorState {
     pub console: ConsoleLogger,
     pub con_filter: String,
     pub map: Option<kradiant::map::Map>,
+    pub map_load_count: u64,
     pub selected_entity: Option<usize>,
     pub selected_brushes: Vec<(usize, usize)>,
     pub selected_faces: Vec<FaceSelection>,
@@ -206,6 +215,7 @@ impl Default for EditorState {
             console: ConsoleLogger::default(),
             con_filter: String::new(),
             map: Some(kradiant::map::Map::default()),
+            map_load_count: 0,
             selected_entity: None,
             selected_brushes: Vec::new(),
             selected_faces: Vec::new(),
@@ -224,10 +234,13 @@ impl Default for EditorState {
 
         log_info!(s.console, "Kradiant editor started");
 
-        match EditorConfig::load() {
-            Ok(c) => s.config = c,
-            Err(e) => log_error!(s.console, "Failed to load configuration: {}", e.to_string()),
-        }
+        s.config = {
+            let res = EditorConfig::load();
+            if res.1.is_some() {
+                log_error!(s.console, "{}", res.1.unwrap());
+            }
+            res.0
+        };
 
         log_warn!(s.console, "this is a warning");
         s
@@ -272,7 +285,6 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         let map = &mut state.map;
         let selection_rgba = state.selection_rgba;
         let selection_rect_rgba = state.selection_rect_rgba;
-        //let map_selection = &mut state.map_selection;
 
         view2d_ref.draw_impl(
             ui,
@@ -293,7 +305,6 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             selection_rgba,
             selection_rect_rgba,
             dt,
-            //map_selection,
         );
     }
 
@@ -453,6 +464,15 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
             if ui.menu_item_with_shortcut("Open…", "Ctrl + O") {
                 util::open_map(state);
             }
+            ui.menu("Open recent…", || {
+                let mut paths: Vec<String> = state.config.misc.recent_maps.clone();
+                paths.reverse();
+                for path in paths {
+                    if ui.menu_item(&path) {
+                        util::open_recent_map(state, &path);
+                    }
+                }
+            });
             if ui.menu_item_with_shortcut("Save", "Ctrl + S") {
                 util::save_map(state);
             }
@@ -477,7 +497,7 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
 
                 for (i, step) in grid_steps.iter().enumerate() {
                     let step_u8: u8 = step.parse().unwrap();
-                    let mut selected = state.config.grid_minor_step == step_u8;
+                    let mut selected = state.config.view.grid_minor_step == step_u8;
                     let active = !selected;
                     if ui.menu_item_toggle_with_shortcut(
                         step,
@@ -491,12 +511,66 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                     }
                 }
             });
+            ui.menu("3D Rendering", || {
+                let mut selected = state.config.view.wireframe;
+                if ui.menu_item_toggle_no_shortcut("Wireframe", &mut selected, true) {
+                    state.config.update("wireframe", !state.config.view.wireframe as u8, &mut state.console);
+                }
+                ui.separator_horizontal();
+                for mode in config::RenderMode::all() {
+                    let mut selected = state.config.view.rendermode == mode;
+                    let active = !selected;
+                    if ui.menu_item_toggle_no_shortcut(mode.as_ref(), &mut selected, active) {
+                        let num = mode as i32;
+                        state.config.update("rendermode", num, &mut state.console);
+                    }
+                }
+            });
+        });
+
+        ui.menu("Selection", || {
+            if ui.menu_item("Grow") {
+                if let Some(map) = state.map.as_mut() {
+                    use std::collections::HashSet;
+
+                    let current: HashSet<_> = state.selected_brushes.iter().copied().collect();
+                    let touching: HashSet<_> = state
+                        .selected_brushes
+                        .iter()
+                        .flat_map(|sel| editing::find_touching_brushes(map, sel.0, sel.1, 1.0))
+                        .collect();
+
+                    state.selected_brushes.extend(touching.difference(&current));
+                }
+            }
+            if ui.menu_item("Inverse") {
+                if let Some(map) = state.map.as_mut() {
+                    let current_selection: HashSet<_> =
+                        state.selected_brushes.iter().copied().collect();
+
+                    let mut inverse = Vec::new();
+                    for (entity_idx, entity) in map.entities.iter().enumerate() {
+                        for (brush_idx, _brush) in entity.brushes.iter().enumerate() {
+                            let brush_id = (entity_idx, brush_idx);
+                            if !current_selection.contains(&brush_id) {
+                                inverse.push(brush_id);
+                            }
+                        }
+                    }
+
+                    state.selected_brushes.clear();
+                    state.selected_brushes.extend(inverse);
+                }
+            }
+            if ui.is_item_hovered() {
+                ui.tooltip_text("Select all brushes except the currently selected ones");
+            }
         });
 
         ui.menu("Misc", || {
             ui.menu("Theme", || {
                 for (i, entry) in state.themes.iter().enumerate() {
-                    let mut selected = state.config.active_theme == i;
+                    let mut selected = state.config.misc.theme == i;
                     let active = !selected;
                     if ui.menu_item_toggle_no_shortcut(&entry.name, &mut selected, active) {
                         state.pending_theme = Some(i);
@@ -599,19 +673,19 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             "##grid_snapping",
             state.icons.grid_snap,
             "Grid Snap",
-            state.config.grid_snap,
+            state.config.view.grid_snap,
             "Toggle Grid Snapping",
         ) {
             state.config.update(
                 "grid_snap",
-                !state.config.grid_snap as u8,
+                !state.config.view.grid_snap as u8,
                 &mut state.console,
             );
         }
         if ui.is_key_pressed(dear_imgui_rs::Key::G) {
             state.config.update(
                 "grid_snap",
-                !state.config.grid_snap as u8,
+                !state.config.view.grid_snap as u8,
                 &mut state.console,
             );
         }
@@ -770,7 +844,13 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         ui.separator_vertical();
         ui.same_line();
 
-        if icon_button_click(ui, "##donate", state.icons.donate, "Donate", "Support the development by donating") {
+        if icon_button_click(
+            ui,
+            "##donate",
+            state.icons.donate,
+            "Donate",
+            "Support the development by donating",
+        ) {
             state.show_about = true;
         }
 

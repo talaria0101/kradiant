@@ -286,7 +286,7 @@ impl View2D {
                         {
                             let ticks = wheel.round() as i32;
                             if ticks != 0 {
-                                let step = (config.grid_minor_step as f32).max(1.0);
+                                let step = (config.view.grid_minor_step as f32).max(1.0);
                                 let mut delta = match self.ortho_axis {
                                     Ortho::XY => Vec3::new(0.0, 0.0, step * ticks as f32),
                                     Ortho::XZ => Vec3::new(0.0, step * ticks as f32, 0.0),
@@ -354,11 +354,11 @@ impl View2D {
                     Ortho::XZ | Ortho::YZ => [world[0], -world[1]],
                 };
 
-                let step = config.grid_minor_step as f32;
+                let step = config.view.grid_minor_step as f32;
                 let my_snapping = if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) {
-                    !config.grid_snap
+                    !config.view.grid_snap
                 } else {
-                    config.grid_snap
+                    config.view.grid_snap
                 };
 
                 let (snapped, snapped_i) = if my_snapping {
@@ -597,7 +597,7 @@ impl View2D {
                                     &stretch.selection_aabb,
                                     stretch.faces,
                                     delta,
-                                    config.grid_minor_step as i32,
+                                    config.view.grid_minor_step as i32,
                                     my_snapping,
                                 );
                             }
@@ -1087,7 +1087,7 @@ impl View2D {
                                                                         &mut map.generation,
                                                                         stretch.faces,
                                                                         delta,
-                                                                        config.grid_minor_step as i32,
+                                                                        config.view.grid_minor_step as i32,
                                                                     ) {
                                                                         any = true;
                                                                     }
@@ -1167,7 +1167,7 @@ impl View2D {
                                                                         &mut map.generation,
                                                                         stretch.faces,
                                                                         delta,
-                                                                        config.grid_minor_step as i32,
+                                                                        config.view.grid_minor_step as i32,
                                                                     ) {
                                                                         any = true;
                                                                     }
@@ -1307,7 +1307,7 @@ impl View2D {
                     && !selected_faces.is_empty()
                     && self.drag_start.is_none()
                 {
-                    let step = (config.grid_minor_step as f32).max(1.0);
+                    let step = (config.view.grid_minor_step as f32).max(1.0);
                     let depth_axis = match self.ortho_axis {
                         Ortho::XY => Vec3::Z,
                         Ortho::XZ => Vec3::Y,
@@ -1350,6 +1350,13 @@ impl View2D {
                                 }
                             }
                         }
+                    }
+                }
+
+                if canvas_interacting && ui.is_mouse_double_clicked(MouseButton::Right) && !ui.is_popup_open("2d_view_menu") {
+                    let [dx, dy] = ui.mouse_drag_delta(MouseButton::Right);
+                    if dx.abs() < 2.0 && dy.abs() < 2.0 {
+                        ui.open_popup("2d_view_menu");
                     }
                 }
 
@@ -1729,6 +1736,74 @@ impl View2D {
                         let h1 = to_screen_f([max_x, max_y]);
                         draw.add_line([h0[0], h0[1] + 3.5], [h1[0], h1[1] + 3.5], col_u32)
                         .build();
+                    }
+
+                    // Context menu popup
+                    if let Some(_popup) = ui.begin_popup("2d_view_menu") {
+                        ui.menu("Select", || {
+                            if ui.menu_item("Complete Tall") {
+                                log_info!(console, "unimplemented");
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text("DUNNO");
+                            }
+                            if ui.menu_item("Partial Tall") {
+                                log_info!(console, "unimplemented");
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text("DUNNO");
+                            }
+                            if ui.menu_item("Touching") {
+                                if let Some(map) = map.as_mut() {
+                                    let touching: HashSet<_> = selected_brushes
+                                        .iter()
+                                        .flat_map(|sel| editing::find_touching_brushes(map, sel.0, sel.1, 1.0))
+                                        .collect();
+
+                                    selected_brushes.clear();
+                                    selected_brushes.extend(touching);
+                                }
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text("Select the brushes touching this brush");
+                            }
+                            if ui.menu_item("Inside") {
+                                if let Some(map) = map.as_mut() {
+                                    let inside: HashSet<_> = selected_brushes
+                                        .iter()
+                                        .flat_map(|sel| editing::find_inside_brushes(map, sel.0, sel.1))
+                                        .collect();
+
+                                    selected_brushes.clear();
+                                    selected_brushes.extend(inside);
+                                }
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text("Select the brushes inside this brush");
+                            }
+                        });
+                        ui.separator_horizontal();
+                        ui.menu("Make", || {
+                            if ui.menu_item("Detail") {
+                                log_info!(console, "unimplemented");
+                            }
+                            if ui.menu_item("Structural") {
+                                log_info!(console, "unimplemented");
+                            }
+                            if ui.menu_item("Weapon Clip") {
+                                log_info!(console, "unimplemented");
+                            }
+                            if ui.menu_item("Non-Colliding") {
+                                log_info!(console, "unimplemented");
+                            }
+                        });
+                        ui.separator_horizontal();
+                        if ui.menu_item("Other") {
+                            log_info!(console, "unimplemented");
+                        }
+                        if ui.menu_item("Stuff") {
+                            log_info!(console, "unimplemented");
+                        }
                     }
                 });
             });
@@ -2715,7 +2790,7 @@ fn create_brush_from_drag(
         return None;
     }
 
-    let fallback = (config.grid_minor_step as f32).max(1.0);
+    let fallback = (config.view.grid_minor_step as f32).max(1.0);
     let last = view.last_aabb.as_ref();
     let (min3, max3) = match view.ortho_axis {
         Ortho::XY => {

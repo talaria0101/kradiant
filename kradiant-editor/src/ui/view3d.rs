@@ -69,7 +69,7 @@ impl View3D {
                 ui.set_next_item_width(80.0);
                 ui.slider_config("##fov", 40.0f32, 120.0f32)
                     .display_format("%.0f°")
-                    .build(&mut config.view3d_fov);
+                    .build(&mut config.view.fov);
 
                 ui.same_line();
                 if ui.button("Reset") {

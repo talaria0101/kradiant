@@ -170,7 +170,7 @@ impl Viewport2D {
             const MIN_MAJOR_STEP_PX: f32 = 8.0;
             const MAJOR_PROMOTE_FACTOR: f32 = 64.0;
 
-            let base_minor_world = editor.config.grid_minor_step.max(1) as f32;
+            let base_minor_world = editor.config.view.grid_minor_step.max(1) as f32;
             let mut minor_world = base_minor_world;
             let mut major_world = 64.0f32.max(minor_world);
 
@@ -560,7 +560,7 @@ impl Viewport2D {
                                                     &*brush,
                                                     faces,
                                                     delta,
-                                                    editor.config.grid_minor_step as i32,
+                                                    editor.config.view.grid_minor_step as i32,
                                                 )
                                             {
                                                 for (positions, _) in polys {
