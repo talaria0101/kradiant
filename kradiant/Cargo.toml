@@ -3,6 +3,9 @@ name = "kradiant"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
 [dependencies]
 thiserror = "2.0"
 log = "0.4"

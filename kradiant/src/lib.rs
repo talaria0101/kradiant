@@ -21,6 +21,7 @@ pub mod render;
 pub mod shader;
 pub mod texmap;
 pub mod texture;
+pub mod ffi;
 
 /*
 pub use geometry::{

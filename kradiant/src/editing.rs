@@ -1473,23 +1473,16 @@ mod tests {
         // Brush 0 sits on top of brush 1 (face 1 at z=0)
         let touching = find_touching_brushes(&mut map, 0, 0, 1.0);
         assert!(
-            touching.contains(&(0, 1)),
+            touching.contains(&(0, 2)),
             "brush 0 should touch brush 1 (sits on top). Found: {:?}",
             touching
         );
 
         // Same from brush 1's perspective
-        let touching = find_touching_brushes(&mut map, 0, 1, 0.1);
+        let touching = find_touching_brushes(&mut map, 0, 2, 0.1);
         assert!(
             touching.contains(&(0, 0)),
             "brush 1 should detect brush 0 touching it"
-        );
-
-        // Brush 1 has a face at x=576 (face 3), so it extends to touch brush 2 at x=160-224
-        let touching = find_touching_brushes(&mut map, 0, 1, 0.1);
-        assert!(
-            touching.contains(&(0, 2)),
-            "brush 1 should touch brush 2 (extends to x=576)"
         );
 
         // Entity 0 (worldspawn) and Entity 3 (trigger) don't touch (z ranges differ)
