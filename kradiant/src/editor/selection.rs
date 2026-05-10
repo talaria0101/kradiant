@@ -12,4 +12,3 @@ pub struct PatchVertexSelection {
     pub row: usize,
     pub col: usize,
 }
-

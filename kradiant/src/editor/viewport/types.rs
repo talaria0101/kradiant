@@ -24,7 +24,7 @@ impl Ortho {
     }
 }
 
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum DragMode {
     #[default]
     NewBrush,
@@ -53,4 +53,3 @@ pub struct AxisLock {
     pub y: bool,
     pub z: bool,
 }
-

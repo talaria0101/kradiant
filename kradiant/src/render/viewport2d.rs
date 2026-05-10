@@ -1,15 +1,16 @@
 //! 2D Viewport
 
-use crate::RenderBackend;
-use crate::{ui, util};
+use crate::core_util::{self, project_to_2d};
+use crate::editing::AffineScale;
+use crate::editor::EditorState;
+use crate::editor::viewport::{DragMode, Ortho, StretchMode};
+use crate::map::BrushContent;
+use crate::render::RenderBackend;
 use glam::Vec3;
-use kradiant::editing::AffineScale;
-use kradiant::map::BrushContent;
-use ui::EditorState;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct View2dCache {
-    axis: ui::Ortho,
+    axis: Ortho,
     map_present: bool,
     map_ptr: usize,
     map_generation: u64,
@@ -274,19 +275,13 @@ impl Viewport2D {
 
             // brush geometry
             let map_ptr = editor
-                .core
                 .map
                 .as_ref()
-                .map(|m| (m as *const kradiant::map::Map) as usize)
+                .map(|m| (m as *const crate::map::Map) as usize)
                 .unwrap_or(0);
-            let map_generation = editor
-                .core
-                .map
-                .as_ref()
-                .map(|m| m.generation)
-                .unwrap_or(0u64);
-            let map_revision = editor.core.map_revision;
-            let map_present = editor.core.map.is_some();
+            let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0u64);
+            let map_revision = editor.map_revision;
+            let map_present = editor.map.is_some();
 
             if !map_present {
                 self.grid_vertices.clear();
@@ -347,16 +342,16 @@ impl Viewport2D {
             if rebuild_view2d {
                 if let Some(cache) = self.cache {
                     let view_dir = match axis {
-                        ui::Ortho::XY => glam::Vec3::new(0.0, 0.0, -1.0),
-                        ui::Ortho::XZ => glam::Vec3::new(0.0, -1.0, 0.0),
-                        ui::Ortho::YZ => glam::Vec3::new(-1.0, 0.0, 0.0),
+                        Ortho::XY => glam::Vec3::new(0.0, 0.0, -1.0),
+                        Ortho::XZ => glam::Vec3::new(0.0, -1.0, 0.0),
+                        Ortho::YZ => glam::Vec3::new(-1.0, 0.0, 0.0),
                     };
                     let view_min_x = cache.cull_left.min(cache.cull_right);
                     let view_max_x = cache.cull_left.max(cache.cull_right);
                     let view_min_y = cache.cull_top.min(cache.cull_bottom);
                     let view_max_y = cache.cull_top.max(cache.cull_bottom);
 
-                    if let Some(map) = &mut editor.core.map {
+                    if let Some(map) = &mut editor.map {
                         for entity in &mut map.entities {
                             for brush in &mut entity.brushes {
                                 match &mut brush.content {
@@ -368,19 +363,19 @@ impl Viewport2D {
 
                                         // Coarse frustum cull by brush AABB before iterating faces/edges.
                                         let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
-                                            ui::Ortho::XY => (
+                                            Ortho::XY => (
                                                 aabb.min.x as f32,
                                                 aabb.max.x as f32,
                                                 -(aabb.max.y as f32),
                                                 -(aabb.min.y as f32),
                                             ),
-                                            ui::Ortho::XZ => (
+                                            Ortho::XZ => (
                                                 aabb.min.x as f32,
                                                 aabb.max.x as f32,
                                                 -(aabb.max.z as f32),
                                                 -(aabb.min.z as f32),
                                             ),
-                                            ui::Ortho::YZ => (
+                                            Ortho::YZ => (
                                                 aabb.min.y as f32,
                                                 aabb.max.y as f32,
                                                 -(aabb.max.z as f32),
@@ -416,8 +411,8 @@ impl Viewport2D {
                                                 let b = verts[(i + 1) % verts.len()];
 
                                                 // Frustum cull in projected 2D space.
-                                                let pa = util::project_to_2d(a, axis);
-                                                let pb = util::project_to_2d(b, axis);
+                                                let pa = project_to_2d(a, axis);
+                                                let pb = project_to_2d(b, axis);
                                                 let seg_min_x = pa[0].min(pb[0]);
                                                 let seg_max_x = pa[0].max(pb[0]);
                                                 let seg_min_y = pa[1].min(pb[1]);
@@ -447,19 +442,19 @@ impl Viewport2D {
                                         let positions = mesh.positions.as_slice();
 
                                         let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
-                                            ui::Ortho::XY => (
+                                            Ortho::XY => (
                                                 patch_aabb.min.x as f32,
                                                 patch_aabb.max.x as f32,
                                                 -(patch_aabb.max.y as f32),
                                                 -(patch_aabb.min.y as f32),
                                             ),
-                                            ui::Ortho::XZ => (
+                                            Ortho::XZ => (
                                                 patch_aabb.min.x as f32,
                                                 patch_aabb.max.x as f32,
                                                 -(patch_aabb.max.z as f32),
                                                 -(patch_aabb.min.z as f32),
                                             ),
-                                            ui::Ortho::YZ => (
+                                            Ortho::YZ => (
                                                 patch_aabb.min.y as f32,
                                                 patch_aabb.max.y as f32,
                                                 -(patch_aabb.max.z as f32),
@@ -484,8 +479,8 @@ impl Viewport2D {
                                             if ia >= positions.len() || ib >= positions.len() {
                                                 continue;
                                             }
-                                            let pa = util::project_to_2d(positions[ia], axis);
-                                            let pb = util::project_to_2d(positions[ib], axis);
+                                            let pa = core_util::project_to_2d(positions[ia], axis);
+                                            let pb = core_util::project_to_2d(positions[ib], axis);
 
                                             let seg_min_x = pa[0].min(pb[0]);
                                             let seg_max_x = pa[0].max(pb[0]);
@@ -515,18 +510,15 @@ impl Viewport2D {
             }
 
             self.selected_vertices.clear();
-            if !editor.core.edit_faces
-                && !editor.core.edit_vertices
-                && !editor.core.selected_brushes.is_empty()
-            {
+            if !editor.edit_faces && !editor.edit_vertices && !editor.selected_brushes.is_empty() {
                 let view_min_x = view_left.min(view_right);
                 let view_max_x = view_left.max(view_right);
                 let view_min_y = view_top.min(view_bottom);
                 let view_max_y = view_top.max(view_bottom);
                 let view_dir = match axis {
-                    ui::Ortho::XY => glam::Vec3::new(0.0, 0.0, -1.0),
-                    ui::Ortho::XZ => glam::Vec3::new(0.0, -1.0, 0.0),
-                    ui::Ortho::YZ => glam::Vec3::new(-1.0, 0.0, 0.0),
+                    Ortho::XY => glam::Vec3::new(0.0, 0.0, -1.0),
+                    Ortho::XZ => glam::Vec3::new(0.0, -1.0, 0.0),
+                    Ortho::YZ => glam::Vec3::new(-1.0, 0.0, 0.0),
                 };
 
                 let preview_drag_mode = editor.view2d.drag_mode;
@@ -537,11 +529,9 @@ impl Viewport2D {
                 let preview_face = editor.view2d.face_stretch_preview();
                 let preview_point = |p: Vec3| -> Vec3 {
                     match preview_drag_mode {
-                        ui::DragMode::MoveSelection | ui::DragMode::MoveVertices => {
-                            p + preview_move_offset
-                        }
-                        ui::DragMode::StretchSelection => {
-                            if preview_stretch_mode == ui::StretchMode::Scale {
+                        DragMode::MoveSelection | DragMode::MoveVertices => p + preview_move_offset,
+                        DragMode::StretchSelection => {
+                            if preview_stretch_mode == StretchMode::Scale {
                                 preview_stretch
                                     .map(|x: AffineScale| x.apply_point(p))
                                     .unwrap_or(p)
@@ -549,24 +539,24 @@ impl Viewport2D {
                                 p
                             }
                         }
-                        ui::DragMode::NewBrush | ui::DragMode::RectangularSelection => p,
-                        ui::DragMode::RotateSelection => {
+                        DragMode::NewBrush | DragMode::RectangularSelection => p,
+                        DragMode::RotateSelection => {
                             preview_rotate.map(|r| r.apply_point(p)).unwrap_or(p)
                         }
                     }
                 };
 
-                for (entity_index, brush_index) in &editor.core.selected_brushes {
-                    if let Some(map) = &mut editor.core.map {
+                for (entity_index, brush_index) in &editor.selected_brushes {
+                    if let Some(map) = &mut editor.map {
                         if let Some(entity) = map.entities.get_mut(*entity_index) {
                             if let Some(brush) = entity.brushes.get_mut(*brush_index) {
                                 if matches!(&brush.content, BrushContent::Convex(_)) {
-                                    if preview_drag_mode == ui::DragMode::StretchSelection
-                                        && preview_stretch_mode == ui::StretchMode::Resize
+                                    if preview_drag_mode == DragMode::StretchSelection
+                                        && preview_stretch_mode == StretchMode::Resize
                                     {
                                         if let Some((faces, delta)) = preview_face {
                                             if let Some(polys) =
-                                                kradiant::editing::preview_convex_face_stretch_polys(
+                                                crate::editing::preview_convex_face_stretch_polys(
                                                     &*brush,
                                                     faces,
                                                     delta,
@@ -592,8 +582,8 @@ impl Viewport2D {
                                                         let a = positions[i];
                                                         let b =
                                                             positions[(i + 1) % positions.len()];
-                                                        let pa = util::project_to_2d(a, axis);
-                                                        let pb = util::project_to_2d(b, axis);
+                                                        let pa = core_util::project_to_2d(a, axis);
+                                                        let pb = core_util::project_to_2d(b, axis);
 
                                                         let seg_min_x = pa[0].min(pb[0]);
                                                         let seg_max_x = pa[0].max(pb[0]);
@@ -639,10 +629,14 @@ impl Viewport2D {
                                             for i in 0..positions.len() {
                                                 let a = positions[i];
                                                 let b = positions[(i + 1) % positions.len()];
-                                                let pa =
-                                                    util::project_to_2d(preview_point(a), axis);
-                                                let pb =
-                                                    util::project_to_2d(preview_point(b), axis);
+                                                let pa = core_util::project_to_2d(
+                                                    preview_point(a),
+                                                    axis,
+                                                );
+                                                let pb = core_util::project_to_2d(
+                                                    preview_point(b),
+                                                    axis,
+                                                );
 
                                                 let seg_min_x = pa[0].min(pb[0]);
                                                 let seg_max_x = pa[0].max(pb[0]);
@@ -672,19 +666,19 @@ impl Viewport2D {
                                     brush.aabb = patch_aabb.clone();
 
                                     let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
-                                        ui::Ortho::XY => (
+                                        Ortho::XY => (
                                             patch_aabb.min.x as f32,
                                             patch_aabb.max.x as f32,
                                             -(patch_aabb.max.y as f32),
                                             -(patch_aabb.min.y as f32),
                                         ),
-                                        ui::Ortho::XZ => (
+                                        Ortho::XZ => (
                                             patch_aabb.min.x as f32,
                                             patch_aabb.max.x as f32,
                                             -(patch_aabb.max.z as f32),
                                             -(patch_aabb.min.z as f32),
                                         ),
-                                        ui::Ortho::YZ => (
+                                        Ortho::YZ => (
                                             patch_aabb.min.y as f32,
                                             patch_aabb.max.y as f32,
                                             -(patch_aabb.max.z as f32),
@@ -706,10 +700,14 @@ impl Viewport2D {
                                         if ia >= positions.len() || ib >= positions.len() {
                                             continue;
                                         }
-                                        let pa =
-                                            util::project_to_2d(preview_point(positions[ia]), axis);
-                                        let pb =
-                                            util::project_to_2d(preview_point(positions[ib]), axis);
+                                        let pa = core_util::project_to_2d(
+                                            preview_point(positions[ia]),
+                                            axis,
+                                        );
+                                        let pb = core_util::project_to_2d(
+                                            preview_point(positions[ib]),
+                                            axis,
+                                        );
 
                                         let seg_min_x = pa[0].min(pb[0]);
                                         let seg_max_x = pa[0].max(pb[0]);
@@ -739,21 +737,21 @@ impl Viewport2D {
             // Draw patch control vertices when in vertex editing mode
             self.control_vertices.clear();
             self.control_selected_vertices.clear();
-            if editor.core.edit_vertices {
-                let move_offset = if editor.view2d.drag_mode == ui::DragMode::MoveVertices {
+            if editor.edit_vertices {
+                let move_offset = if editor.view2d.drag_mode == DragMode::MoveVertices {
                     editor.view2d.move_offset
                 } else {
                     Vec3::ZERO
                 };
 
-                if let Some(map) = &editor.core.map {
+                if let Some(map) = &editor.map {
                     for (entity_idx, entity) in map.entities.iter().enumerate() {
                         for (brush_idx, brush) in entity.brushes.iter().enumerate() {
                             if let BrushContent::Patch(patch) = &brush.content {
                                 for (row_idx, row) in patch.vertices.iter().enumerate() {
                                     for (col_idx, vtx) in row.iter().enumerate() {
                                         let is_selected =
-                                            editor.core.selected_patch_vertices.iter().any(|sel| {
+                                            editor.selected_patch_vertices.iter().any(|sel| {
                                                 sel.entity_idx == entity_idx
                                                     && sel.brush_idx == brush_idx
                                                     && sel.row == row_idx
@@ -766,7 +764,7 @@ impl Viewport2D {
                                             vtx.position
                                         };
 
-                                        let p2 = util::project_to_2d(pos_3d, axis);
+                                        let p2 = core_util::project_to_2d(pos_3d, axis);
                                         let pos = Vec3::new(p2[0], p2[1], 0.0);
 
                                         if is_selected {

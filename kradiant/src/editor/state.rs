@@ -1,6 +1,11 @@
+use crate::editor::config::EditorConfig;
 use crate::editor::selection::{FaceSelection, PatchVertexSelection};
+use crate::editor::theme::EditorPalette;
 use crate::editor::undo::UndoRedo;
+use crate::editor::viewport::{StretchMode, View2DState, View3DState};
 use crate::map::Map;
+use crate::render::TextureRegistry;
+use crate::shader::ShaderDb;
 
 #[derive(Debug)]
 pub struct EditorState {
@@ -22,6 +27,19 @@ pub struct EditorState {
     pub edit_vertices: bool,
 
     pub undo: UndoRedo,
+
+    // UI-agnostic viewport and environment state
+    pub view2d: View2DState,
+    pub view3d: View3DState,
+    pub config: EditorConfig,
+    pub palette: EditorPalette,
+    pub view_config_rev: u64,
+    pub tex_registry: TextureRegistry,
+    pub shader_db: Option<ShaderDb>,
+
+    // Editing modes
+    pub stretch_mode: StretchMode,
+    pub selection_rgba: [f32; 4],
 }
 
 impl Default for EditorState {
@@ -41,6 +59,15 @@ impl Default for EditorState {
             edit_edges: false,
             edit_vertices: false,
             undo: UndoRedo::default(),
+            view2d: View2DState::default(),
+            view3d: View3DState::default(),
+            config: EditorConfig::default(),
+            palette: EditorPalette::default(),
+            view_config_rev: 0,
+            tex_registry: TextureRegistry::default(),
+            shader_db: None,
+            stretch_mode: StretchMode::default(),
+            selection_rgba: [0.3, 0.6, 1.0, 1.0],
         }
     }
 }
@@ -57,4 +84,3 @@ impl EditorState {
         self.selected_patch_vertices.clear();
     }
 }
-

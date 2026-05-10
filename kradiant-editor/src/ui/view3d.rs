@@ -2,41 +2,41 @@
 
 use dear_imgui_rs::{Condition, TextureId, Ui, WindowFlags};
 use glam::Vec3;
+use kradiant::editor::viewport::state::View3DState;
+use kradiant::editor::{EditorConfig, EditorPalette};
+use std::ops::{Deref, DerefMut};
 
-use crate::{theme::EditorPalette, util::imgui_color_to_u32};
-
-#[derive(Default, Clone, Debug)]
-pub struct Camera {
-    pub pos: Vec3,
-    /// Orbit camera (Z-up): angles.x = yaw, angles.y = pitch (radians)
-    pub angles: Vec3,
-    /// Interpreted as movement speed/sensitivity (not distance)
-    pub zoom: f32,
-}
+use crate::util::imgui_color_to_u32;
 
 pub struct View3D {
-    pub rect: [f32; 4],
+    pub core: View3DState,
     pub tex_id: Option<TextureId>,
-    pub cam: Camera,
     pub warp_request: Option<[f32; 2]>,
     pub(crate) warp_pending_reset: bool,
 }
 
 impl Default for View3D {
     fn default() -> Self {
-        let cam = Camera {
-            pos: Vec3::ZERO,
-            angles: Vec3::new(0.8, -0.35, 0.0),
-            zoom: 64.0,
-        };
-
         Self {
-            rect: [0.0; 4],
+            core: View3DState::default(),
             tex_id: None,
-            cam,
             warp_request: None,
             warp_pending_reset: false,
         }
+    }
+}
+
+impl Deref for View3D {
+    type Target = View3DState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl DerefMut for View3D {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
     }
 }
 
@@ -52,12 +52,7 @@ impl View3D {
         .normalize()
     }
 
-    pub fn draw_impl(
-        &mut self,
-        ui: &Ui,
-        config: &mut crate::config::EditorConfig,
-        palette: &EditorPalette,
-    ) {
+    pub fn draw_impl(&mut self, ui: &Ui, config: &mut EditorConfig, palette: &EditorPalette) {
         use dear_imgui_rs::MouseButton;
 
         ui.window("3D View")

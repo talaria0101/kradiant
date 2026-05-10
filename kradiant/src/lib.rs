@@ -9,6 +9,7 @@
 pub const KRADIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod assets;
+pub mod core_util;
 pub mod editing;
 pub mod editor;
 pub mod geometry;

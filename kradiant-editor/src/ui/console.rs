@@ -88,9 +88,9 @@ pub fn draw_console(ui: &Ui, state: &mut EditorState) {
                         }
 
                         let col = match entry.level {
-                            LogLevel::Info => state.palette.console_info,
-                            LogLevel::Warn => state.palette.console_warn,
-                            LogLevel::Error => state.palette.console_error,
+                            LogLevel::Info => state.core.palette.console_info,
+                            LogLevel::Warn => state.core.palette.console_warn,
+                            LogLevel::Error => state.core.palette.console_error,
                         };
 
                         let _tok = ui.push_style_color(StyleColor::Text, col);

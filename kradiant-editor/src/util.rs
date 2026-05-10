@@ -9,9 +9,9 @@ use std::path::PathBuf;
 
 use crate::ui::console::ConsoleLogger;
 use crate::ui::{EditorState, Ortho};
+use glam::{Vec2, Vec3};
 use kradiant::editor::selection::{FaceSelection, PatchVertexSelection};
 use kradiant::editor::undo::UndoRedo;
-use glam::{Vec2, Vec3};
 
 pub fn get_config_dir() -> io::Result<PathBuf> {
     let base = std::env::home_dir()
@@ -193,8 +193,8 @@ pub fn new_map(state: &mut EditorState) {
 
 pub fn open_map(state: &mut EditorState) {
     let cwd = {
-        if !state.config.misc.recent_maps.is_empty() {
-            let last = state.config.misc.recent_maps.last().unwrap(); //.clone();
+        if !state.core.config.misc.recent_maps.is_empty() {
+            let last = state.core.config.misc.recent_maps.last().unwrap(); //.clone();
             PathBuf::from(last).parent().unwrap().to_path_buf()
         } else {
             std::env::current_dir().unwrap()
@@ -218,7 +218,7 @@ pub fn open_map(state: &mut EditorState) {
             &mut state.core.map_revision,
             &mut state.core.undo,
             &mut state.core.map_load_count,
-            &mut state.config.misc.recent_maps,
+            &mut state.core.config.misc.recent_maps,
             &mut state.console,
             path_str,
         );
@@ -236,7 +236,7 @@ pub fn open_recent_map(state: &mut EditorState, path: &str) {
         &mut state.core.map_revision,
         &mut state.core.undo,
         &mut state.core.map_load_count,
-        &mut state.config.misc.recent_maps,
+        &mut state.core.config.misc.recent_maps,
         &mut state.console,
         path,
     );

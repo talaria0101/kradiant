@@ -2,12 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::RenderBackend;
-use crate::ui;
+use crate::editor::EditorState;
+use crate::editor::config::RenderMode;
+use crate::render::RenderBackend;
+//use crate::ui;
+use crate::geometry::tessellate_patch;
+use crate::map::BrushContent;
+use crate::texmap::FaceUvMapper;
 use glam::Vec3;
-use kradiant::geometry::tessellate_patch;
-use kradiant::map::BrushContent;
-use kradiant::texmap::FaceUvMapper;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct View3dCache {
@@ -72,7 +74,7 @@ impl Viewport3D {
             last_selection_hash: 0,
         }
     }
-    pub fn render(&mut self, backend: &mut RenderBackend<'_>, editor: &mut ui::EditorState) {
+    pub fn render(&mut self, backend: &mut RenderBackend<'_>, editor: &mut EditorState) {
         unsafe {
             use glow::HasContext;
 
@@ -110,21 +112,15 @@ impl Viewport3D {
             }
 
             // Geometry cache
-            let map_present = editor.core.map.is_some();
+            let map_present = editor.map.is_some();
             let map_ptr = editor
-                .core
                 .map
                 .as_ref()
                 .map(|m| m as *const _ as usize)
                 .unwrap_or(0);
-            let map_generation = editor
-                .core
-                .map
-                .as_ref()
-                .map(|m| m.generation)
-                .unwrap_or(0u64);
-            let map_revision = editor.core.map_revision;
-            let map_load_count = editor.core.map_load_count;
+            let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0u64);
+            let map_revision = editor.map_revision;
+            let map_load_count = editor.map_load_count;
             let view_config_rev = editor.view_config_rev;
 
             let need_rebuild = match self.cache {
@@ -155,15 +151,15 @@ impl Viewport3D {
                 self.tri_vertices.clear();
                 self.tri_vertices_tex.clear();
 
-                if let Some(map) = editor.core.map.as_mut() {
+                if let Some(map) = editor.map.as_mut() {
                     if tex_reload {
-                        editor.tex_browser.clear_render_texture_caches();
+                        editor.tex_registry.clear();
                     }
                     // Request all textures used by the map for 3D rendering. This leverages
                     // Map::collect_used_materials() which de-duplicates and normalizes names.
-                    let shader_db = editor.tex_browser.shader_db.as_ref();
+                    let shader_db = editor.shader_db.as_ref();
                     for mat in map.collect_used_materials(shader_db) {
-                        editor.tex_browser.request_texture_load(&mat);
+                        editor.tex_registry.request(mat);
                     }
 
                     // Cheap reserve to reduce reallocs on medium maps
@@ -207,12 +203,11 @@ impl Viewport3D {
                                         continue;
                                     }
 
-                                    let nf = kradiant::texmap::face_plane_normal(face).to_array();
+                                    let nf = crate::texmap::face_plane_normal(face).to_array();
 
                                     // Fallback size if the texture isn't loaded yet (keeps UV math stable).
                                     let (tex_w, tex_h) = editor
-                                        .tex_browser
-                                        .tex_render_cache
+                                        .tex_registry
                                         .get(&face.texture)
                                         .map(|rt| (rt.size[0], rt.size[1]))
                                         .unwrap_or((256.0, 256.0));
@@ -397,7 +392,7 @@ impl Viewport3D {
 
             let current_selection_hash = {
                 let mut h: u64 = 5381; // Non-zero initial value to avoid collision with empty selection
-                let mut items: Vec<_> = editor.core.selected_brushes.iter().collect();
+                let mut items: Vec<_> = editor.selected_brushes.iter().collect();
                 items.sort_by_key(|&&(e, b)| (e, b));
                 for &&(e, b) in &items {
                     h = h
@@ -405,7 +400,7 @@ impl Viewport3D {
                         .wrapping_add((e as u64) * 1000003 + (b as u64));
                 }
 
-                let mut faces: Vec<_> = editor.core.selected_faces.iter().collect();
+                let mut faces: Vec<_> = editor.selected_faces.iter().collect();
                 faces.sort_by_key(|f| (f.entity_idx, f.brush_idx, f.face_idx));
                 for f in &faces {
                     h = h
@@ -422,9 +417,8 @@ impl Viewport3D {
             if current_selection_hash != self.last_selection_hash {
                 self.tri_vertices_selected.clear();
 
-                if let Some(map) = editor.core.map.as_mut() {
+                if let Some(map) = editor.map.as_mut() {
                     let _selected_face_set: HashSet<(usize, usize, usize)> = editor
-                        .core
                         .selected_faces
                         .iter()
                         .map(|f| (f.entity_idx, f.brush_idx, f.face_idx))
@@ -433,13 +427,13 @@ impl Viewport3D {
                     for (entity_idx, ent) in map.entities.iter_mut().enumerate() {
                         for (brush_idx, brush) in ent.brushes.iter_mut().enumerate() {
                             let is_brush_selected =
-                                editor.core.selected_brushes.contains(&(entity_idx, brush_idx));
+                                editor.selected_brushes.contains(&(entity_idx, brush_idx));
 
                             let mut faces_to_highlight: Vec<usize> = Vec::new();
 
-                            if editor.core.edit_faces {
+                            if editor.edit_faces {
                                 // Face edit mode: ONLY highlight selected faces
-                                for face_sel in &editor.core.selected_faces {
+                                for face_sel in &editor.selected_faces {
                                     if face_sel.entity_idx == entity_idx
                                         && face_sel.brush_idx == brush_idx
                                     {
@@ -595,61 +589,76 @@ impl Viewport3D {
             let light_dir = Vec3::new(0.5, 0.25, 1.0).normalize();
             let ambient = 0.4f32;
 
-            //backend.draw_triangles_lit(&self.tri_vertices, geom_col, mvp, ambient, light_dir);
-            let mut tmp_lit: Vec<LitVertex> = Vec::new();
-            // First pass: opaque textured faces (no blending).
-            for (material, batch) in &self.tri_vertices_tex {
-                if let Some(rt) = editor.tex_browser.tex_render_cache.get(material) {
-                    let alpha = 1.0 - rt.qer.trans.unwrap_or(0.0).clamp(0.0, 1.0);
-                    if alpha < 1.0 {
-                        continue; // skip transparent for second pass
+            match editor.config.view.rendermode {
+                RenderMode::None => {}
+                RenderMode::Flat => {
+                    if !self.tri_vertices.is_empty() {
+                        backend.draw_triangles_lit(
+                            &self.tri_vertices,
+                            geom_col,
+                            mvp,
+                            ambient,
+                            light_dir,
+                        );
                     }
-                    backend.draw_triangles_tex(
-                        batch,
-                        rt.tex,
-                        [1.0, 1.0, 1.0, alpha],
-                        mvp,
-                        ambient,
-                        light_dir,
-                    );
-                } else {
-                    // Fallback while texture is still loading.
-                    tmp_lit.clear();
-                    tmp_lit.reserve(batch.len());
-                    for v in batch {
-                        tmp_lit.push(LitVertex {
-                            pos: v.pos,
-                            normal: v.normal,
-                        });
+                }
+                _ => {
+                    let mut tmp_lit: Vec<LitVertex> = Vec::new();
+                    // First pass: opaque textured faces (no blending).
+                    for (material, batch) in &self.tri_vertices_tex {
+                        if let Some(rt) = editor.tex_registry.get(material) {
+                            let alpha = 1.0 - rt.qer.trans.unwrap_or(0.0).clamp(0.0, 1.0);
+                            if alpha < 1.0 {
+                                continue; // skip transparent for second pass
+                            }
+                            backend.draw_triangles_tex(
+                                batch,
+                                rt.tex,
+                                [1.0, 1.0, 1.0, alpha],
+                                mvp,
+                                ambient,
+                                light_dir,
+                            );
+                        } else {
+                            // Fallback while texture is still loading.
+                            tmp_lit.clear();
+                            tmp_lit.reserve(batch.len());
+                            for v in batch {
+                                tmp_lit.push(LitVertex {
+                                    pos: v.pos,
+                                    normal: v.normal,
+                                });
+                            }
+                            backend.draw_triangles_lit(&tmp_lit, geom_col, mvp, ambient, light_dir);
+                        }
                     }
-                    backend.draw_triangles_lit(&tmp_lit, geom_col, mvp, ambient, light_dir);
+                    // Second pass: transparent textured faces (blending on, no depth write).
+                    backend.gl.enable(glow::BLEND);
+                    backend
+                        .gl
+                        .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                    backend.gl.depth_mask(false);
+                    for (material, batch) in &self.tri_vertices_tex {
+                        let Some(rt) = editor.tex_registry.get(material) else {
+                            continue;
+                        };
+                        let alpha = 1.0 - rt.qer.trans.unwrap_or(0.0).clamp(0.0, 1.0);
+                        if alpha >= 1.0 {
+                            continue;
+                        }
+                        backend.draw_triangles_tex(
+                            batch,
+                            rt.tex,
+                            [1.0, 1.0, 1.0, alpha],
+                            mvp,
+                            ambient,
+                            light_dir,
+                        );
+                    }
+                    backend.gl.depth_mask(true);
+                    backend.gl.disable(glow::BLEND);
                 }
             }
-            // Second pass: transparent textured faces (blending on, no depth write).
-            backend.gl.enable(glow::BLEND);
-            backend
-                .gl
-                .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-            backend.gl.depth_mask(false);
-            for (material, batch) in &self.tri_vertices_tex {
-                let Some(rt) = editor.tex_browser.tex_render_cache.get(material) else {
-                    continue;
-                };
-                let alpha = 1.0 - rt.qer.trans.unwrap_or(0.0).clamp(0.0, 1.0);
-                if alpha >= 1.0 {
-                    continue;
-                }
-                backend.draw_triangles_tex(
-                    batch,
-                    rt.tex,
-                    [1.0, 1.0, 1.0, alpha],
-                    mvp,
-                    ambient,
-                    light_dir,
-                );
-            }
-            backend.gl.depth_mask(true);
-            backend.gl.disable(glow::BLEND);
             if editor.config.view.wireframe && !self.line_vertices.is_empty() {
                 backend.draw_lines(&self.line_vertices, geom_col, mvp);
             }

@@ -171,4 +171,3 @@ impl UndoRedo {
         Some(entry.label)
     }
 }
-

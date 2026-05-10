@@ -7,14 +7,15 @@ const SHIFT: u32 = 2;
 use std::collections::HashSet;
 
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
-use kradiant::editor::EditorState as CoreEditorState;
 use kradiant::editing;
+use kradiant::editor::EditorState as CoreEditorState;
+use kradiant::editor::config::{EditorConfig, RenderMode};
 use kradiant::map::Map;
 
-use crate::config::{self, EditorConfig};
+use crate::config::{self, load as load_config, update as update_config};
 use crate::icons::EditorIcons;
 use crate::images::EditorImages;
-use crate::theme::{EditorPalette, ThemeEntry, theme_from_str};
+use crate::theme::{ThemeEntry, theme_from_str};
 use crate::util::text_width;
 use crate::{EDITOR_THEMES, util};
 
@@ -24,8 +25,11 @@ pub mod view2d;
 pub mod view3d;
 use console::ConsoleLogger;
 use texbro::TextureBrowser;
-pub use view2d::{AxisLock, DragMode, Ortho, StretchMode, View2D};
-use view3d::View3D;
+pub use view2d::{AxisLock, View2D};
+pub use view3d::View3D;
+
+// Import types from kradiant to avoid duplication
+pub use kradiant::editor::viewport::{DragMode, Ortho, StretchMode};
 
 /// Helper function to create an icon button with fallback text and tooltip.
 fn icon_button(ui: &Ui, id: &str, icon: Option<TextureId>, tooltip: &str) -> bool {
@@ -106,17 +110,13 @@ fn key_combo_pressed(ui: &Ui, main_key: dear_imgui_rs::Key, modifiers: u32) -> b
 
 pub struct EditorState {
     pub core: CoreEditorState,
-    pub config: EditorConfig,
-    pub view_config_rev: u64,
     pub show_demo: bool,
     pub show_about: bool,
     pub toolbar_height: f32,
     pub view2d: View2D,
     pub view3d: View3D,
-    pub stretch_mode: StretchMode,
     pub rotate_mode: bool,
     pub axis_lock: AxisLock,
-    pub selection_rgba: [f32; 4],
     pub selection_rect_rgba: [f32; 4],
     pub tex_browser: TextureBrowser,
     pub tex_filter: String,
@@ -128,7 +128,6 @@ pub struct EditorState {
     pub images: EditorImages,
     pub themes: Vec<ThemeEntry>,
     pub pending_theme: Option<usize>,
-    pub palette: EditorPalette,
 }
 
 #[macro_export]
@@ -165,22 +164,16 @@ impl Default for EditorState {
 
         let mut s = Self {
             core: CoreEditorState::default(),
-            config: EditorConfig::default(),
-            view_config_rev: 0,
             show_demo: false,
             show_about: false,
             toolbar_height: 0.0,
-            //map_selection: 0,
             view2d: View2D::default(),
             view3d: View3D::default(),
-            stretch_mode: StretchMode::default(),
             rotate_mode: false,
             axis_lock: AxisLock::default(),
-            selection_rgba: [0.3, 0.6, 1.0, 1.0],
             selection_rect_rgba: [0.7, 0.7, 0.7, 1.0],
             tex_browser: TextureBrowser::default(),
             tex_filter: String::new(),
-            //tex_selected: None,
             tex_tile_size: 64.0,
             console: ConsoleLogger::default(),
             con_filter: String::new(),
@@ -188,13 +181,12 @@ impl Default for EditorState {
             images: EditorImages::default(),
             themes,
             pending_theme: None,
-            palette: EditorPalette::default(),
         };
 
         log_info!(s.console, "Kradiant editor started");
 
-        s.config = {
-            let res = EditorConfig::load();
+        s.core.config = {
+            let res = load_config();
             if res.1.is_some() {
                 log_error!(s.console, "{}", res.1.unwrap());
             }
@@ -203,6 +195,13 @@ impl Default for EditorState {
 
         log_warn!(s.console, "this is a warning");
         s
+    }
+}
+
+impl EditorState {
+    pub fn sync_viewports_to_core(&mut self) {
+        self.core.view2d = self.view2d.core.clone();
+        self.core.view3d = self.view3d.core;
     }
 }
 
@@ -217,22 +216,22 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
     //draw_view3d(ui, state);
     {
         let view3d_ref = &mut state.view3d;
-        let config = &mut state.config;
-        let palette = &state.palette;
+        let config = &mut state.core.config;
+        let palette = &state.core.palette;
 
         view3d_ref.draw_impl(ui, config, palette);
     }
 
-    state.selection_rgba = ui.style_color(StyleColor::ButtonActive);
+    state.core.selection_rgba = ui.style_color(StyleColor::ButtonActive);
 
     //  Call view2d draw separately to avoid dual mutable borrow
     {
         let view2d_ref = &mut state.view2d;
-        let config = &mut state.config;
+        let config = &mut state.core.config;
         let axis_lock = &state.axis_lock;
         let rotate_mode = state.rotate_mode;
-        let stretch_mode = state.stretch_mode;
-        let palette = &state.palette;
+        let stretch_mode = state.core.stretch_mode;
+        let palette = &state.core.palette;
         let console = &mut state.console;
         let undo = &mut state.core.undo;
         let selected_brushes = &mut state.core.selected_brushes;
@@ -242,9 +241,9 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         let edit_faces = state.core.edit_faces;
         let edit_vertices = state.core.edit_vertices;
         let map = &mut state.core.map;
-        let selection_rgba = state.selection_rgba;
+        let selection_rgba = state.core.selection_rgba;
         let selection_rect_rgba = state.selection_rect_rgba;
-        let view_config_rev = &mut state.view_config_rev;
+        let view_config_rev = &mut state.core.view_config_rev;
 
         view2d_ref.draw_impl(
             ui,
@@ -426,7 +425,7 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                 util::open_map(state);
             }
             ui.menu("Open recent…", || {
-                let mut paths: Vec<String> = state.config.misc.recent_maps.clone();
+                let mut paths: Vec<String> = state.core.config.misc.recent_maps.clone();
                 paths.reverse();
                 for path in paths {
                     if ui.menu_item(&path) {
@@ -458,7 +457,7 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
 
                 for (i, step) in grid_steps.iter().enumerate() {
                     let step_u8: u8 = step.parse().unwrap();
-                    let mut selected = state.config.view.grid_minor_step == step_u8;
+                    let mut selected = state.core.config.view.grid_minor_step == step_u8;
                     let active = !selected;
                     if ui.menu_item_toggle_with_shortcut(
                         step,
@@ -466,36 +465,40 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                         &mut selected,
                         active,
                     ) {
-                        state.config.update(
+                        update_config(
+                            &mut state.core.config,
                             "grid_minor_step",
                             step_u8,
                             &mut state.console,
-                            &mut state.view_config_rev,
+                            &mut state.core.view_config_rev,
                         );
                     }
                 }
             });
             ui.menu("3D Rendering", || {
-                let mut selected = state.config.view.wireframe;
+                let mut selected = state.core.config.view.wireframe;
                 if ui.menu_item_toggle_no_shortcut("Wireframe", &mut selected, true) {
-                    state.config.update(
+                    let next_wireframe = !state.core.config.view.wireframe as u8;
+                    update_config(
+                        &mut state.core.config,
                         "wireframe",
-                        !state.config.view.wireframe as u8,
+                        next_wireframe,
                         &mut state.console,
-                        &mut state.view_config_rev,
+                        &mut state.core.view_config_rev,
                     );
                 }
                 ui.separator_horizontal();
-                for mode in config::RenderMode::all() {
-                    let mut selected = state.config.view.rendermode == mode;
+                for mode in RenderMode::all() {
+                    let mut selected = state.core.config.view.rendermode == mode;
                     let active = !selected;
                     if ui.menu_item_toggle_no_shortcut(mode.as_ref(), &mut selected, active) {
                         let num = mode as i32;
-                        state.config.update(
+                        update_config(
+                            &mut state.core.config,
                             "rendermode",
                             num,
                             &mut state.console,
-                            &mut state.view_config_rev,
+                            &mut state.core.view_config_rev,
                         );
                     }
                 }
@@ -548,7 +551,7 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
         ui.menu("Misc", || {
             ui.menu("Theme", || {
                 for (i, entry) in state.themes.iter().enumerate() {
-                    let mut selected = state.config.misc.theme == i;
+                    let mut selected = state.core.config.misc.theme == i;
                     let active = !selected;
                     if ui.menu_item_toggle_no_shortcut(&entry.name, &mut selected, active) {
                         state.pending_theme = Some(i);
@@ -653,22 +656,26 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             "##grid_snapping",
             state.icons.grid_snap,
             "Grid Snap",
-            state.config.view.grid_snap,
+            state.core.config.view.grid_snap,
             "Toggle Grid Snapping",
         ) {
-            state.config.update(
+            let next_grid_snap = !state.core.config.view.grid_snap as u8;
+            update_config(
+                &mut state.core.config,
                 "grid_snap",
-                !state.config.view.grid_snap as u8,
+                next_grid_snap,
                 &mut state.console,
-                &mut state.view_config_rev,
+                &mut state.core.view_config_rev,
             );
         }
         if ui.is_key_pressed(dear_imgui_rs::Key::G) {
-            state.config.update(
+            let next_grid_snap = !state.core.config.view.grid_snap as u8;
+            update_config(
+                &mut state.core.config,
                 "grid_snap",
-                !state.config.view.grid_snap as u8,
+                next_grid_snap,
                 &mut state.console,
-                &mut state.view_config_rev,
+                &mut state.core.view_config_rev,
             );
         }
 
@@ -695,12 +702,12 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         ui.separator_vertical();
         ui.same_line();
 
-        let stretch_icon = match state.stretch_mode {
+        let stretch_icon = match state.core.stretch_mode {
             StretchMode::Scale => state.icons.free_scale,
             StretchMode::Resize => state.icons.resize,
         };
         if icon_button(ui, "##stretch_mode", stretch_icon, "Stretch Mode") {
-            state.stretch_mode = match state.stretch_mode {
+            state.core.stretch_mode = match state.core.stretch_mode {
                 StretchMode::Scale => StretchMode::Resize,
                 StretchMode::Resize => StretchMode::Scale,
             };
@@ -899,7 +906,17 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
                 ui.text_disabled("(select an entity)");
                 return;
             };
-            let (map_opt, map_revision, undo, selected_brushes, selected_faces, selected_patch_vertices, selected_entity, new_prop_key, new_prop_val) = (
+            let (
+                map_opt,
+                map_revision,
+                undo,
+                selected_brushes,
+                selected_faces,
+                selected_patch_vertices,
+                selected_entity,
+                new_prop_key,
+                new_prop_val,
+            ) = (
                 &mut core.map,
                 &mut core.map_revision,
                 &mut core.undo,
@@ -957,9 +974,7 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
 
             // Add new property
             ui.set_next_item_width(ui.content_region_avail()[0] * 0.45);
-            ui.input_text("##new_key", new_prop_key)
-                .hint("key")
-                .build();
+            ui.input_text("##new_key", new_prop_key).hint("key").build();
             ui.same_line();
             ui.set_next_item_width(-1.0);
             ui.input_text("##new_val", new_prop_val)

@@ -1,26 +1,11 @@
 use dear_imgui_rs::StyleColor;
+use kradiant::editor::theme::EditorPalette;
 use serde::Deserialize;
 use std::collections::HashMap;
 
 pub struct ThemeEntry {
     pub name: String,
     pub data: ThemeFile,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct EditorPalette {
-    pub window_clear: [f32; 4],
-    pub view2d_bg: [f32; 4],
-    pub view2d_grid_major: [f32; 4],
-    pub view2d_grid_minor: [f32; 4],
-    pub view2d_axis_x: [f32; 4],
-    pub view2d_axis_y: [f32; 4],
-    pub view2d_geometry: [f32; 4],
-    pub console_info: [f32; 4],
-    pub console_warn: [f32; 4],
-    pub console_error: [f32; 4],
-    pub hud_text: [f32; 4],
-    pub hud_text_dim: [f32; 4],
 }
 
 #[derive(Deserialize)]

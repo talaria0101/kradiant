@@ -58,8 +58,8 @@ impl FaceUvMapper {
         // Scale makes texture appear smaller/larger on surface:
         // scale=0.25 means texture is 1/4 size, so 4× more repeats
         // Formula: (world_units / (tex_size * scale)) + (shift / tex_size)
-        let world_scale_x = self.inv_tex_w / self.scale_x;  // = 1 / (tex_w * scale_x)
-        let world_scale_y = self.inv_tex_h / self.scale_y;  // = 1 / (tex_h * scale_y)
+        let world_scale_x = self.inv_tex_w / self.scale_x; // = 1 / (tex_w * scale_x)
+        let world_scale_y = self.inv_tex_h / self.scale_y; // = 1 / (tex_h * scale_y)
         let u = point.dot(self.s_axis) * world_scale_x + self.shift.x as f32 * self.inv_tex_w;
         let v = point.dot(self.t_axis) * world_scale_y + self.shift.y as f32 * self.inv_tex_h;
         Vec2::new(u, v)

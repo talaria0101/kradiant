@@ -26,11 +26,11 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use crate::config::{EditorConfig, RenderMode};
+use crate::config::{save as save_config, update as update_config};
 use crate::icons::EditorIcons;
 use crate::images::EditorImages;
-use crate::viewport2d::Viewport2D;
-use crate::viewport3d::{LitVertex, TexVertex, Viewport3D};
+use kradiant::editor::config::RenderMode;
+use kradiant::render::{RenderBackend, Viewport2D, Viewport3D};
 
 #[macro_use]
 mod ui;
@@ -39,9 +39,6 @@ mod icons;
 mod images;
 mod theme;
 mod util;
-
-mod viewport2d;
-mod viewport3d;
 
 fn main() {
     let event_loop = EventLoop::new().expect("failed to create event loop");
@@ -86,204 +83,7 @@ struct AppState {
     vp2d: Viewport2D,
     vp3d: Viewport3D,
     needs_redraw: bool,
-}
-
-pub struct RenderBackend<'a> {
-    pub gl: &'a glow::Context,
-    pub wire_program: glow::Program,
-    pub mvp_loc: glow::UniformLocation,
-    pub color_loc: glow::UniformLocation,
-    pub vao: glow::NativeVertexArray,
-    pub vbo: glow::Buffer,
-    pub lit_program: glow::NativeProgram,
-    pub lit_mvp_loc: glow::NativeUniformLocation,
-    pub lit_color_loc: glow::NativeUniformLocation,
-    pub lit_ldir_loc: glow::NativeUniformLocation,
-    pub lit_amb_loc: glow::NativeUniformLocation,
-    pub tex_program: glow::NativeProgram,
-    pub tex_mvp_loc: glow::NativeUniformLocation,
-    pub tex_color_loc: glow::NativeUniformLocation,
-    pub tex_ldir_loc: glow::NativeUniformLocation,
-    pub tex_amb_loc: glow::NativeUniformLocation,
-    pub tex_sampler_loc: glow::NativeUniformLocation,
-}
-
-impl RenderBackend<'_> {
-    pub unsafe fn draw_lines(&self, vertices: &[Vec3], color: [f32; 4], mvp: glam::Mat4) {
-        unsafe {
-            if vertices.is_empty() {
-                return;
-            }
-            self.gl.use_program(Some(self.wire_program));
-            self.gl
-                .uniform_matrix_4_f32_slice(Some(&self.mvp_loc), false, &mvp.to_cols_array());
-            self.gl.uniform_4_f32_slice(Some(&self.color_loc), &color);
-            self.gl.bind_vertex_array(Some(self.vao));
-            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-            self.gl.buffer_data_u8_slice(
-                glow::ARRAY_BUFFER,
-                bytemuck::cast_slice(vertices),
-                glow::STREAM_DRAW,
-            );
-            self.gl
-                .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
-            self.gl.enable_vertex_attrib_array(0);
-            self.gl.draw_arrays(glow::LINES, 0, vertices.len() as i32);
-        }
-    }
-
-    /*pub unsafe fn draw_triangles(
-        &self,
-        vertices: &[Vec3],
-        color: [f32; 4],
-        mvp: glam::Mat4,
-    ) {
-        if vertices.is_empty() {
-            return;
-        }
-
-        unsafe {
-            self.gl.use_program(Some(self.wire_program)); // fine for now
-            self.gl
-            .uniform_matrix_4_f32_slice(Some(&self.mvp_loc), false, &mvp.to_cols_array());
-            self.gl.uniform_4_f32_slice(Some(&self.color_loc), &color);
-
-            self.gl.bind_vertex_array(Some(self.vao));
-            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-
-            self.gl.buffer_data_u8_slice(
-                glow::ARRAY_BUFFER,
-                bytemuck::cast_slice(vertices),
-                                         glow::STREAM_DRAW,
-            );
-
-            self.gl
-            .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
-            self.gl.enable_vertex_attrib_array(0);
-
-            self.gl.draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
-        }
-    }*/
-
-    pub unsafe fn draw_triangles_lit(
-        &self,
-        vertices: &[LitVertex],
-        color: [f32; 4],
-        mvp: glam::Mat4,
-        ambient: f32,
-        light_dir: Vec3,
-    ) {
-        if vertices.is_empty() {
-            return;
-        }
-
-        unsafe {
-            self.gl.use_program(Some(self.lit_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                Some(&self.lit_mvp_loc),
-                false,
-                &mvp.to_cols_array(),
-            );
-            self.gl
-                .uniform_4_f32_slice(Some(&self.lit_color_loc), &color);
-            self.gl.uniform_3_f32(
-                Some(&self.lit_ldir_loc),
-                light_dir.x,
-                light_dir.y,
-                light_dir.z,
-            );
-            self.gl.uniform_1_f32(Some(&self.lit_amb_loc), ambient);
-
-            self.gl.bind_vertex_array(Some(self.vao));
-            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-            self.gl.buffer_data_u8_slice(
-                glow::ARRAY_BUFFER,
-                bytemuck::cast_slice(vertices),
-                glow::STREAM_DRAW,
-            );
-
-            // stride = 24, pos at offset 0, normal at offset 12
-            self.gl
-                .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 24, 0);
-            self.gl.enable_vertex_attrib_array(0);
-            self.gl
-                .vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, 24, 12);
-            self.gl.enable_vertex_attrib_array(1);
-
-            self.gl
-                .draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
-
-            self.gl.disable_vertex_attrib_array(1); // don't leave attrib 1 enabled for wire draws
-        }
-    }
-
-    pub unsafe fn draw_triangles_tex(
-        &self,
-        vertices: &[TexVertex],
-        texture: glow::Texture,
-        color: [f32; 4],
-        mvp: glam::Mat4,
-        ambient: f32,
-        light_dir: Vec3,
-    ) {
-        if vertices.is_empty() {
-            return;
-        }
-
-        unsafe {
-            self.gl.use_program(Some(self.tex_program));
-
-            self.gl.uniform_matrix_4_f32_slice(
-                Some(&self.tex_mvp_loc),
-                false,
-                &mvp.to_cols_array(),
-            );
-            self.gl
-                .uniform_4_f32_slice(Some(&self.tex_color_loc), &color);
-            self.gl.uniform_3_f32(
-                Some(&self.tex_ldir_loc),
-                light_dir.x,
-                light_dir.y,
-                light_dir.z,
-            );
-            self.gl.uniform_1_f32(Some(&self.tex_amb_loc), ambient);
-            self.gl.uniform_1_i32(Some(&self.tex_sampler_loc), 0);
-
-            self.gl.active_texture(glow::TEXTURE0);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-
-            self.gl.bind_vertex_array(Some(self.vao));
-            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-
-            self.gl.buffer_data_u8_slice(
-                glow::ARRAY_BUFFER,
-                bytemuck::cast_slice(vertices),
-                glow::STREAM_DRAW,
-            );
-
-            self.gl
-                .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 32, 0);
-            self.gl.enable_vertex_attrib_array(0);
-
-            // Normal at offset 12
-            self.gl
-                .vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, 32, 12);
-            self.gl.enable_vertex_attrib_array(1);
-
-            // UV at offset 24
-            self.gl
-                .vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, 32, 24);
-            self.gl.enable_vertex_attrib_array(2);
-
-            self.gl
-                .draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
-
-            // Cleanup
-            self.gl.disable_vertex_attrib_array(2);
-            self.gl.disable_vertex_attrib_array(1);
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
-        }
-    }
+    last_render_mode: RenderMode,
 }
 
 /// Register a texture image with the renderer.
@@ -769,32 +569,36 @@ impl AppState {
         editor.console.info(gl_info);
 
         // Initialize texture browser with game main directory
-        if !editor.config.paths.main.as_os_str().is_empty() {
-            editor.tex_browser.init(&editor.config.paths.main);
+        if !editor.core.config.paths.main.as_os_str().is_empty() {
+            editor.tex_browser.init(&editor.core.config.paths.main);
             editor.console.info("Asset database loaded".to_string());
         }
 
         // Apply configured theme on startup
         if !editor.themes.is_empty() {
             let idx = editor
+                .core
                 .config
                 .misc
                 .theme
                 .min(editor.themes.len().saturating_sub(1));
             if let Some(entry) = editor.themes.get(idx) {
                 theme::apply_theme(&mut imgui, &entry.data);
-                EditorConfig::update(
-                    &mut editor.config,
+                update_config(
+                    &mut editor.core.config,
                     "active_theme",
                     idx,
                     &mut editor.console,
-                    &mut editor.view_config_rev,
+                    &mut editor.core.view_config_rev,
                 );
             }
         }
-        editor.palette = theme::palette_from_theme(
+        editor.core.palette = theme::palette_from_theme(
             &imgui,
-            editor.themes.get(editor.config.misc.theme).map(|e| &e.data),
+            editor
+                .themes
+                .get(editor.core.config.misc.theme)
+                .map(|e| &e.data),
         );
 
         let view2d_imgui_tex =
@@ -839,6 +643,8 @@ impl AppState {
             None,
         );
 
+        let last_render_mode = editor.core.config.view.rendermode.clone();
+
         Self {
             window,
             gl_surface,
@@ -859,6 +665,7 @@ impl AppState {
             vp2d,
             vp3d,
             needs_redraw: true,
+            last_render_mode,
         }
     }
 
@@ -883,23 +690,49 @@ impl AppState {
         if let Some(idx) = self.editor.pending_theme.take() {
             if let Some(entry) = self.editor.themes.get(idx) {
                 theme::apply_theme(&mut self.imgui, &entry.data);
-                EditorConfig::update(
-                    &mut self.editor.config,
+                update_config(
+                    &mut self.editor.core.config,
                     "active_theme",
                     idx,
                     &mut self.editor.console,
-                    &mut self.editor.view_config_rev,
+                    &mut self.editor.core.view_config_rev,
                 );
             }
         }
 
-        self.editor.palette = theme::palette_from_theme(
+        self.editor.core.palette = theme::palette_from_theme(
             &self.imgui,
             self.editor
                 .themes
-                .get(self.editor.config.misc.theme)
+                .get(self.editor.core.config.misc.theme)
                 .map(|e| &e.data),
         );
+
+        let current_render_mode = self.editor.core.config.view.rendermode.clone();
+        if self.last_render_mode != current_render_mode {
+            self.editor.tex_browser.clear_render_texture_caches();
+            self.editor.core.tex_registry.clear();
+            if let Some(map) = self.editor.core.map.as_ref() {
+                let shader_db = self.editor.core.shader_db.as_ref();
+                for mat in map.collect_used_materials(shader_db) {
+                    self.editor.core.tex_registry.request(mat);
+                }
+            }
+            self.last_render_mode = current_render_mode;
+        }
+
+        // Bridge shared renderer texture requests into the editor-side loader/uploader.
+        let requested_materials: Vec<_> = self
+            .editor
+            .core
+            .tex_registry
+            .pending_requests
+            .iter()
+            .cloned()
+            .collect();
+        for material in requested_materials {
+            self.editor.tex_browser.request_texture_load(&material);
+        }
 
         const UPLOADS_PER_FRAME: usize = 4; // later would add in configuration
         let pending = &mut self.editor.tex_browser.pending_uploads;
@@ -916,9 +749,26 @@ impl AppState {
         self.editor.tex_browser.process_pending_render_uploads(
             &self.gl,
             UPLOADS_PER_FRAME,
-            &self.editor.config.view.rendermode,
+            &self.editor.core.config.view.rendermode,
             upload_texture_mipmaps,
         );
+        let mut inserted_render_textures = false;
+        for (material, rt) in &self.editor.tex_browser.tex_render_cache {
+            if self.editor.core.tex_registry.get(material).is_none() {
+                self.editor.core.tex_registry.register(
+                    material.clone(),
+                    kradiant::render::RenderTextureInfo {
+                        tex: rt.tex,
+                        size: rt.size,
+                        qer: rt.qer.clone(),
+                    },
+                );
+                inserted_render_textures = true;
+            }
+        }
+        if inserted_render_textures {
+            self.editor.core.view_config_rev = self.editor.core.view_config_rev.wrapping_add(1);
+        }
 
         let lit_program = unsafe {
             let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
@@ -1060,6 +910,7 @@ impl AppState {
         self.platform.prepare_frame(&self.window, &mut self.imgui);
         let ui = self.imgui.frame();
         ui::draw_editor(ui, &mut self.editor, delta);
+        self.editor.sync_viewports_to_core();
 
         if let Some(warp) = self.editor.view3d.warp_request.take() {
             let fb_scale = self.imgui.io().display_framebuffer_scale();
@@ -1085,7 +936,7 @@ impl AppState {
 
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.viewport(0, 0, win_w as i32, win_h as i32);
-            let win_clear = self.editor.palette.window_clear;
+            let win_clear = self.editor.core.palette.window_clear;
             self.gl
                 .clear_color(win_clear[0], win_clear[1], win_clear[2], win_clear[3]);
             self.gl
@@ -1112,11 +963,15 @@ impl AppState {
                 tex_amb_loc,
                 tex_sampler_loc,
             };
-            self.vp3d.render(&mut backend, &mut self.editor);
-            self.vp2d.render(&mut backend, &mut self.editor);
+            self.vp3d.render(&mut backend, &mut self.editor.core);
+            self.vp2d.render(&mut backend, &mut self.editor.core);
 
             self.gl.use_program(None);
         }
+
+        let has_pending_texture_work = !self.editor.core.tex_registry.pending_requests.is_empty()
+            || !self.editor.tex_browser.pending_uploads.is_empty()
+            || !self.editor.tex_browser.pending_render_uploads.is_empty();
 
         self.renderer
             .render(draw_data)
@@ -1125,7 +980,10 @@ impl AppState {
             .swap_buffers(&self.gl_context)
             .expect("swap failed");
 
-        self.needs_redraw = false;
+        self.needs_redraw = has_pending_texture_work;
+        if has_pending_texture_work {
+            self.window.request_redraw();
+        }
     }
 }
 
@@ -1154,7 +1012,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 //let cfg = state.editor.config.clone();
-                let _ = state.editor.config.save(); //EditorConfig::save(cfg);
+                let _ = save_config(&state.editor.core.config);
                 event_loop.exit()
             }
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {

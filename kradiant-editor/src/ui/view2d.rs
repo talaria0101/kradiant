@@ -1,49 +1,27 @@
 //! 2D View
 
-use crate::config::EditorConfig;
-use kradiant::editor::selection::{FaceSelection, PatchVertexSelection};
-pub use kradiant::editor::viewport::{AxisLock, DragMode, Ortho, StretchMode};
+use crate::config::update as update_config;
 use crate::ui::console::ConsoleLogger;
 use crate::util::{project_to_2d, text_height, text_width};
 use crate::{log_error, log_info, log_warn, util};
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 use glam::{Quat, Vec2, Vec3};
-use kradiant::editing::{self, Aabb};
+use kradiant::editing;
+use kradiant::editing::Aabb;
+use kradiant::editor::selection::{FaceSelection, PatchVertexSelection};
+use kradiant::editor::viewport::state::{RotateDrag, StretchDrag, View2DState};
+pub use kradiant::editor::viewport::{AxisLock, DragMode, Ortho, StretchMode};
+use kradiant::editor::{EditorConfig, EditorPalette};
 use kradiant::map::{BrushContent, BrushId, Face};
 use kradiant::map_utils::format_float;
 use std::collections::HashSet;
-
-#[derive(Clone)]
-pub struct StretchDrag {
-    pub selection_aabb: Aabb,
-    pub faces: [Option<editing::StretchFace>; 2],
-}
-
-#[derive(Clone)]
-pub struct RotateDrag {
-    pub selection_aabb: Aabb,
-    pub pivot_uv: [f32; 2],
-    pub start_uv: [f32; 2],
-    pub axis: Vec3,
-}
+use std::ops::{Deref, DerefMut};
 
 pub struct View2D {
-    pub ortho_axis: Ortho,
-    pub rect: [f32; 4],
-    pub zoom: f32,
-    pub pan: [f32; 2],
+    pub core: View2DState,
     pub drag_start: Option<Vec2>,
     pub drag_current: Option<Vec2>,
-    pub drag_mode: DragMode,
     pub tex_id: Option<TextureId>,
-    /// Offset for rendering when we are moving something
-    pub move_offset: Vec3,
-    pub work_pos: Vec3,
-    pub work_depth: Vec3,
-    pub stretch: Option<StretchDrag>,
-    pub stretch_delta: Vec3,
-    pub rotate: Option<RotateDrag>,
-    pub rotate_angle: f32,
     pub last_aabb: Option<Aabb>,
     // Selection rectangle for rectangular selection mode
     //pub selection_rect: Option<[Vec2; 2]>,
@@ -58,26 +36,29 @@ pub struct View2D {
 impl Default for View2D {
     fn default() -> Self {
         Self {
-            ortho_axis: Ortho::default(),
-            rect: [0.0; 4],
-            zoom: 1.0,
-            pan: [0.0, 0.0],
+            core: View2DState::default(),
             drag_start: None,
             drag_current: None,
-            drag_mode: DragMode::NewBrush,
             tex_id: None,
-            move_offset: Vec3::ZERO,
-            stretch: None,
-            stretch_delta: Vec3::ZERO,
-            rotate: None,
-            rotate_angle: 0.0,
-            work_pos: Vec3::ZERO,
-            work_depth: Vec3::ZERO,
             last_aabb: None,
             selection_drag_touched: None,
             selection_drag_touched_faces: None,
             selection_drag_touched_verts: None,
         }
+    }
+}
+
+impl Deref for View2D {
+    type Target = View2DState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl DerefMut for View2D {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
     }
 }
 
@@ -161,11 +142,11 @@ impl View2D {
     pub fn draw_impl(
         &mut self,
         ui: &Ui,
-        mut config: &mut crate::config::EditorConfig,
+        mut config: &mut EditorConfig,
         axis_lock: &AxisLock,
         rotate_mode: bool,
         stretch_mode: StretchMode,
-        palette: &crate::theme::EditorPalette,
+        palette: &EditorPalette,
         console: &mut crate::ui::console::ConsoleLogger,
         undo: &mut kradiant::editor::undo::UndoRedo,
         selected_brushes: &mut Vec<(usize, usize)>,
@@ -1421,28 +1402,28 @@ impl View2D {
 
                     if ui.is_window_hovered() {
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key1) {
-                            config.update("grid_minor_step", 1u8, console, view_config_rev);
+                            update_config(config, "grid_minor_step", 1u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key2) {
-                            config.update("grid_minor_step", 2u8, console, view_config_rev);
+                            update_config(config, "grid_minor_step", 2u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key3) {
-                            config.update("grid_minor_step", 4u8, console, view_config_rev);
+                            update_config(config, "grid_minor_step", 4u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key4) {
-                            config.update("grid_minor_step", 8u8, console, view_config_rev);
+                            update_config(config, "grid_minor_step", 8u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key5) {
-                            config.update("grid_minor_step", 16u8, console, view_config_rev);
+                            update_config(config, "grid_minor_step", 16u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key6) {
-                            config.update("grid_minor_step", 32u8, console, view_config_rev);
+                            update_config(config, "grid_minor_step", 32u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key7) {
-                            config.update("grid_minor_step", 64u8, console, view_config_rev);
+                            update_config(config, "grid_minor_step", 64u8, console, view_config_rev);
                         }
                         if ui.is_key_pressed(dear_imgui_rs::Key::Key8) {
-                            config.update("grid_minor_step", 128u8, console, view_config_rev);
+                            update_config(config, "grid_minor_step", 128u8, console, view_config_rev);
                         }
                     }
 
