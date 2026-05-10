@@ -274,13 +274,19 @@ impl Viewport2D {
 
             // brush geometry
             let map_ptr = editor
+                .core
                 .map
                 .as_ref()
                 .map(|m| (m as *const kradiant::map::Map) as usize)
                 .unwrap_or(0);
-            let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0u64);
-            let map_revision = editor.map_revision;
-            let map_present = editor.map.is_some();
+            let map_generation = editor
+                .core
+                .map
+                .as_ref()
+                .map(|m| m.generation)
+                .unwrap_or(0u64);
+            let map_revision = editor.core.map_revision;
+            let map_present = editor.core.map.is_some();
 
             if !map_present {
                 self.grid_vertices.clear();
@@ -350,7 +356,7 @@ impl Viewport2D {
                     let view_min_y = cache.cull_top.min(cache.cull_bottom);
                     let view_max_y = cache.cull_top.max(cache.cull_bottom);
 
-                    if let Some(map) = &mut editor.map {
+                    if let Some(map) = &mut editor.core.map {
                         for entity in &mut map.entities {
                             for brush in &mut entity.brushes {
                                 match &mut brush.content {
@@ -509,7 +515,10 @@ impl Viewport2D {
             }
 
             self.selected_vertices.clear();
-            if !editor.edit_faces && !editor.edit_vertices && !editor.selected_brushes.is_empty() {
+            if !editor.core.edit_faces
+                && !editor.core.edit_vertices
+                && !editor.core.selected_brushes.is_empty()
+            {
                 let view_min_x = view_left.min(view_right);
                 let view_max_x = view_left.max(view_right);
                 let view_min_y = view_top.min(view_bottom);
@@ -547,8 +556,8 @@ impl Viewport2D {
                     }
                 };
 
-                for (entity_index, brush_index) in &editor.selected_brushes {
-                    if let Some(map) = &mut editor.map {
+                for (entity_index, brush_index) in &editor.core.selected_brushes {
+                    if let Some(map) = &mut editor.core.map {
                         if let Some(entity) = map.entities.get_mut(*entity_index) {
                             if let Some(brush) = entity.brushes.get_mut(*brush_index) {
                                 if matches!(&brush.content, BrushContent::Convex(_)) {
@@ -730,21 +739,21 @@ impl Viewport2D {
             // Draw patch control vertices when in vertex editing mode
             self.control_vertices.clear();
             self.control_selected_vertices.clear();
-            if editor.edit_vertices {
+            if editor.core.edit_vertices {
                 let move_offset = if editor.view2d.drag_mode == ui::DragMode::MoveVertices {
                     editor.view2d.move_offset
                 } else {
                     Vec3::ZERO
                 };
 
-                if let Some(map) = &editor.map {
+                if let Some(map) = &editor.core.map {
                     for (entity_idx, entity) in map.entities.iter().enumerate() {
                         for (brush_idx, brush) in entity.brushes.iter().enumerate() {
                             if let BrushContent::Patch(patch) = &brush.content {
                                 for (row_idx, row) in patch.vertices.iter().enumerate() {
                                     for (col_idx, vtx) in row.iter().enumerate() {
                                         let is_selected =
-                                            editor.selected_patch_vertices.iter().any(|sel| {
+                                            editor.core.selected_patch_vertices.iter().any(|sel| {
                                                 sel.entity_idx == entity_idx
                                                     && sel.brush_idx == brush_idx
                                                     && sel.row == row_idx

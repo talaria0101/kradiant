@@ -1,6 +1,5 @@
-use crate::ui::console::ConsoleLogger;
-use crate::ui::{FaceSelection, PatchVertexSelection};
-use kradiant::map::Map;
+use crate::editor::selection::{FaceSelection, PatchVertexSelection};
+use crate::map::Map;
 
 #[derive(Debug)]
 struct Snapshot {
@@ -61,7 +60,6 @@ impl UndoRedo {
         selected_patch_vertices: &[PatchVertexSelection],
         selected_entity: &Option<usize>,
     ) {
-        // New action invalidates the redo chain.
         self.redo.clear();
 
         self.undo.push(Entry {
@@ -115,11 +113,8 @@ impl UndoRedo {
         selected_patch_vertices: &mut Vec<PatchVertexSelection>,
         selected_entity: &mut Option<usize>,
         map_revision: &mut u64,
-        console: &mut ConsoleLogger,
-    ) -> bool {
-        let Some(entry) = self.undo.pop() else {
-            return false;
-        };
+    ) -> Option<String> {
+        let entry = self.undo.pop()?;
 
         // Move current state to redo.
         let current = Snapshot {
@@ -140,8 +135,7 @@ impl UndoRedo {
         *selected_patch_vertices = entry.snapshot.selected_patch_vertices;
         *selected_entity = entry.snapshot.selected_entity;
         *map_revision = map_revision.wrapping_add(1);
-        console.info(format!("Undo: {}", entry.label));
-        true
+        Some(entry.label)
     }
 
     pub fn redo(
@@ -152,11 +146,8 @@ impl UndoRedo {
         selected_patch_vertices: &mut Vec<PatchVertexSelection>,
         selected_entity: &mut Option<usize>,
         map_revision: &mut u64,
-        console: &mut ConsoleLogger,
-    ) -> bool {
-        let Some(entry) = self.redo.pop() else {
-            return false;
-        };
+    ) -> Option<String> {
+        let entry = self.redo.pop()?;
 
         // Move current state to undo.
         let current = Snapshot {
@@ -177,7 +168,7 @@ impl UndoRedo {
         *selected_patch_vertices = entry.snapshot.selected_patch_vertices;
         *selected_entity = entry.snapshot.selected_entity;
         *map_revision = map_revision.wrapping_add(1);
-        console.info(format!("Redo: {}", entry.label));
-        true
+        Some(entry.label)
     }
 }
+

@@ -8,8 +8,9 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::ui::console::ConsoleLogger;
-use crate::ui::undo::UndoRedo;
-use crate::ui::{EditorState, FaceSelection, Ortho, PatchVertexSelection};
+use crate::ui::{EditorState, Ortho};
+use kradiant::editor::selection::{FaceSelection, PatchVertexSelection};
+use kradiant::editor::undo::UndoRedo;
 use glam::{Vec2, Vec3};
 
 pub fn get_config_dir() -> io::Result<PathBuf> {
@@ -178,15 +179,15 @@ pub fn screen_to_world_ortho(
 */
 
 pub fn new_map(state: &mut EditorState) {
-    state.map_path = "unsaved.map".to_string();
-    state.map = Some(Map::default());
-    state.map_revision = state.map_revision.wrapping_add(1);
-    state.selected_brushes.clear();
-    state.selected_faces.clear();
-    state.selected_patch_vertices.clear();
-    state.selected_entity = None;
-    state.undo.clear();
-    state.map_load_count = state.map_load_count.wrapping_add(1);
+    state.core.map_path = "unsaved.map".to_string();
+    state.core.map = Some(Map::default());
+    state.core.bump_revision();
+    state.core.selected_brushes.clear();
+    state.core.selected_faces.clear();
+    state.core.selected_patch_vertices.clear();
+    state.core.selected_entity = None;
+    state.core.undo.clear();
+    state.core.map_load_count = state.core.map_load_count.wrapping_add(1);
     log_info!(state.console, "New map");
 }
 
@@ -208,15 +209,15 @@ pub fn open_map(state: &mut EditorState) {
     if let Some(path) = p {
         let path_str = path.to_str().unwrap();
         perform_open_map(
-            &mut state.selected_brushes,
-            &mut state.selected_faces,
-            &mut state.selected_patch_vertices,
-            &mut state.selected_entity,
-            &mut state.map_path,
-            &mut state.map,
-            &mut state.map_revision,
-            &mut state.undo,
-            &mut state.map_load_count,
+            &mut state.core.selected_brushes,
+            &mut state.core.selected_faces,
+            &mut state.core.selected_patch_vertices,
+            &mut state.core.selected_entity,
+            &mut state.core.map_path,
+            &mut state.core.map,
+            &mut state.core.map_revision,
+            &mut state.core.undo,
+            &mut state.core.map_load_count,
             &mut state.config.misc.recent_maps,
             &mut state.console,
             path_str,
@@ -226,15 +227,15 @@ pub fn open_map(state: &mut EditorState) {
 
 pub fn open_recent_map(state: &mut EditorState, path: &str) {
     perform_open_map(
-        &mut state.selected_brushes,
-        &mut state.selected_faces,
-        &mut state.selected_patch_vertices,
-        &mut state.selected_entity,
-        &mut state.map_path,
-        &mut state.map,
-        &mut state.map_revision,
-        &mut state.undo,
-        &mut state.map_load_count,
+        &mut state.core.selected_brushes,
+        &mut state.core.selected_faces,
+        &mut state.core.selected_patch_vertices,
+        &mut state.core.selected_entity,
+        &mut state.core.map_path,
+        &mut state.core.map,
+        &mut state.core.map_revision,
+        &mut state.core.undo,
+        &mut state.core.map_load_count,
         &mut state.config.misc.recent_maps,
         &mut state.console,
         path,
@@ -296,13 +297,13 @@ fn get_save_path(force_dialog: bool, current_path: &str) -> Option<PathBuf> {
 }
 
 pub fn save_map_as(state: &mut EditorState) {
-    if state.map.is_none() {
+    if state.core.map.is_none() {
         log_error!(state.console, "Not allowed to save empty map!");
         return;
     }
 
     if let Some(p) = get_save_path(true, "") {
-        state.map_path = p.to_str().unwrap().to_string();
+        state.core.map_path = p.to_str().unwrap().to_string();
         perform_save_map(state, &p);
     } else {
         log_info!(state.console, "Save map cancelled by user");
@@ -310,12 +311,12 @@ pub fn save_map_as(state: &mut EditorState) {
 }
 
 pub fn save_map(state: &mut EditorState) {
-    if state.map.is_none() {
+    if state.core.map.is_none() {
         log_info!(state.console, "Not allowed to save empty map!");
         return;
     }
 
-    if let Some(path) = get_save_path(false, &state.map_path) {
+    if let Some(path) = get_save_path(false, &state.core.map_path) {
         perform_save_map(state, &path);
     } else {
         log_info!(state.console, "Save map cancelled by user");
@@ -325,14 +326,14 @@ pub fn save_map(state: &mut EditorState) {
 /// Perform the actual map save operation.
 fn perform_save_map(state: &mut EditorState, path: &PathBuf) {
     let path_str = path.to_str().unwrap();
-    if let Some(map) = state.map.as_mut() {
+    if let Some(map) = state.core.map.as_mut() {
         let changed = kradiant::editing::orient_map_convex_brushes_inward(map);
         if changed > 0 {
             log_info!(state.console, "Oriented {} brushes", changed);
         }
     }
 
-    match map_loader::save_map(state.map.as_ref().unwrap(), path_str) {
+    match map_loader::save_map(state.core.map.as_ref().unwrap(), path_str) {
         Ok(_) => log_info!(state.console, "Saved map to {}", path_str),
         Err(e) => log_error!(state.console, "Failed to save map to {}: {}", path_str, e),
     }

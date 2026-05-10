@@ -7,6 +7,7 @@ const SHIFT: u32 = 2;
 use std::collections::HashSet;
 
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
+use kradiant::editor::EditorState as CoreEditorState;
 use kradiant::editing;
 use kradiant::map::Map;
 
@@ -19,29 +20,12 @@ use crate::{EDITOR_THEMES, util};
 
 pub mod console;
 pub mod texbro;
-pub mod undo;
 pub mod view2d;
 pub mod view3d;
 use console::ConsoleLogger;
 use texbro::TextureBrowser;
-use undo::UndoRedo;
 pub use view2d::{AxisLock, DragMode, Ortho, StretchMode, View2D};
 use view3d::View3D;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FaceSelection {
-    pub entity_idx: usize,
-    pub brush_idx: usize,
-    pub face_idx: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PatchVertexSelection {
-    pub entity_idx: usize,
-    pub brush_idx: usize,
-    pub row: usize,
-    pub col: usize,
-}
 
 /// Helper function to create an icon button with fallback text and tooltip.
 fn icon_button(ui: &Ui, id: &str, icon: Option<TextureId>, tooltip: &str) -> bool {
@@ -121,14 +105,12 @@ fn key_combo_pressed(ui: &Ui, main_key: dear_imgui_rs::Key, modifiers: u32) -> b
 }
 
 pub struct EditorState {
+    pub core: CoreEditorState,
     pub config: EditorConfig,
     pub view_config_rev: u64,
     pub show_demo: bool,
     pub show_about: bool,
     pub toolbar_height: f32,
-    pub map_path: String,
-    pub map_revision: u64,
-    pub undo: UndoRedo,
     pub view2d: View2D,
     pub view3d: View3D,
     pub stretch_mode: StretchMode,
@@ -142,22 +124,11 @@ pub struct EditorState {
     pub tex_tile_size: f32,
     pub console: ConsoleLogger,
     pub con_filter: String,
-    pub map: Option<kradiant::map::Map>,
-    pub map_load_count: u64,
-    pub selected_entity: Option<usize>,
-    pub selected_brushes: Vec<(usize, usize)>,
-    pub selected_faces: Vec<FaceSelection>,
-    pub selected_patch_vertices: Vec<PatchVertexSelection>,
-    pub new_prop_key: String,
-    pub new_prop_val: String,
     pub icons: EditorIcons,
     pub images: EditorImages,
     pub themes: Vec<ThemeEntry>,
     pub pending_theme: Option<usize>,
     pub palette: EditorPalette,
-    pub edit_faces: bool,
-    pub edit_edges: bool,
-    pub edit_vertices: bool,
 }
 
 #[macro_export]
@@ -193,15 +164,13 @@ impl Default for EditorState {
             .collect();
 
         let mut s = Self {
+            core: CoreEditorState::default(),
             config: EditorConfig::default(),
             view_config_rev: 0,
             show_demo: false,
             show_about: false,
             toolbar_height: 0.0,
-            map_path: String::new(),
-            map_revision: 0,
             //map_selection: 0,
-            undo: UndoRedo::default(),
             view2d: View2D::default(),
             view3d: View3D::default(),
             stretch_mode: StretchMode::default(),
@@ -215,22 +184,11 @@ impl Default for EditorState {
             tex_tile_size: 64.0,
             console: ConsoleLogger::default(),
             con_filter: String::new(),
-            map: Some(kradiant::map::Map::default()),
-            map_load_count: 0,
-            selected_entity: None,
-            selected_brushes: Vec::new(),
-            selected_faces: Vec::new(),
-            selected_patch_vertices: Vec::new(),
-            new_prop_key: String::new(),
-            new_prop_val: String::new(),
             icons: EditorIcons::default(),
             images: EditorImages::default(),
             themes,
             pending_theme: None,
             palette: EditorPalette::default(),
-            edit_faces: false,
-            edit_edges: false,
-            edit_vertices: false,
         };
 
         log_info!(s.console, "Kradiant editor started");
@@ -276,14 +234,14 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         let stretch_mode = state.stretch_mode;
         let palette = &state.palette;
         let console = &mut state.console;
-        let undo = &mut state.undo;
-        let selected_brushes = &mut state.selected_brushes;
-        let selected_faces = &mut state.selected_faces;
-        let selected_patch_vertices = &mut state.selected_patch_vertices;
-        let selected_entity = &mut state.selected_entity;
-        let edit_faces = state.edit_faces;
-        let edit_vertices = state.edit_vertices;
-        let map = &mut state.map;
+        let undo = &mut state.core.undo;
+        let selected_brushes = &mut state.core.selected_brushes;
+        let selected_faces = &mut state.core.selected_faces;
+        let selected_patch_vertices = &mut state.core.selected_patch_vertices;
+        let selected_entity = &mut state.core.selected_entity;
+        let edit_faces = state.core.edit_faces;
+        let edit_vertices = state.core.edit_vertices;
+        let map = &mut state.core.map;
         let selection_rgba = state.selection_rgba;
         let selection_rect_rgba = state.selection_rect_rgba;
         let view_config_rev = &mut state.view_config_rev;
@@ -546,23 +504,27 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
 
         ui.menu("Selection", || {
             if ui.menu_item("Grow") {
-                if let Some(map) = state.map.as_mut() {
+                if let Some(map) = state.core.map.as_mut() {
                     use std::collections::HashSet;
 
-                    let current: HashSet<_> = state.selected_brushes.iter().copied().collect();
+                    let current: HashSet<_> = state.core.selected_brushes.iter().copied().collect();
                     let touching: HashSet<_> = state
+                        .core
                         .selected_brushes
                         .iter()
                         .flat_map(|sel| editing::find_touching_brushes(map, sel.0, sel.1, 1.0))
                         .collect();
 
-                    state.selected_brushes.extend(touching.difference(&current));
+                    state
+                        .core
+                        .selected_brushes
+                        .extend(touching.difference(&current));
                 }
             }
             if ui.menu_item("Inverse") {
-                if let Some(map) = state.map.as_mut() {
+                if let Some(map) = state.core.map.as_mut() {
                     let current_selection: HashSet<_> =
-                        state.selected_brushes.iter().copied().collect();
+                        state.core.selected_brushes.iter().copied().collect();
 
                     let mut inverse = Vec::new();
                     for (entity_idx, entity) in map.entities.iter().enumerate() {
@@ -574,8 +536,8 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                         }
                     }
 
-                    state.selected_brushes.clear();
-                    state.selected_brushes.extend(inverse);
+                    state.core.selected_brushes.clear();
+                    state.core.selected_brushes.extend(inverse);
                 }
             }
             if ui.is_item_hovered() {
@@ -604,26 +566,28 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
 
     if !ui.io().want_text_input() {
         if key_combo_pressed(ui, dear_imgui_rs::Key::Z, CTRL) {
-            let _ = state.undo.undo(
-                &mut state.map,
-                &mut state.selected_brushes,
-                &mut state.selected_faces,
-                &mut state.selected_patch_vertices,
-                &mut state.selected_entity,
-                &mut state.map_revision,
-                &mut state.console,
-            );
+            if let Some(label) = state.core.undo.undo(
+                &mut state.core.map,
+                &mut state.core.selected_brushes,
+                &mut state.core.selected_faces,
+                &mut state.core.selected_patch_vertices,
+                &mut state.core.selected_entity,
+                &mut state.core.map_revision,
+            ) {
+                state.console.info(format!("Undo: {label}"));
+            }
         }
         if key_combo_pressed(ui, dear_imgui_rs::Key::Y, CTRL) {
-            let _ = state.undo.redo(
-                &mut state.map,
-                &mut state.selected_brushes,
-                &mut state.selected_faces,
-                &mut state.selected_patch_vertices,
-                &mut state.selected_entity,
-                &mut state.map_revision,
-                &mut state.console,
-            );
+            if let Some(label) = state.core.undo.redo(
+                &mut state.core.map,
+                &mut state.core.selected_brushes,
+                &mut state.core.selected_faces,
+                &mut state.core.selected_patch_vertices,
+                &mut state.core.selected_entity,
+                &mut state.core.map_revision,
+            ) {
+                state.console.info(format!("Redo: {label}"));
+            }
         }
     }
 
@@ -721,7 +685,7 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         }
 
         if key_combo_pressed(ui, dear_imgui_rs::Key::C, SHIFT) {
-            if !state.selected_brushes.is_empty() {
+            if !state.core.selected_brushes.is_empty() {
                 state.view2d.center_to_work();
                 log_info!(state.console, "Goto Selection");
             }
@@ -817,13 +781,13 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             "##edit_faces",
             state.icons.edit_face,
             "Edit Faces",
-            state.edit_faces,
+            state.core.edit_faces,
             "Manipulate Faces",
         ) {
-            state.edit_faces = !state.edit_faces;
-            state.edit_edges = false;
-            state.edit_vertices = false;
-            state.selected_patch_vertices.clear();
+            state.core.edit_faces = !state.core.edit_faces;
+            state.core.edit_edges = false;
+            state.core.edit_vertices = false;
+            state.core.selected_patch_vertices.clear();
         }
         ui.same_line();
         if icon_button_toggle(
@@ -831,13 +795,13 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             "##edit_edges",
             state.icons.edit_edge,
             "Edit Edges",
-            state.edit_edges,
+            state.core.edit_edges,
             "Manipulate Edges",
         ) {
-            state.edit_edges = !state.edit_edges;
-            state.edit_faces = false;
-            state.edit_vertices = false;
-            state.selected_patch_vertices.clear();
+            state.core.edit_edges = !state.core.edit_edges;
+            state.core.edit_faces = false;
+            state.core.edit_vertices = false;
+            state.core.selected_patch_vertices.clear();
         }
         ui.same_line();
         if icon_button_toggle(
@@ -845,16 +809,16 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             "##edit_vertices",
             state.icons.edit_vertex,
             "Edit Vertices",
-            state.edit_vertices,
+            state.core.edit_vertices,
             "Manipulate Vertices",
         ) {
-            state.edit_vertices = !state.edit_vertices;
-            state.edit_faces = false;
-            state.edit_edges = false;
-            if !state.edit_vertices {
-                state.selected_patch_vertices.clear();
+            state.core.edit_vertices = !state.core.edit_vertices;
+            state.core.edit_faces = false;
+            state.core.edit_edges = false;
+            if !state.core.edit_vertices {
+                state.core.selected_patch_vertices.clear();
             } else {
-                state.selected_faces.clear();
+                state.core.selected_faces.clear();
             }
         }
 
@@ -873,25 +837,25 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
         }
 
         if ui.is_key_pressed(dear_imgui_rs::Key::F) {
-            state.edit_faces = !state.edit_faces;
-            state.edit_edges = false;
-            state.edit_vertices = false;
-            state.selected_patch_vertices.clear();
+            state.core.edit_faces = !state.core.edit_faces;
+            state.core.edit_edges = false;
+            state.core.edit_vertices = false;
+            state.core.selected_patch_vertices.clear();
         }
         if ui.is_key_pressed(dear_imgui_rs::Key::E) {
-            state.edit_edges = !state.edit_edges;
-            state.edit_faces = false;
-            state.edit_vertices = false;
-            state.selected_patch_vertices.clear();
+            state.core.edit_edges = !state.core.edit_edges;
+            state.core.edit_faces = false;
+            state.core.edit_vertices = false;
+            state.core.selected_patch_vertices.clear();
         }
         if ui.is_key_pressed(dear_imgui_rs::Key::V) {
-            state.edit_vertices = !state.edit_vertices;
-            state.edit_faces = false;
-            state.edit_edges = false;
-            if !state.edit_vertices {
-                state.selected_patch_vertices.clear();
+            state.core.edit_vertices = !state.core.edit_vertices;
+            state.core.edit_faces = false;
+            state.core.edit_edges = false;
+            if !state.core.edit_vertices {
+                state.core.selected_patch_vertices.clear();
             } else {
-                state.selected_faces.clear();
+                state.core.selected_faces.clear();
             }
         }
 
@@ -906,19 +870,19 @@ fn draw_entity_list(ui: &Ui, state: &mut EditorState) {
     ui.window("Entities")
         .size([220.0, 500.0], Condition::FirstUseEver)
         .build(|| {
-            let Some(map) = &state.map else {
+            let Some(map) = &state.core.map else {
                 ui.text_disabled("(no map loaded)");
                 return;
             };
             for (i, ent) in map.entities.iter().enumerate() {
                 let label = format!("{} ({})\0", ent.classname, ent.id.0);
-                let selected = state.selected_entity == Some(i);
+                let selected = state.core.selected_entity == Some(i);
                 if ui
                     .selectable_config(&label[..label.len() - 1])
                     .selected(selected)
                     .build()
                 {
-                    state.selected_entity = if selected { None } else { Some(i) };
+                    state.core.selected_entity = if selected { None } else { Some(i) };
                 }
             }
         });
@@ -930,11 +894,24 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
     ui.window("Properties")
         .size([220.0, 280.0], Condition::FirstUseEver)
         .build(|| {
-            let Some(idx) = state.selected_entity else {
+            let core = &mut state.core;
+            let Some(idx) = core.selected_entity else {
                 ui.text_disabled("(select an entity)");
                 return;
             };
-            let Some(map) = state.map.as_mut() else {
+            let (map_opt, map_revision, undo, selected_brushes, selected_faces, selected_patch_vertices, selected_entity, new_prop_key, new_prop_val) = (
+                &mut core.map,
+                &mut core.map_revision,
+                &mut core.undo,
+                &core.selected_brushes,
+                &core.selected_faces,
+                &core.selected_patch_vertices,
+                &core.selected_entity,
+                &mut core.new_prop_key,
+                &mut core.new_prop_val,
+            );
+
+            let Some(map) = map_opt.as_mut() else {
                 ui.text_disabled("(select an entity)");
                 return;
             };
@@ -964,52 +941,52 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
             }
 
             if let Some(k) = to_delete {
-                state.undo.push_map(
+                undo.push_map(
                     "Delete property",
                     &*map,
-                    &state.selected_brushes,
-                    &state.selected_faces,
-                    &state.selected_patch_vertices,
-                    &state.selected_entity,
+                    selected_brushes,
+                    selected_faces,
+                    selected_patch_vertices,
+                    selected_entity,
                 );
                 map.entities[idx].properties.remove(&k);
-                state.map_revision = state.map_revision.wrapping_add(1);
+                *map_revision = map_revision.wrapping_add(1);
             }
 
             ui.separator();
 
             // Add new property
             ui.set_next_item_width(ui.content_region_avail()[0] * 0.45);
-            ui.input_text("##new_key", &mut state.new_prop_key)
+            ui.input_text("##new_key", new_prop_key)
                 .hint("key")
                 .build();
             ui.same_line();
             ui.set_next_item_width(-1.0);
-            ui.input_text("##new_val", &mut state.new_prop_val)
+            ui.input_text("##new_val", new_prop_val)
                 .hint("value")
                 .build();
 
-            let can_add = !state.new_prop_key.trim().is_empty();
+            let can_add = !new_prop_key.trim().is_empty();
             /*if !can_add {
                  *                ui.push_style_color(StyleColor::Button,      [0.3, 0.3, 0.3, 1.0]);
                  *                ui.push_style_color(StyleColor::ButtonHovered,[0.3, 0.3, 0.3, 1.0]);
             }*/
             if ui.button("Add property") && can_add {
-                state.undo.push_map(
+                undo.push_map(
                     "Add property",
                     &*map,
-                    &state.selected_brushes,
-                    &state.selected_faces,
-                    &state.selected_patch_vertices,
-                    &state.selected_entity,
+                    selected_brushes,
+                    selected_faces,
+                    selected_patch_vertices,
+                    selected_entity,
                 );
                 map.entities[idx]
                     .properties
-                    .entry(state.new_prop_key.trim().to_string())
-                    .or_insert_with(|| state.new_prop_val.clone());
-                state.new_prop_key.clear();
-                state.new_prop_val.clear();
-                state.map_revision = state.map_revision.wrapping_add(1);
+                    .entry(new_prop_key.trim().to_string())
+                    .or_insert_with(|| new_prop_val.clone());
+                new_prop_key.clear();
+                new_prop_val.clear();
+                *map_revision = map_revision.wrapping_add(1);
             }
             /*if !can_add {
                  *                ui.pop_style_color();
@@ -1021,21 +998,30 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
 // Texture Browser
 
 fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
-    let mut on_select = |selected: String, map: &mut Option<Map>| {
-        //log_info!(state.console, "selected: {selected}");
-        let selected_brushes = state.selected_brushes.clone();
-        let selected_faces = state.selected_faces.clone();
+    let core = &mut state.core;
+    let (map, undo, map_revision) = (&mut core.map, &mut core.undo, &mut core.map_revision);
+    let (selected_brushes, selected_faces, selected_patch_vertices, selected_entity, edit_faces) = (
+        &core.selected_brushes,
+        &core.selected_faces,
+        &core.selected_patch_vertices,
+        &core.selected_entity,
+        core.edit_faces,
+    );
+
+    let mut on_select = move |selected: String, map: &mut Option<Map>| {
+        let selected_brushes = selected_brushes.clone();
+        let selected_faces = selected_faces.clone();
         let mut any = false;
 
-        if state.edit_faces {
+        if edit_faces {
             if map.is_some() && !selected_faces.is_empty() {
-                state.undo.push(
+                undo.push(
                     "Set face texture",
                     &*map,
                     &selected_brushes,
                     &selected_faces,
-                    &state.selected_patch_vertices,
-                    &state.selected_entity,
+                    selected_patch_vertices,
+                    selected_entity,
                 );
             }
 
@@ -1060,13 +1046,13 @@ fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
             }
         } else {
             if map.is_some() && !selected_brushes.is_empty() {
-                state.undo.push(
+                undo.push(
                     "Set texture",
                     &*map,
                     &selected_brushes,
                     &selected_faces,
-                    &state.selected_patch_vertices,
-                    &state.selected_entity,
+                    selected_patch_vertices,
+                    selected_entity,
                 );
             }
 
@@ -1086,7 +1072,7 @@ fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
         }
 
         if any {
-            state.map_revision = state.map_revision.wrapping_add(1);
+            *map_revision = map_revision.wrapping_add(1);
         }
     };
 
@@ -1096,7 +1082,7 @@ fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
         &mut state.tex_filter,
         &mut state.tex_tile_size,
         &mut on_select,
-        &mut state.map,
+        map,
     );
 }
 

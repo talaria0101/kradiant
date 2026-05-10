@@ -110,15 +110,21 @@ impl Viewport3D {
             }
 
             // Geometry cache
-            let map_present = editor.map.is_some();
+            let map_present = editor.core.map.is_some();
             let map_ptr = editor
+                .core
                 .map
                 .as_ref()
                 .map(|m| m as *const _ as usize)
                 .unwrap_or(0);
-            let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0u64);
-            let map_revision = editor.map_revision;
-            let map_load_count = editor.map_load_count;
+            let map_generation = editor
+                .core
+                .map
+                .as_ref()
+                .map(|m| m.generation)
+                .unwrap_or(0u64);
+            let map_revision = editor.core.map_revision;
+            let map_load_count = editor.core.map_load_count;
             let view_config_rev = editor.view_config_rev;
 
             let need_rebuild = match self.cache {
@@ -149,7 +155,7 @@ impl Viewport3D {
                 self.tri_vertices.clear();
                 self.tri_vertices_tex.clear();
 
-                if let Some(map) = editor.map.as_mut() {
+                if let Some(map) = editor.core.map.as_mut() {
                     if tex_reload {
                         editor.tex_browser.clear_render_texture_caches();
                     }
@@ -391,7 +397,7 @@ impl Viewport3D {
 
             let current_selection_hash = {
                 let mut h: u64 = 5381; // Non-zero initial value to avoid collision with empty selection
-                let mut items: Vec<_> = editor.selected_brushes.iter().collect();
+                let mut items: Vec<_> = editor.core.selected_brushes.iter().collect();
                 items.sort_by_key(|&&(e, b)| (e, b));
                 for &&(e, b) in &items {
                     h = h
@@ -399,7 +405,7 @@ impl Viewport3D {
                         .wrapping_add((e as u64) * 1000003 + (b as u64));
                 }
 
-                let mut faces: Vec<_> = editor.selected_faces.iter().collect();
+                let mut faces: Vec<_> = editor.core.selected_faces.iter().collect();
                 faces.sort_by_key(|f| (f.entity_idx, f.brush_idx, f.face_idx));
                 for f in &faces {
                     h = h
@@ -416,8 +422,9 @@ impl Viewport3D {
             if current_selection_hash != self.last_selection_hash {
                 self.tri_vertices_selected.clear();
 
-                if let Some(map) = editor.map.as_mut() {
+                if let Some(map) = editor.core.map.as_mut() {
                     let _selected_face_set: HashSet<(usize, usize, usize)> = editor
+                        .core
                         .selected_faces
                         .iter()
                         .map(|f| (f.entity_idx, f.brush_idx, f.face_idx))
@@ -426,13 +433,13 @@ impl Viewport3D {
                     for (entity_idx, ent) in map.entities.iter_mut().enumerate() {
                         for (brush_idx, brush) in ent.brushes.iter_mut().enumerate() {
                             let is_brush_selected =
-                                editor.selected_brushes.contains(&(entity_idx, brush_idx));
+                                editor.core.selected_brushes.contains(&(entity_idx, brush_idx));
 
                             let mut faces_to_highlight: Vec<usize> = Vec::new();
 
-                            if editor.edit_faces {
+                            if editor.core.edit_faces {
                                 // Face edit mode: ONLY highlight selected faces
-                                for face_sel in &editor.selected_faces {
+                                for face_sel in &editor.core.selected_faces {
                                     if face_sel.entity_idx == entity_idx
                                         && face_sel.brush_idx == brush_idx
                                     {

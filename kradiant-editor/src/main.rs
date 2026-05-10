@@ -870,8 +870,8 @@ impl AppState {
         self.last_frame = now;
         self.imgui.io_mut().set_delta_time(delta);
 
-        let new_title = if !self.editor.map_path.is_empty() {
-            format!("{} — Kradiant Editor", &self.editor.map_path)
+        let new_title = if !self.editor.core.map_path.is_empty() {
+            format!("{} — Kradiant Editor", &self.editor.core.map_path)
         } else {
             "Kradiant Editor".to_string()
         };

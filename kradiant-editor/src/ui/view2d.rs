@@ -1,7 +1,8 @@
 //! 2D View
 
 use crate::config::EditorConfig;
-use crate::ui::FaceSelection;
+use kradiant::editor::selection::{FaceSelection, PatchVertexSelection};
+pub use kradiant::editor::viewport::{AxisLock, DragMode, Ortho, StretchMode};
 use crate::ui::console::ConsoleLogger;
 use crate::util::{project_to_2d, text_height, text_width};
 use crate::{log_error, log_info, log_warn, util};
@@ -11,62 +12,6 @@ use kradiant::editing::{self, Aabb};
 use kradiant::map::{BrushContent, BrushId, Face};
 use kradiant::map_utils::format_float;
 use std::collections::HashSet;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Ortho {
-    #[default]
-    XY,
-    XZ,
-    YZ,
-}
-
-impl Ortho {
-    pub fn label(self) -> &'static str {
-        match self {
-            Ortho::XY => "XY (top)",
-            Ortho::XZ => "XZ (front)",
-            Ortho::YZ => "YZ (side)",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::XY => Self::XZ,
-            Self::XZ => Self::YZ,
-            Self::YZ => Self::XY,
-        }
-    }
-}
-
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
-pub enum DragMode {
-    #[default]
-    NewBrush,
-    MoveSelection,
-    MoveVertices,
-    StretchSelection,
-    RotateSelection,
-    RectangularSelection,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StretchMode {
-    Scale,
-    Resize,
-}
-
-impl Default for StretchMode {
-    fn default() -> Self {
-        Self::Scale
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AxisLock {
-    pub x: bool,
-    pub y: bool,
-    pub z: bool,
-}
 
 #[derive(Clone)]
 pub struct StretchDrag {
@@ -222,10 +167,10 @@ impl View2D {
         stretch_mode: StretchMode,
         palette: &crate::theme::EditorPalette,
         console: &mut crate::ui::console::ConsoleLogger,
-        undo: &mut crate::ui::undo::UndoRedo,
+        undo: &mut kradiant::editor::undo::UndoRedo,
         selected_brushes: &mut Vec<(usize, usize)>,
         selected_faces: &mut Vec<FaceSelection>,
-        selected_patch_vertices: &mut Vec<crate::ui::PatchVertexSelection>,
+        selected_patch_vertices: &mut Vec<PatchVertexSelection>,
         selected_entity: &mut Option<usize>,
         edit_faces: bool,
         edit_vertices: bool,
@@ -799,7 +744,7 @@ impl View2D {
                                                                         let p2 = util::project_to_2d(vtx.position, self.ortho_axis);
 
                                                                         if p2[0] >= min_x && p2[0] <= max_x && p2[1] >= min_y && p2[1] <= max_y {
-                                                                            let sel = crate::ui::PatchVertexSelection {
+                                                                            let sel = PatchVertexSelection {
                                                                                 entity_idx,
                                                                                 brush_idx,
                                                                                 row: row_idx,
@@ -1899,7 +1844,7 @@ fn selection_aabb_active(
 
 fn selection_aabb_patch_vertices_from_map(
     map: &kradiant::map::Map,
-    selected: &[crate::ui::PatchVertexSelection],
+    selected: &[PatchVertexSelection],
 ) -> Option<Aabb> {
     if selected.is_empty() {
         return None;
@@ -1937,7 +1882,7 @@ fn selection_aabb_patch_vertices_from_map(
 
 fn translate_selected_patch_vertices(
     map: &mut kradiant::map::Map,
-    selected: &[crate::ui::PatchVertexSelection],
+    selected: &[PatchVertexSelection],
     delta: Vec3,
 ) -> bool {
     if selected.is_empty() || delta == Vec3::ZERO {
@@ -1999,9 +1944,9 @@ fn pick_patch_control_vertex_by_screen(
     zoom: f32,
     pan: [f32; 2],
     radius_px: f32,
-) -> Option<crate::ui::PatchVertexSelection> {
+) -> Option<PatchVertexSelection> {
     let r2 = radius_px.max(1.0) * radius_px.max(1.0);
-    let mut best: Option<(crate::ui::PatchVertexSelection, f32)> = None;
+    let mut best: Option<(PatchVertexSelection, f32)> = None;
 
     let mut visit_patch = |entity_idx: usize, brush_idx: usize, patch: &kradiant::map::Patch| {
         for (row_idx, row) in patch.vertices.iter().enumerate() {
@@ -2015,7 +1960,7 @@ fn pick_patch_control_vertex_by_screen(
                     continue;
                 }
 
-                let sel = crate::ui::PatchVertexSelection {
+                let sel = PatchVertexSelection {
                     entity_idx,
                     brush_idx,
                     row: row_idx,

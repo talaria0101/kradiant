@@ -10,11 +10,13 @@ pub const KRADIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod assets;
 pub mod editing;
+pub mod editor;
 pub mod geometry;
 pub mod loader;
 pub mod map;
 pub mod map_utils;
 pub mod parser;
+pub mod render;
 pub mod shader;
 pub mod texmap;
 pub mod texture;
