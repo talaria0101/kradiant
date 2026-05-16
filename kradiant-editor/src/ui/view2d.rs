@@ -2678,12 +2678,12 @@ pub fn stretch_faces_from_start(
 
     if start.y < min_v {
         out.push(match axis {
-            Ortho::XY => editing::StretchFace::YMin,
+            Ortho::XY => editing::StretchFace::YMax,
             Ortho::XZ | Ortho::YZ => editing::StretchFace::ZMax,
         });
     } else if start.y > max_v {
         out.push(match axis {
-            Ortho::XY => editing::StretchFace::YMax,
+            Ortho::XY => editing::StretchFace::YMin,
             Ortho::XZ | Ortho::YZ => editing::StretchFace::ZMin,
         });
     }

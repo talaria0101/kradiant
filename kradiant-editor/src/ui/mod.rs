@@ -1014,7 +1014,7 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
 
 fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
     let core = &mut state.core;
-    let (map, undo, map_revision) = (&mut core.map, &mut core.undo, &mut core.map_revision);
+    let (map, undo, map_revision, tex_registry) = (&mut core.map, &mut core.undo, &mut core.map_revision, &core.tex_registry);
     let (selected_brushes, selected_faces, selected_patch_vertices, selected_entity, edit_faces) = (
         &core.selected_brushes,
         &core.selected_faces,
@@ -1098,6 +1098,7 @@ fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
         &mut state.tex_tile_size,
         &mut on_select,
         map,
+        tex_registry,
     );
 }
 

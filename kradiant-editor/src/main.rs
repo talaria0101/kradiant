@@ -84,6 +84,7 @@ struct AppState {
     vp3d: Viewport3D,
     needs_redraw: bool,
     last_render_mode: RenderMode,
+    cursor_grabbed: bool,
 }
 
 /// Register a texture image with the renderer.
@@ -666,6 +667,7 @@ impl AppState {
             vp3d,
             needs_redraw: true,
             last_render_mode,
+            cursor_grabbed: false,
         }
     }
 
@@ -731,14 +733,11 @@ impl AppState {
             .cloned()
             .collect();
         for material in requested_materials {
-            self.editor.tex_browser.request_texture_load(&material);
+            self.editor.tex_browser.request_texture_load(&material, &self.editor.core.tex_registry);
         }
 
         const UPLOADS_PER_FRAME: usize = 4; // later would add in configuration
-        let pending = &mut self.editor.tex_browser.pending_uploads;
-        let batch: Vec<_> = pending
-            .drain(..pending.len().min(UPLOADS_PER_FRAME))
-            .collect();
+        let batch = self.editor.tex_browser.drain_pending_uploads(UPLOADS_PER_FRAME);
         for (material, img) in batch {
             let tid = register_texture(&mut self.renderer, &img, "game texture");
             self.editor
@@ -746,26 +745,13 @@ impl AppState {
                 .tex_gpu_cache
                 .insert(material, (tid, [img.width as f32, img.height as f32]));
         }
-        self.editor.tex_browser.process_pending_render_uploads(
+        let inserted_render_textures = self.editor.tex_browser.process_pending_render_uploads(
             &self.gl,
             UPLOADS_PER_FRAME,
             &self.editor.core.config.view.rendermode,
             upload_texture_mipmaps,
+            &mut self.editor.core.tex_registry,
         );
-        let mut inserted_render_textures = false;
-        for (material, rt) in &self.editor.tex_browser.tex_render_cache {
-            if self.editor.core.tex_registry.get(material).is_none() {
-                self.editor.core.tex_registry.register(
-                    material.clone(),
-                    kradiant::render::RenderTextureInfo {
-                        tex: rt.tex,
-                        size: rt.size,
-                        qer: rt.qer.clone(),
-                    },
-                );
-                inserted_render_textures = true;
-            }
-        }
         if inserted_render_textures {
             self.editor.core.view_config_rev = self.editor.core.view_config_rev.wrapping_add(1);
         }
@@ -912,17 +898,18 @@ impl AppState {
         ui::draw_editor(ui, &mut self.editor, delta);
         self.editor.sync_viewports_to_core();
 
-        if let Some(warp) = self.editor.view3d.warp_request.take() {
-            let fb_scale = self.imgui.io().display_framebuffer_scale();
-            let sx = fb_scale[0].max(1.0) as f64;
-            let sy = fb_scale[1].max(1.0) as f64;
-            let _ = self
-                .window
-                .set_cursor_position(winit::dpi::PhysicalPosition::new(
-                    warp[0] as f64 * sx,
-                    warp[1] as f64 * sy,
-                ));
-            self.editor.view3d.warp_pending_reset = true;
+        if self.editor.view3d.wants_cursor_grab {
+            if !self.cursor_grabbed {
+                let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                self.window.set_cursor_visible(false);
+                self.cursor_grabbed = true;
+            }
+        } else {
+            if self.cursor_grabbed {
+                let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                self.window.set_cursor_visible(true);
+                self.cursor_grabbed = false;
+            }
         }
 
         self.platform.prepare_render(&mut self.imgui, &self.window);
@@ -1062,6 +1049,24 @@ impl ApplicationHandler for App {
                 state.window.request_redraw(); // keep drawing while UI is active
             } else {
                 event_loop.set_control_flow(ControlFlow::Wait);
+            }
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let Some(state) = &mut self.state {
+            if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+                if state.cursor_grabbed {
+                    state.editor.view3d.accumulated_mouse_delta[0] += delta.0 as f32;
+                    state.editor.view3d.accumulated_mouse_delta[1] += delta.1 as f32;
+                    state.needs_redraw = true;
+                    state.window.request_redraw();
+                }
             }
         }
     }

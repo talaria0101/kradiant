@@ -5,7 +5,7 @@ use kradiant::loader::asset_loader::{AssetDb, AssetDbOptions};
 use kradiant::map::Map;
 use kradiant::shader::{QerParams, ShaderDb};
 use kradiant::texture::TextureImage;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -13,13 +13,7 @@ use std::path::PathBuf;
 use crate::config::RenderMode;
 use crate::util;
 
-/// GPU texture handle + metadata needed for 3D viewport rendering.
-#[derive(Debug, Clone)]
-pub struct RenderTextureInfo {
-    pub tex: glow::Texture,
-    pub size: [f32; 2],
-    pub qer: QerParams,
-}
+// RenderTextureInfo was removed, now using kradiant::render::RenderTextureInfo
 
 /// Manages asset loading and filesystem navigation for texture browsing.
 #[derive(Debug)]
@@ -40,12 +34,14 @@ pub struct TextureBrowser {
     pub tex_cache: HashMap<String, TextureImage>,
     /// GPU IDs for textures
     pub tex_gpu_cache: HashMap<String, (TextureId, [f32; 2])>,
-    /// GPU textures for 3D rendering (OpenGL texture object + size + shader params).
-    pub tex_render_cache: HashMap<String, RenderTextureInfo>,
     /// Textures waiting for upload to GPU
     pub pending_uploads: Vec<(String, TextureImage)>,
+    /// O(1) lookup for pending_uploads
+    pub pending_uploads_set: HashSet<String>,
     /// Textures waiting for upload to GPU for 3D rendering (mipmapped GL textures).
     pub pending_render_uploads: Vec<(String, TextureImage)>,
+    /// O(1) lookup for pending_render_uploads
+    pub pending_render_uploads_set: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,9 +174,10 @@ impl Default for TextureBrowser {
             selected: None,
             tex_cache: HashMap::new(),
             tex_gpu_cache: HashMap::new(),
-            tex_render_cache: HashMap::new(),
             pending_uploads: Vec::new(),
+            pending_uploads_set: HashSet::new(),
             pending_render_uploads: Vec::new(),
+            pending_render_uploads_set: HashSet::new(),
         }
     }
 }
@@ -214,7 +211,8 @@ impl TextureBrowser {
         self.tex_cache.clear();
         self.tex_gpu_cache.clear();
         self.pending_uploads.clear();
-        // Note: tex_render_cache is NOT cleared here because textures used by the map
+        self.pending_uploads_set.clear();
+        // Note: tex_registry is NOT cleared here because textures used by the map
         // for 3D rendering should persist when navigating directories.
 
         let Some(db) = &self.asset_db else {
@@ -350,20 +348,21 @@ impl TextureBrowser {
     pub fn clear_texture_caches(&mut self) {
         self.tex_cache.clear();
         self.tex_gpu_cache.clear();
-        self.tex_render_cache.clear();
         self.pending_uploads.clear();
+        self.pending_uploads_set.clear();
         self.pending_render_uploads.clear();
+        self.pending_render_uploads_set.clear();
     }
 
     pub fn clear_render_texture_caches(&mut self) {
-        self.tex_render_cache.clear();
         self.pending_render_uploads.clear();
+        self.pending_render_uploads_set.clear();
     }
 
     /// Enqueue a texture for GPU upload if not already cached or pending.
     /// Note: browser textures (tex_gpu_cache) are loaded independently of 3D render textures
-    /// (tex_render_cache) so that navigating directories doesn't affect 3D viewport rendering.
-    pub fn request_texture_load(&mut self, material: &str) {
+    /// (tex_registry) so that navigating directories doesn't affect 3D viewport rendering.
+    pub fn request_texture_load(&mut self, material: &str, tex_registry: &kradiant::render::TextureRegistry) {
         // Check if this material has a shader with qer_editorimage
         let texture_to_load = self
             .shader_db
@@ -379,18 +378,16 @@ impl TextureBrowser {
         // Only check browser-specific caches - 3D render cache is independent
         if self.tex_gpu_cache.contains_key(cache_key)
             || self.tex_cache.contains_key(cache_key)
-            || self.pending_uploads.iter().any(|(k, _)| k == cache_key)
+            || self.pending_uploads_set.contains(cache_key)
         {
             // If in browser cache but not render cache, add to render pending
-            if !self.tex_render_cache.contains_key(cache_key)
-                && !self
-                    .pending_render_uploads
-                    .iter()
-                    .any(|(k, _)| k == cache_key)
+            if tex_registry.get(cache_key).is_none()
+                && !self.pending_render_uploads_set.contains(cache_key)
             {
                 if let Some(img) = self.tex_cache.get(cache_key) {
                     self.pending_render_uploads
                         .push((cache_key.to_string(), img.clone()));
+                    self.pending_render_uploads_set.insert(cache_key.to_string());
                 }
             }
             return;
@@ -400,25 +397,20 @@ impl TextureBrowser {
                 self.tex_cache.insert(cache_key.to_string(), img.clone());
                 self.pending_uploads
                     .push((cache_key.to_string(), img.clone()));
+                self.pending_uploads_set.insert(cache_key.to_string());
                 // Also enqueue for 3D render cache in case it's needed there too
-                if !self.tex_render_cache.contains_key(cache_key)
-                    && !self
-                        .pending_render_uploads
-                        .iter()
-                        .any(|(k, _)| k == cache_key)
+                if tex_registry.get(cache_key).is_none()
+                    && !self.pending_render_uploads_set.contains(cache_key)
                 {
                     self.pending_render_uploads
                         .push((cache_key.to_string(), img));
+                    self.pending_render_uploads_set.insert(cache_key.to_string());
                 }
             }
             Err(e) => eprintln!("tex load failed {load_path} (for material {material}): {e}"),
         }
     }
 
-    /// Upload pending render textures to OpenGL with mipmaps.
-    ///
-    /// This is separate from ImGui texture registration; it builds real GL texture objects
-    /// suitable for sampling in the 3D viewport.
     pub fn process_pending_render_uploads(
         &mut self,
         gl: &glow::Context,
@@ -430,13 +422,17 @@ impl TextureBrowser {
             &[u8],
             &RenderMode,
         ) -> glow::Texture,
-    ) {
+        tex_registry: &mut kradiant::render::TextureRegistry,
+    ) -> bool {
         let batch: Vec<_> = self
             .pending_render_uploads
             .drain(..self.pending_render_uploads.len().min(uploads_per_frame))
             .collect();
+            
+        let mut inserted_any = false;
 
         for (material, img) in batch {
+            self.pending_render_uploads_set.remove(&material);
             let tex = unsafe {
                 upload_texture_mipmaps(gl, [img.width, img.height], &img.rgba8, rendermode)
             };
@@ -447,15 +443,26 @@ impl TextureBrowser {
                 .map(|sh| sh.qer.clone())
                 .unwrap_or_default();
             //println!("{material} qer: {:#?}", &qer);
-            self.tex_render_cache.insert(
+            tex_registry.register(
                 material,
-                RenderTextureInfo {
+                kradiant::render::RenderTextureInfo {
                     tex,
                     size: [img.width as f32, img.height as f32],
                     qer,
                 },
             );
+            inserted_any = true;
         }
+        
+        inserted_any
+    }
+    
+    pub fn drain_pending_uploads(&mut self, max: usize) -> Vec<(String, TextureImage)> {
+        let batch: Vec<_> = self.pending_uploads.drain(..self.pending_uploads.len().min(max)).collect();
+        for (k, _) in &batch {
+            self.pending_uploads_set.remove(k);
+        }
+        batch
     }
 }
 
@@ -467,6 +474,7 @@ pub fn draw_texture_browser(
     tex_tile_size: &mut f32,
     on_select: &mut dyn FnMut(String, &mut Option<Map>),
     map: &mut Option<Map>,
+    tex_registry: &kradiant::render::TextureRegistry,
 ) {
     ui.window("Textures")
         .size([1280.0, 400.0], Condition::FirstUseEver)
@@ -544,7 +552,7 @@ pub fn draw_texture_browser(
             ui.child_window("##tex_tiles")
                 .size([tiles_w, panel_h])
                 .build(ui, || {
-                    draw_texture_tiles(ui, browser, tex_filter, *tex_tile_size, map, on_select);
+                    draw_texture_tiles(ui, browser, tex_filter, *tex_tile_size, map, on_select, tex_registry);
                 });
         });
 }
@@ -618,6 +626,7 @@ fn draw_texture_tiles(
     tile_size: f32,
     map: &mut Option<Map>,
     on_select: &mut dyn FnMut(String, &mut Option<Map>),
+    tex_registry: &kradiant::render::TextureRegistry,
 ) {
     let textures = browser.get_textures();
 
@@ -685,7 +694,7 @@ fn draw_texture_tiles(
                 )
             };
             if in_view {
-                browser.request_texture_load(&entry.path);
+                browser.request_texture_load(&entry.path, tex_registry);
             }
         }
         let selected = browser.selected.as_deref() == Some(&entry.path);

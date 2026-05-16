@@ -521,8 +521,8 @@ pub fn stretch_handle_point_2d(
             (Ortho::YZ, editing::StretchFace::YMin) => u_side = Some(false),
             (Ortho::YZ, editing::StretchFace::YMax) => u_side = Some(true),
 
-            (Ortho::XY, editing::StretchFace::YMin) => v_side = Some(false),
-            (Ortho::XY, editing::StretchFace::YMax) => v_side = Some(true),
+            (Ortho::XY, editing::StretchFace::YMax) => v_side = Some(false),
+            (Ortho::XY, editing::StretchFace::YMin) => v_side = Some(true),
 
             // In XZ/YZ, projected V is -Z: ZMax maps to min2.y, ZMin maps to max2.y.
             (Ortho::XZ | Ortho::YZ, editing::StretchFace::ZMax) => v_side = Some(false),

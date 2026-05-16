@@ -11,8 +11,8 @@ use crate::util::imgui_color_to_u32;
 pub struct View3D {
     pub core: View3DState,
     pub tex_id: Option<TextureId>,
-    pub warp_request: Option<[f32; 2]>,
-    pub(crate) warp_pending_reset: bool,
+    pub wants_cursor_grab: bool,
+    pub accumulated_mouse_delta: [f32; 2],
 }
 
 impl Default for View3D {
@@ -20,8 +20,8 @@ impl Default for View3D {
         Self {
             core: View3DState::default(),
             tex_id: None,
-            warp_request: None,
-            warp_pending_reset: false,
+            wants_cursor_grab: false,
+            accumulated_mouse_delta: [0.0, 0.0],
         }
     }
 }
@@ -87,9 +87,9 @@ impl View3D {
                 let canvas_interacting = ui.is_item_hovered() || ui.is_item_active();
 
                 if canvas_interacting {
-                    if self.warp_pending_reset && ui.is_mouse_down(MouseButton::Right) {
-                        ui.reset_mouse_drag_delta(MouseButton::Right);
-                        self.warp_pending_reset = false;
+                    if !ui.is_mouse_down(MouseButton::Right) {
+                        self.wants_cursor_grab = false;
+                        self.accumulated_mouse_delta = [0.0, 0.0];
                     }
 
                     let wheel = ui.io().mouse_wheel();
@@ -101,8 +101,13 @@ impl View3D {
                     const TURN_SENS: f32 = 0.010;
                     const PITCH_SENS: f32 = 0.010;
                     const MOVE_SENS: f32 = 0.030;
-                    if ui.is_mouse_dragging(MouseButton::Right) {
-                        let [dx, dy] = ui.mouse_drag_delta(MouseButton::Right);
+                    if ui.is_mouse_down(MouseButton::Right) {
+                        self.wants_cursor_grab = true;
+                        
+                        let dx = self.accumulated_mouse_delta[0];
+                        let dy = self.accumulated_mouse_delta[1];
+                        self.accumulated_mouse_delta = [0.0, 0.0];
+                        
                         self.cam.angles.x -= dx * TURN_SENS;
 
                         let ctrl = ui.is_key_down(dear_imgui_rs::Key::LeftCtrl)
@@ -129,32 +134,6 @@ impl View3D {
                             }
                             self.cam.pos += move_dir * move_amt;
                         }
-
-                        // Blender-like wrapping: when the cursor reaches an edge while dragging,
-                        // request a warp to the opposite edge so deltas keep flowing.
-                        let mouse = ui.io().mouse_pos();
-                        let r = self.rect;
-                        let margin = 2.0;
-                        let left = r[0];
-                        let top = r[1];
-                        let right_edge = r[0] + r[2];
-                        let bottom_edge = r[1] + r[3];
-
-                        let mut warp: Option<[f32; 2]> = None;
-                        if mouse[0] <= left + margin {
-                            warp = Some([right_edge - margin - 1.0, mouse[1]]);
-                        } else if mouse[0] >= right_edge - margin {
-                            warp = Some([left + margin + 1.0, mouse[1]]);
-                        } else if mouse[1] <= top + margin {
-                            warp = Some([mouse[0], bottom_edge - margin - 1.0]);
-                        } else if mouse[1] >= bottom_edge - margin {
-                            warp = Some([mouse[0], top + margin + 1.0]);
-                        }
-                        if warp.is_some() {
-                            self.warp_request = warp;
-                        }
-
-                        ui.reset_mouse_drag_delta(MouseButton::Right);
                     }
 
                     if ui.is_key_pressed(dear_imgui_rs::Key::D) {
