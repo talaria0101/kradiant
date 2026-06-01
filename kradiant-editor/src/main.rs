@@ -19,6 +19,8 @@ use glutin::display::GetGlDisplay;
 use glutin::prelude::*;
 use glutin::surface::{SurfaceAttributesBuilder, WindowSurface};
 use glutin_winit::DisplayBuilder;
+use kradiant::assets::AssetDbOptions;
+use kradiant::loader::asset_loader;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -224,12 +226,7 @@ fn compile_wire_shader(
         let vert = gl.create_shader(glow::VERTEX_SHADER).unwrap();
         gl.shader_source(
             vert,
-            r#"
-        #version 120
-        attribute vec3 a_pos;
-        uniform mat4 u_mvp;
-        void main() { gl_Position = u_mvp * vec4(a_pos, 1.0); }
-        "#,
+            include_str!("glsl/wire_vert.glsl"),
         );
         gl.compile_shader(vert);
 
@@ -243,11 +240,7 @@ fn compile_wire_shader(
         let frag = gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
         gl.shader_source(
             frag,
-            r#"
-        #version 120
-        uniform vec4 u_color;
-        void main() { gl_FragColor = u_color; }
-        "#,
+            include_str!("glsl/wire_frag.glsl"),
         );
         gl.compile_shader(frag);
 
@@ -571,8 +564,15 @@ impl AppState {
 
         // Initialize texture browser with game main directory
         if !editor.core.config.paths.main.as_os_str().is_empty() {
-            editor.tex_browser.init(&editor.core.config.paths.main);
-            editor.console.info("Asset database loaded".to_string());
+            let log = editor.tex_browser.init(&editor.core.config.paths.main);
+            for entry in log {
+                if entry.starts_with("Fail") {
+                    editor.console.error(entry);
+                }
+                else {
+                    editor.console.info(entry);
+                }
+            }
         }
 
         // Apply configured theme on startup
@@ -633,6 +633,8 @@ impl AppState {
         let vp2d = Viewport2D::new(view2d_fbo, view2d_fbo_size, view2d_rbo, view2d_tex);
 
         let vp3d = Viewport3D::new(
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -733,11 +735,17 @@ impl AppState {
             .cloned()
             .collect();
         for material in requested_materials {
-            self.editor.tex_browser.request_texture_load(&material, &self.editor.core.tex_registry);
+            self.editor
+                .tex_browser
+                .request_texture_load(&material, &self.editor.core.tex_registry);
         }
 
-        const UPLOADS_PER_FRAME: usize = 4; // later would add in configuration
-        let batch = self.editor.tex_browser.drain_pending_uploads(UPLOADS_PER_FRAME);
+        let uploads_per_frame = self.editor.core.config.perf.tex_load_num;
+
+        let batch = self
+            .editor
+            .tex_browser
+            .drain_pending_uploads(uploads_per_frame);
         for (material, img) in batch {
             let tid = register_texture(&mut self.renderer, &img, "game texture");
             self.editor
@@ -747,7 +755,7 @@ impl AppState {
         }
         let inserted_render_textures = self.editor.tex_browser.process_pending_render_uploads(
             &self.gl,
-            UPLOADS_PER_FRAME,
+            uploads_per_frame,
             &self.editor.core.config.view.rendermode,
             upload_texture_mipmaps,
             &mut self.editor.core.tex_registry,
@@ -760,37 +768,14 @@ impl AppState {
             let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
             self.gl.shader_source(
                 vert,
-                r#"
-            #version 120
-            attribute vec3 a_pos;
-            attribute vec3 a_normal;
-            uniform mat4 u_mvp;
-            varying vec3 v_normal;
-            void main() {
-            gl_Position = u_mvp * vec4(a_pos, 1.0);
-            v_normal = a_normal;
-        }
-        "#,
+                include_str!("glsl/lit_vert.glsl"),
             );
             self.gl.compile_shader(vert);
 
             let frag = self.gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
             self.gl.shader_source(
                 frag,
-                r#"
-            #version 120
-            uniform vec4 u_color;
-            uniform vec3 u_light_dir;   // normalized, world space
-            uniform float u_ambient;
-            varying vec3 v_normal;
-            void main() {
-            vec3 n = normalize(v_normal);
-            // Sample both sides so back-faces aren't black
-            float d = max(dot(n, u_light_dir), max(dot(-n, u_light_dir), 0.0));
-            float light = u_ambient + (1.0 - u_ambient) * d;
-            gl_FragColor = vec4(u_color.rgb * light, u_color.a);
-        }
-        "#,
+                include_str!("glsl/lit_frag.glsl"),
             );
             self.gl.compile_shader(frag);
 
@@ -824,43 +809,14 @@ impl AppState {
             let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
             self.gl.shader_source(
                 vert,
-                r#"
-                #version 120
-                attribute vec3 a_pos;
-                attribute vec3 a_normal;
-                attribute vec2 a_uv;        // New: texture coordinates
-                uniform mat4 u_mvp;
-                varying vec3 v_normal;
-                varying vec2 v_uv;          // Pass to fragment shader
-                void main() {
-                    gl_Position = u_mvp * vec4(a_pos, 1.0);
-                    v_normal = a_normal;
-                    v_uv = a_uv;
-                }
-                "#,
+                include_str!("glsl/tex_vert.glsl")
             );
             self.gl.compile_shader(vert);
 
             let frag = self.gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
             self.gl.shader_source(
                 frag,
-                r#"
-                #version 120
-                uniform sampler2D u_tex;  // Texture sampler
-                uniform vec4 u_color;
-                uniform vec3 u_light_dir;
-                uniform float u_ambient;
-                varying vec3 v_normal;
-                varying vec2 v_uv;
-                void main() {
-                    vec3 n = normalize(v_normal);
-                    float d = max(dot(n, u_light_dir), max(dot(-n, u_light_dir), 0.0));
-                    float light = u_ambient + (1.0 - u_ambient) * d;
-
-                    vec4 tex_color = texture2D(u_tex, v_uv);  // Sample texture
-                    gl_FragColor = vec4(tex_color.rgb * u_color.rgb * light, tex_color.a * u_color.a);
-                }
-                "#
+                include_str!("glsl/tex_frag.glsl")
             );
             self.gl.compile_shader(frag);
 
@@ -900,13 +856,17 @@ impl AppState {
 
         if self.editor.view3d.wants_cursor_grab {
             if !self.cursor_grabbed {
-                let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                let _ = self
+                    .window
+                    .set_cursor_grab(winit::window::CursorGrabMode::Locked);
                 self.window.set_cursor_visible(false);
                 self.cursor_grabbed = true;
             }
         } else {
             if self.cursor_grabbed {
-                let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                let _ = self
+                    .window
+                    .set_cursor_grab(winit::window::CursorGrabMode::None);
                 self.window.set_cursor_visible(true);
                 self.cursor_grabbed = false;
             }

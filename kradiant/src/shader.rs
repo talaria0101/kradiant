@@ -23,6 +23,8 @@ pub struct QerParams {
 pub struct ShaderDef {
     pub name: String,
     pub qer: QerParams,
+    /// First editor-relevant diffuse image referenced by the shader, if any.
+    pub diffuse_map: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -167,6 +169,7 @@ fn parse_shader_file_into_db(src: &str, path: &Path, db: &mut ShaderDb) -> Resul
         i += 1;
 
         let mut qer = QerParams::default();
+        let mut diffuse_map: Option<String> = None;
         let mut depth: i32 = 1;
 
         while i < tokens.len() && depth > 0 {
@@ -183,6 +186,31 @@ fn parse_shader_file_into_db(src: &str, path: &Path, db: &mut ShaderDb) -> Resul
                     continue;
                 }
                 _ => {}
+            }
+
+            if diffuse_map.is_none() && depth > 0 {
+                match t.text.to_ascii_lowercase().as_str() {
+                    "map" | "clampmap" => {
+                        if let Some(nxt) = tokens.get(i) {
+                            if let Some(mapped) = normalize_diffuse_map_token(&nxt.text) {
+                                diffuse_map = Some(mapped);
+                            }
+                            i += 1;
+                        }
+                    }
+                    "animmap" => {
+                        if tokens.get(i).is_some() {
+                            i += 1;
+                        }
+                        if let Some(nxt) = tokens.get(i) {
+                            if let Some(mapped) = normalize_diffuse_map_token(&nxt.text) {
+                                diffuse_map = Some(mapped);
+                            }
+                            i += 1;
+                        }
+                    }
+                    _ => {}
+                }
             }
 
             if depth != 1 {
@@ -218,6 +246,7 @@ fn parse_shader_file_into_db(src: &str, path: &Path, db: &mut ShaderDb) -> Resul
         db.insert(ShaderDef {
             name: shader_name,
             qer,
+            diffuse_map,
         });
     }
 
@@ -272,6 +301,14 @@ fn apply_qer(
 
 fn normalize_name(s: &str) -> String {
     s.replace('\\', "/").to_ascii_lowercase()
+}
+
+fn normalize_diffuse_map_token(token: &str) -> Option<String> {
+    let normalized = normalize_name(token);
+    match normalized.as_str() {
+        "$lightmap" | "$whiteimage" | "$nodraw" => None,
+        _ => Some(normalized),
+    }
 }
 
 fn tokenize(src: &str) -> Vec<Tok> {
@@ -400,6 +437,7 @@ textures/common/caulk
         );
         assert_eq!(sh.qer.trans, Some(0.35));
         assert!(sh.qer.no_draw);
+        assert_eq!(sh.diffuse_map.as_deref(), Some("textures/common/caulk.tga"));
     }
 
     #[test]
@@ -416,5 +454,27 @@ textures/common/caulk
         assert_eq!(sh.qer.trans, Some(0.5));
         // exact key still works
         assert!(db.get("textures/common/trigger").is_some());
+    }
+
+    #[test]
+    fn parses_stage_diffuse_map() {
+        let src = r#"
+skins/test/example
+{
+    {
+        map $lightmap
+    }
+    {
+        clampMap "Textures/Characters/Test_D"
+    }
+}
+"#;
+        let mut db = ShaderDb::default();
+        parse_shader_file_into_db(src, Path::new("test.shader"), &mut db).unwrap();
+        let sh = db.get("skins/test/example").unwrap();
+        assert_eq!(
+            sh.diffuse_map.as_deref(),
+            Some("textures/characters/test_d")
+        );
     }
 }

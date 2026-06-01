@@ -1,18 +1,29 @@
 //! 3D View
 
 use dear_imgui_rs::{Condition, TextureId, Ui, WindowFlags};
-use glam::Vec3;
+use glam::{Mat4, Vec3};
+use kradiant::editor::viewport::DragMode;
 use kradiant::editor::viewport::state::View3DState;
-use kradiant::editor::{EditorConfig, EditorPalette};
+use kradiant::editor::{EditorConfig, EditorPalette, FaceSelection, PatchVertexSelection};
 use std::ops::{Deref, DerefMut};
 
+use crate::ui::editing::PickMask;
+use crate::ui::view2d;
 use crate::util::imgui_color_to_u32;
+use kradiant::editing;
+use std::collections::HashSet;
 
 pub struct View3D {
     pub core: View3DState,
     pub tex_id: Option<TextureId>,
     pub wants_cursor_grab: bool,
     pub accumulated_mouse_delta: [f32; 2],
+    /// Brushes touched during current selection drag (to avoid toggling multiple times)
+    pub selection_drag_touched: Option<HashSet<(usize, usize)>>,
+    /// Faces touched during current selection drag
+    pub selection_drag_touched_faces: Option<HashSet<FaceSelection>>,
+    /// Patch vertices touched during current selection drag
+    pub selection_drag_touched_verts: Option<HashSet<usize>>,
 }
 
 impl Default for View3D {
@@ -22,6 +33,9 @@ impl Default for View3D {
             tex_id: None,
             wants_cursor_grab: false,
             accumulated_mouse_delta: [0.0, 0.0],
+            selection_drag_touched: None,
+            selection_drag_touched_faces: None,
+            selection_drag_touched_verts: None,
         }
     }
 }
@@ -52,7 +66,18 @@ impl View3D {
         .normalize()
     }
 
-    pub fn draw_impl(&mut self, ui: &Ui, config: &mut EditorConfig, palette: &EditorPalette) {
+    pub fn draw_impl(
+        &mut self,
+        ui: &Ui,
+        config: &mut EditorConfig,
+        palette: &EditorPalette,
+        selected_brushes: &mut Vec<(usize, usize)>,
+        selected_faces: &mut Vec<FaceSelection>,
+        selected_patch_vertices: &mut Vec<PatchVertexSelection>,
+        edit_faces: bool,
+        edit_vertices: bool,
+        map: &mut Option<kradiant::map::Map>,
+    ) {
         use dear_imgui_rs::MouseButton;
 
         ui.window("3D View")
@@ -103,11 +128,11 @@ impl View3D {
                     const MOVE_SENS: f32 = 0.030;
                     if ui.is_mouse_down(MouseButton::Right) {
                         self.wants_cursor_grab = true;
-                        
+
                         let dx = self.accumulated_mouse_delta[0];
                         let dy = self.accumulated_mouse_delta[1];
                         self.accumulated_mouse_delta = [0.0, 0.0];
-                        
+
                         self.cam.angles.x -= dx * TURN_SENS;
 
                         let ctrl = ui.is_key_down(dear_imgui_rs::Key::LeftCtrl)
@@ -142,6 +167,174 @@ impl View3D {
                     if ui.is_key_pressed(dear_imgui_rs::Key::C) {
                         self.cam.pos.z -= self.cam.zoom / 2.0;
                     }
+
+                    let mut mask = PickMask::NONE;
+                    if config.view.show.convex {
+                        mask.add(PickMask::CONVEX);
+                    }
+                    if config.view.show.patches {
+                        mask.add(PickMask::PATCH);
+                    }
+                    if config.view.show.clip_brushes {
+                        mask.add(PickMask::CLIP);
+                    }
+
+                    let shift_selecting = canvas_interacting
+                        && (ui.is_mouse_clicked(MouseButton::Left)
+                            || ui.is_mouse_dragging(MouseButton::Left))
+                        && ui.is_key_down(dear_imgui_rs::Key::LeftShift);
+
+                    if shift_selecting && ui.is_mouse_clicked(MouseButton::Left) {
+                        // Start new selection drag - clear touched sets
+                        self.selection_drag_touched = Some(HashSet::new());
+                        self.selection_drag_touched_faces = Some(HashSet::new());
+                        self.selection_drag_touched_verts = Some(HashSet::new());
+                    }
+                    if shift_selecting {
+                        let ray_far = 1.0e6;
+
+                        let mouse = ui.io().mouse_pos();
+                        let [rx, ry, rw, rh] = self.rect;
+                        let nx = (mouse[0] - rx) / rw * 2.0 - 1.0;
+                        let ny = 1.0 - (mouse[1] - ry) / rh * 2.0;
+
+                        let aspect = rw / rh;
+                        let proj = Mat4::perspective_rh(
+                            config.view.fov.to_radians(),
+                            aspect,
+                            1.0,
+                            ray_far,
+                        );
+
+                        let forward = Self::forward_from_angles(self.cam.angles);
+                        let up = Vec3::Z;
+                        let view = Mat4::look_at_rh(self.cam.pos, self.cam.pos + forward, up);
+
+                        let inv_vp = (proj * view).inverse();
+
+                        let target_world = inv_vp.project_point3(Vec3::new(nx, ny, 1.0));
+
+                        let ray_origin = self.cam.pos;
+                        let ray_dir = (target_world - ray_origin).normalize();
+
+                        if edit_faces {
+                            let selected_face = map.as_mut().and_then(|m| {
+                                editing::pick_convex_face_by_ray(m, ray_origin, ray_dir, mask)
+                            });
+
+                            if let Some((entity_idx, brush_idx, face_idx)) = selected_face {
+                                let sel = FaceSelection {
+                                    entity_idx,
+                                    brush_idx,
+                                    face_idx,
+                                };
+                                let touched = self
+                                    .selection_drag_touched_faces
+                                    .get_or_insert_with(HashSet::new);
+                                if touched.insert(sel) {
+                                    if !selected_faces.contains(&sel) {
+                                        selected_faces.push(sel);
+                                    } else if let Some(i) =
+                                        selected_faces.iter().position(|f| *f == sel)
+                                    {
+                                        selected_faces.remove(i);
+                                    }
+                                    view2d::sync_selected_brushes_from_faces(
+                                        selected_faces,
+                                        selected_brushes,
+                                    );
+                                }
+                            }
+                        } else if edit_vertices {
+                            let vp = proj * view;
+                            let prefer =
+                                (!selected_brushes.is_empty()).then_some(&selected_brushes[..]);
+                            let selected_vert = map.as_mut().and_then(|m| {
+                                pick_patch_control_vertex_by_screen_3d(
+                                    m, prefer, vp, mouse, self.rect, 10.0,
+                                )
+                            });
+
+                            if let Some(vsel) = selected_vert {
+                                let touched = self
+                                    .selection_drag_touched_verts
+                                    .get_or_insert_with(HashSet::new);
+                                if touched.insert(
+                                    vsel.entity_idx
+                                        ^ (vsel.brush_idx << 8)
+                                        ^ (vsel.row << 16)
+                                        ^ (vsel.col << 24),
+                                ) {
+                                    let z_held = ui.is_key_down(dear_imgui_rs::Key::Z);
+                                    if z_held {
+                                        if let Some(i) =
+                                            selected_patch_vertices.iter().position(|s| *s == vsel)
+                                        {
+                                            selected_patch_vertices.remove(i);
+                                        } else {
+                                            selected_patch_vertices.push(vsel);
+                                        }
+                                    } else if !selected_patch_vertices.contains(&vsel) {
+                                        selected_patch_vertices.push(vsel);
+                                    }
+                                }
+                            }
+                        } else {
+                            let selected_brush = map.as_mut().and_then(|m| {
+                                editing::pick_brush_by_ray(
+                                    m,
+                                    ray_origin,
+                                    ray_dir,
+                                    mask,
+                                )
+                            });
+                            if let Some(sel) = selected_brush {
+                                // Only toggle if not already touched this drag
+                                let touched =
+                                    self.selection_drag_touched.get_or_insert_with(HashSet::new);
+                                if touched.insert(sel) {
+                                    if !selected_brushes.contains(&sel) {
+                                        selected_brushes.push(sel);
+                                    } else if let Some(i) =
+                                        selected_brushes.iter().position(|b| b == &sel)
+                                    {
+                                        selected_brushes.remove(i);
+                                    }
+                                }
+                                selected_faces.clear();
+                            }
+                        }
+                    }
+
+                    if ui.is_mouse_clicked(MouseButton::Left)
+                        && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
+                    {
+                        if ui.is_key_down(dear_imgui_rs::Key::LeftAlt) {
+                            self.drag_mode = DragMode::RectangularSelection;
+                        }
+                    }
+                }
+
+                if ui.is_window_hovered() {
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
+                        if edit_faces {
+                            selected_faces.clear();
+                            view2d::sync_selected_brushes_from_faces(
+                                selected_faces,
+                                selected_brushes,
+                            );
+                        } else {
+                            selected_brushes.clear();
+                        }
+                        if edit_vertices {
+                            selected_patch_vertices.clear();
+                        }
+                        // self.stretch = None;
+                        // self.stretch_delta = Vec3::ZERO;
+                        // self.rotate = None;
+                        // self.rotate_angle = 0.0;
+                        // self.move_offset = Vec3::ZERO;
+                    }
                 }
 
                 draw.with_clip_rect(p, [p[0] + w, p[1] + h], || {
@@ -174,4 +367,85 @@ impl View3D {
                 );
             });
     }
+}
+
+fn pick_patch_control_vertex_by_screen_3d(
+    map: &kradiant::map::Map,
+    prefer: Option<&[(usize, usize)]>,
+    vp: glam::Mat4,
+    mouse_screen: [f32; 2],
+    rect: [f32; 4], // [rx, ry, rw, rh]
+    radius_px: f32,
+) -> Option<PatchVertexSelection> {
+    let r2 = radius_px.max(1.0) * radius_px.max(1.0);
+    let mut best: Option<(PatchVertexSelection, f32, f32)> = None; // sel, dist2, depth
+
+    let mut visit_patch = |entity_idx: usize, brush_idx: usize, patch: &kradiant::map::Patch| {
+        for (row_idx, row) in patch.vertices.iter().enumerate() {
+            for (col_idx, v) in row.iter().enumerate() {
+                let clip = vp * glam::Vec4::new(v.position.x, v.position.y, v.position.z, 1.0);
+                if clip.w < 0.1 {
+                    continue; // Behind or too close to camera
+                }
+
+                let ndc = glam::Vec3::new(clip.x, clip.y, clip.z) / clip.w;
+                let [rx, ry, rw, rh] = rect;
+                let sx = rx + (ndc.x * 0.5 + 0.5) * rw;
+                let sy = ry + (1.0 - (ndc.y * 0.5 + 0.5)) * rh;
+
+                let dx = sx - mouse_screen[0];
+                let dy = sy - mouse_screen[1];
+                let d2 = dx * dx + dy * dy;
+
+                if d2 > r2 {
+                    continue;
+                }
+
+                let sel = PatchVertexSelection {
+                    entity_idx,
+                    brush_idx,
+                    row: row_idx,
+                    col: col_idx,
+                };
+
+                let depth = ndc.z; // -1 to 1 depth
+
+                match best {
+                    None => best = Some((sel, d2, depth)),
+                    Some((_, _, best_depth)) => {
+                        // Prefer closer depth.
+                        if depth < best_depth {
+                            best = Some((sel, d2, depth));
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    if let Some(prefer) = prefer {
+        for &(entity_idx, brush_idx) in prefer {
+            let Some(entity) = map.entities.get(entity_idx) else {
+                continue;
+            };
+            let Some(brush) = entity.brushes.get(brush_idx) else {
+                continue;
+            };
+            let kradiant::map::BrushContent::Patch(patch) = &brush.content else {
+                continue;
+            };
+            visit_patch(entity_idx, brush_idx, patch);
+        }
+    } else {
+        for (entity_idx, entity) in map.entities.iter().enumerate() {
+            for (brush_idx, brush) in entity.brushes.iter().enumerate() {
+                let kradiant::map::BrushContent::Patch(patch) = &brush.content else {
+                    continue;
+                };
+                visit_patch(entity_idx, brush_idx, patch);
+            }
+        }
+    }
+
+    best.map(|(sel, _, _)| sel)
 }

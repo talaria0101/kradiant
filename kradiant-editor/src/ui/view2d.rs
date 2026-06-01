@@ -8,6 +8,7 @@ use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
 use glam::{Quat, Vec2, Vec3};
 use kradiant::editing;
 use kradiant::editing::Aabb;
+use editing::PickMask;
 use kradiant::editor::selection::{FaceSelection, PatchVertexSelection};
 use kradiant::editor::viewport::state::{RotateDrag, StretchDrag, View2DState};
 pub use kradiant::editor::viewport::{AxisLock, DragMode, Ortho, StretchMode};
@@ -295,6 +296,17 @@ impl View2D {
                     (world, world.into())
                 };
 
+                let mut mask = PickMask::NONE;
+                if config.view.show.convex {
+                    mask.add(PickMask::CONVEX);
+                }
+                if config.view.show.patches {
+                    mask.add(PickMask::PATCH);
+                }
+                if config.view.show.clip_brushes {
+                    mask.add(PickMask::CLIP);
+                }
+
                 // Shift+LMouse for selection
                 let shift_selecting = canvas_interacting
                     && (ui.is_mouse_clicked(MouseButton::Left)
@@ -328,7 +340,7 @@ impl View2D {
                     if edit_faces {
                         let selected_face = map
                             .as_mut()
-                            .and_then(|m| editing::pick_convex_face_by_ray(m, ray_origin, ray_dir));
+                            .and_then(|m| editing::pick_convex_face_by_ray(m, ray_origin, ray_dir, mask));
                         if let Some((entity_idx, brush_idx, face_idx)) = selected_face {
                             let sel = FaceSelection {
                                 entity_idx,
@@ -371,7 +383,9 @@ impl View2D {
                             self.pan,
                             10.0,
                         ) {
-                            //log_info!(console, "{}", z_held);
+                            // Since 'Shift' is used to initiate the selection drag, and 'Ctrl' is
+                            // often used to bypass grid snapping, 'Z' is used here as a modifier 
+                            // to toggle/subtract vertices from the selection.
                             let z_held = ui.is_key_down(dear_imgui_rs::Key::Z);
                             if z_held {
                                 if let Some(i) = selected_patch_vertices.iter().position(|s| *s == vsel) {
@@ -398,7 +412,7 @@ impl View2D {
                         }
                     } else {
                         let selected_brush = map.as_mut().and_then(|m| {
-                            editing::pick_brush_by_ray(m, ray_origin, ray_dir, editing::PickMask::ALL)
+                            editing::pick_brush_by_ray(m, ray_origin, ray_dir, mask)
                         });
                         if let Some(sel) = selected_brush {
                             // Only toggle if not already touched this drag
@@ -1309,7 +1323,7 @@ impl View2D {
                     self.move_offset = Vec3::ZERO;
                 }
 
-                if ui.is_key_pressed(dear_imgui_rs::Key::Backspace) {
+                if canvas_interacting && ui.is_key_pressed(dear_imgui_rs::Key::Backspace) {
                     if edit_faces {
                         selected_faces.clear();
                         sync_selected_brushes_from_faces(selected_faces, selected_brushes);
@@ -1736,7 +1750,7 @@ impl View2D {
     }
 }
 
-fn sync_selected_brushes_from_faces(
+pub fn sync_selected_brushes_from_faces(
     selected_faces: &[FaceSelection],
     selected_brushes: &mut Vec<(usize, usize)>,
 ) {

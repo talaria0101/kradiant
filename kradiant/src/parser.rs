@@ -152,6 +152,7 @@ impl<'a> Parser<'a> {
             classname: String::new(),
             properties: HashMap::new(),
             brushes: vec![],
+            model: None,
         };
         let mut brush_id = 0u32;
 

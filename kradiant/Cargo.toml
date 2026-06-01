@@ -11,7 +11,7 @@ thiserror = "2.0"
 log = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["dds", "jpeg", "tga"] }
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
-glow = "0.16"
+glow = "0.17"
 glam = { version = "0.32.1", features = ["bytemuck"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
 toml = "1.0.7"

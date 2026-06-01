@@ -1,4 +1,6 @@
+use crate::assets::AssetDb;
 use crate::editor::config::EditorConfig;
+use crate::editor::config::EntityDrawingConfig;
 use crate::editor::selection::{FaceSelection, PatchVertexSelection};
 use crate::editor::theme::EditorPalette;
 use crate::editor::undo::UndoRedo;
@@ -32,6 +34,7 @@ pub struct EditorState {
     pub view2d: View2DState,
     pub view3d: View3DState,
     pub config: EditorConfig,
+    pub entity_drawing: EntityDrawingConfig,
     pub palette: EditorPalette,
     pub view_config_rev: u64,
     pub tex_registry: TextureRegistry,
@@ -40,6 +43,7 @@ pub struct EditorState {
     // Editing modes
     pub stretch_mode: StretchMode,
     pub selection_rgba: [f32; 4],
+    pub model_asset_db: Option<AssetDb>,
 }
 
 impl Default for EditorState {
@@ -62,12 +66,14 @@ impl Default for EditorState {
             view2d: View2DState::default(),
             view3d: View3DState::default(),
             config: EditorConfig::default(),
+            entity_drawing: EntityDrawingConfig::default(),
             palette: EditorPalette::default(),
             view_config_rev: 0,
             tex_registry: TextureRegistry::default(),
             shader_db: None,
             stretch_mode: StretchMode::default(),
             selection_rgba: [0.3, 0.6, 1.0, 1.0],
+            model_asset_db: None,
         }
     }
 }

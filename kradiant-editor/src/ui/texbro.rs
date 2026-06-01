@@ -3,7 +3,7 @@
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui};
 use kradiant::loader::asset_loader::{AssetDb, AssetDbOptions};
 use kradiant::map::Map;
-use kradiant::shader::{QerParams, ShaderDb};
+use kradiant::shader::ShaderDb;
 use kradiant::texture::TextureImage;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -184,22 +184,24 @@ impl Default for TextureBrowser {
 
 impl TextureBrowser {
     /// Initialize if maindir is available
-    pub fn init(&mut self, maindir: &PathBuf) {
+    pub fn init(&mut self, maindir: &PathBuf) -> Vec<String> {
         match AssetDb::from_maindir_with_options(
             maindir.clone(),
             AssetDbOptions {
                 full_index: false,
                 index_textures: true,
                 index_shaders: true,
+                index_models: false,
             },
         ) {
             Ok(db) => {
-                self.shader_db = db.load_shader_db_cached().ok();
-                self.asset_db = Some(db);
+                self.shader_db = db.0.load_shader_db_cached().ok();
+                self.asset_db = Some(db.0);
                 self.refresh_contents();
+                return db.1;
             }
             Err(e) => {
-                eprintln!("Failed to load asset database: {}", e);
+                vec![format!("Failed to load asset database: {}", e)]
             }
         }
     }
@@ -362,7 +364,11 @@ impl TextureBrowser {
     /// Enqueue a texture for GPU upload if not already cached or pending.
     /// Note: browser textures (tex_gpu_cache) are loaded independently of 3D render textures
     /// (tex_registry) so that navigating directories doesn't affect 3D viewport rendering.
-    pub fn request_texture_load(&mut self, material: &str, tex_registry: &kradiant::render::TextureRegistry) {
+    pub fn request_texture_load(
+        &mut self,
+        material: &str,
+        tex_registry: &kradiant::render::TextureRegistry,
+    ) {
         // Check if this material has a shader with qer_editorimage
         let texture_to_load = self
             .shader_db
@@ -387,7 +393,8 @@ impl TextureBrowser {
                 if let Some(img) = self.tex_cache.get(cache_key) {
                     self.pending_render_uploads
                         .push((cache_key.to_string(), img.clone()));
-                    self.pending_render_uploads_set.insert(cache_key.to_string());
+                    self.pending_render_uploads_set
+                        .insert(cache_key.to_string());
                 }
             }
             return;
@@ -404,7 +411,8 @@ impl TextureBrowser {
                 {
                     self.pending_render_uploads
                         .push((cache_key.to_string(), img));
-                    self.pending_render_uploads_set.insert(cache_key.to_string());
+                    self.pending_render_uploads_set
+                        .insert(cache_key.to_string());
                 }
             }
             Err(e) => eprintln!("tex load failed {load_path} (for material {material}): {e}"),
@@ -428,7 +436,7 @@ impl TextureBrowser {
             .pending_render_uploads
             .drain(..self.pending_render_uploads.len().min(uploads_per_frame))
             .collect();
-            
+
         let mut inserted_any = false;
 
         for (material, img) in batch {
@@ -453,12 +461,15 @@ impl TextureBrowser {
             );
             inserted_any = true;
         }
-        
+
         inserted_any
     }
-    
+
     pub fn drain_pending_uploads(&mut self, max: usize) -> Vec<(String, TextureImage)> {
-        let batch: Vec<_> = self.pending_uploads.drain(..self.pending_uploads.len().min(max)).collect();
+        let batch: Vec<_> = self
+            .pending_uploads
+            .drain(..self.pending_uploads.len().min(max))
+            .collect();
         for (k, _) in &batch {
             self.pending_uploads_set.remove(k);
         }
@@ -552,7 +563,15 @@ pub fn draw_texture_browser(
             ui.child_window("##tex_tiles")
                 .size([tiles_w, panel_h])
                 .build(ui, || {
-                    draw_texture_tiles(ui, browser, tex_filter, *tex_tile_size, map, on_select, tex_registry);
+                    draw_texture_tiles(
+                        ui,
+                        browser,
+                        tex_filter,
+                        *tex_tile_size,
+                        map,
+                        on_select,
+                        tex_registry,
+                    );
                 });
         });
 }

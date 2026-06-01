@@ -571,6 +571,11 @@ fn tessellate_curve_patch(patch: &Patch) -> Result<PatchMesh, GeometryError> {
         }
     }
 
+    // `patchDef5` surfaces are rendered double-sided in editors/game tools, while
+    // `patchTerrainDef3` remains single-sided. The 3D renderer enables backface culling
+    // globally, so duplicate the curve triangles with reversed winding here.
+    append_reverse_winding(&mut indices);
+
     let normals = compute_vertex_normals(&positions, &indices);
     Ok(PatchMesh {
         positions,
@@ -734,6 +739,14 @@ fn flip_triangle_winding(indices: &mut [u32]) {
     }
 }
 
+fn append_reverse_winding(indices: &mut Vec<u32>) {
+    let original = indices.clone();
+    indices.reserve(original.len());
+    for tri in original.chunks_exact(3) {
+        indices.extend_from_slice(&[tri[0], tri[2], tri[1]]);
+    }
+}
+
 fn compute_vertex_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
     let mut normals = vec![Vec3::ZERO; positions.len()];
     for tri in indices.chunks(3) {
@@ -890,7 +903,7 @@ mod tests {
 
         let mesh = tessellate_patch(&patch).expect("tessellate");
         assert_eq!(mesh.positions.len(), 9); // (subdiv=2) -> 3x3 grid
-        assert_eq!(mesh.indices.len(), 24); // 4 quads -> 8 tris -> 24 indices
+        assert_eq!(mesh.indices.len(), 48); // Front + back faces for 4 quads -> 16 tris
         assert_eq!(mesh.uvs.len(), 9);
         assert_eq!(mesh.colors.len(), 9);
     }

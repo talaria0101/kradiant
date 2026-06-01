@@ -7,12 +7,16 @@ const SHIFT: u32 = 2;
 use std::collections::HashSet;
 
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
+use kradiant::assets::AssetDbOptions;
 use kradiant::editing;
-use kradiant::editor::EditorState as CoreEditorState;
+use kradiant::editor::{EditorState as CoreEditorState, SurfInspector};
 use kradiant::editor::config::{EditorConfig, RenderMode};
 use kradiant::map::Map;
+use kradiant::loader::asset_loader::AssetDb;
 
-use crate::config::{self, load as load_config, update as update_config};
+use crate::config::{
+    load as load_config, load_entity_drawing as load_entity_drawing_config, update as update_config,
+};
 use crate::icons::EditorIcons;
 use crate::images::EditorImages;
 use crate::theme::{ThemeEntry, theme_from_str};
@@ -23,10 +27,12 @@ pub mod console;
 pub mod texbro;
 pub mod view2d;
 pub mod view3d;
+pub mod surf_ins;
 use console::ConsoleLogger;
 use texbro::TextureBrowser;
 pub use view2d::{AxisLock, View2D};
 pub use view3d::View3D;
+use surf_ins::draw_surf_inspector;
 
 // Import types from kradiant to avoid duplication
 pub use kradiant::editor::viewport::{DragMode, Ortho, StretchMode};
@@ -128,6 +134,7 @@ pub struct EditorState {
     pub images: EditorImages,
     pub themes: Vec<ThemeEntry>,
     pub pending_theme: Option<usize>,
+    pub sf_inputs: SurfInspector,
 }
 
 #[macro_export]
@@ -181,17 +188,54 @@ impl Default for EditorState {
             images: EditorImages::default(),
             themes,
             pending_theme: None,
+            sf_inputs: SurfInspector::default(),
         };
 
         log_info!(s.console, "Kradiant editor started");
 
         s.core.config = {
             let res = load_config();
-            if res.1.is_some() {
-                log_error!(s.console, "{}", res.1.unwrap());
+            match res {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    log_error!(s.console, "Failed to load config: {}", e.to_string());
+                    EditorConfig::default()
+                }
             }
-            res.0
         };
+        s.core.entity_drawing = {
+            let res = load_entity_drawing_config();
+            match res {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    log_error!(s.console, "Failed to load entity drawing config: {}", e.to_string());
+                    kradiant::editor::config::EntityDrawingConfig::default()
+                }
+            }
+        };
+
+        match AssetDb::from_maindir_with_options(
+            &s.core.config.paths.main,
+            AssetDbOptions {
+                index_textures: false,
+                index_shaders: false,
+                index_models: true,
+                full_index: false,
+            }
+        ) {
+            Ok((db, log)) => {
+                for le in log {
+                    if le.starts_with("Fail") {
+                        log_error!(s.console, "{le}");
+                    }
+                    else {
+                        log_info!(s.console, "{le}");
+                    }
+                }
+                s.core.model_asset_db = Some(db);
+            }
+            Err(e) => log_error!(s.console, "Failed to initialize asset db: {e}")
+        }
 
         log_warn!(s.console, "this is a warning");
         s
@@ -213,13 +257,30 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
     draw_toolbar(ui, state);
     draw_entity_list(ui, state);
     draw_properties(ui, state);
+    draw_surf_inspector(ui, state);
     //draw_view3d(ui, state);
     {
         let view3d_ref = &mut state.view3d;
         let config = &mut state.core.config;
         let palette = &state.core.palette;
+        let selected_brushes = &mut state.core.selected_brushes;
+        let selected_faces = &mut state.core.selected_faces;
+        let selected_patch_vertices = &mut state.core.selected_patch_vertices;
+        let edit_faces = state.core.edit_faces;
+        let edit_vertices = state.core.edit_vertices;
+        let map = &mut state.core.map;
 
-        view3d_ref.draw_impl(ui, config, palette);
+        view3d_ref.draw_impl(
+            ui,
+            config,
+            palette,
+            selected_brushes,
+            selected_faces,
+            selected_patch_vertices,
+            edit_faces,
+            edit_vertices,
+            map,
+        );
     }
 
     state.core.selection_rgba = ui.style_color(StyleColor::ButtonActive);
@@ -406,6 +467,7 @@ fn build_default_layout(dockspace_id: dear_imgui_rs::sys::ImGuiID) {
         igDockBuilderDockWindow(b"Textures\0".as_ptr() as _, dock_tabs);
         igDockBuilderDockWindow(b"Entities\0".as_ptr() as _, dock_tabs);
         igDockBuilderDockWindow(b"Properties\0".as_ptr() as _, dock_tabs);
+        igDockBuilderDockWindow(b"Surface Inspector\0".as_ptr() as _, dock_tabs);
 
         igDockBuilderFinish(dockspace_id);
     }
@@ -501,6 +563,52 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                             &mut state.core.view_config_rev,
                         );
                     }
+                }
+            });
+            ui.menu("Show", || {
+                let mut toggled = state.core.config.view.show.models;
+                if ui.menu_item_toggle_no_shortcut("Models", &mut toggled, true) {
+                    let next_value = !state.core.config.view.show.models as u8;
+                    update_config(
+                        &mut state.core.config,
+                        "show_models",
+                        next_value,
+                        &mut state.console,
+                        &mut state.core.view_config_rev,
+                    );
+                }
+                let mut toggled = state.core.config.view.show.clip_brushes;
+                if ui.menu_item_toggle_no_shortcut("Clip Brushes", &mut toggled, true) {
+                    let next_value = !state.core.config.view.show.clip_brushes as u8;
+                    update_config(
+                        &mut state.core.config,
+                        "show_clip",
+                        next_value,
+                        &mut state.console,
+                        &mut state.core.view_config_rev,
+                    );
+                }
+                let mut toggled = state.core.config.view.show.patches;
+                if ui.menu_item_toggle_no_shortcut("Patches", &mut toggled, true) {
+                    let next_value = !state.core.config.view.show.patches as u8;
+                    update_config(
+                        &mut state.core.config,
+                        "show_patches",
+                        next_value,
+                        &mut state.console,
+                        &mut state.core.view_config_rev,
+                    );
+                }
+                let mut toggled = state.core.config.view.show.convex;
+                if ui.menu_item_toggle_no_shortcut("Convex", &mut toggled, true) {
+                    let next_value = !state.core.config.view.show.convex as u8;
+                    update_config(
+                        &mut state.core.config,
+                        "show_convex",
+                        next_value,
+                        &mut state.console,
+                        &mut state.core.view_config_rev,
+                    );
                 }
             });
         });
@@ -903,7 +1011,7 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
         .build(|| {
             let core = &mut state.core;
             let Some(idx) = core.selected_entity else {
-                ui.text_disabled("(select an entity)");
+                ui.text_disabled("Select an entity!");
                 return;
             };
             let (
@@ -929,11 +1037,11 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
             );
 
             let Some(map) = map_opt.as_mut() else {
-                ui.text_disabled("(select an entity)");
+                ui.text_disabled("No map loaded!");
                 return;
             };
             if idx >= map.entities.len() {
-                ui.text_disabled("(select an entity)");
+                ui.text_disabled("Could not find selected entity in map");
                 return;
             }
 
@@ -1014,7 +1122,12 @@ fn draw_properties(ui: &Ui, state: &mut EditorState) {
 
 fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
     let core = &mut state.core;
-    let (map, undo, map_revision, tex_registry) = (&mut core.map, &mut core.undo, &mut core.map_revision, &core.tex_registry);
+    let (map, undo, map_revision, tex_registry) = (
+        &mut core.map,
+        &mut core.undo,
+        &mut core.map_revision,
+        &core.tex_registry,
+    );
     let (selected_brushes, selected_faces, selected_patch_vertices, selected_entity, edit_faces) = (
         &core.selected_brushes,
         &core.selected_faces,
@@ -1081,7 +1194,7 @@ fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
                 let Some(brush) = entity.brushes.get_mut(brush_idx) else {
                     continue;
                 };
-                brush.apply_texture(&selected);
+                brush.set_texture(&selected);
                 any = true;
             }
         }

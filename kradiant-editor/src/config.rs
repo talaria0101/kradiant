@@ -1,20 +1,20 @@
 use std::{
     fs::OpenOptions,
-    io::{Read, Write},
+    io::{self, Read, Write},
 };
 
 use crate::{ui::console::ConsoleLogger, util};
-use kradiant::editor::config::EditorConfig;
+use kradiant::editor::config::{EditorConfig, EntityDrawingConfig};
 pub use kradiant::editor::config::RenderMode;
 use num_traits::NumCast;
 use strum::VariantArray;
 
-pub fn load() -> (EditorConfig, Option<String>) {
+pub fn load() -> io::Result<EditorConfig> {
     let cfg_path = util::get_config_dir()
         .expect("Failed to get config dir")
         .join("prefs.toml");
     if !cfg_path.exists() {
-        return (EditorConfig::default(), None);
+        return Ok(EditorConfig::default());
     }
     let mut cfg_file = OpenOptions::new()
         .read(true)
@@ -24,19 +24,56 @@ pub fn load() -> (EditorConfig, Option<String>) {
     cfg_file
         .read_to_string(&mut cfg_str)
         .expect("Failed to read config");
-    match toml::from_str::<EditorConfig>(&cfg_str) {
-        Ok(cfg) => (cfg, None),
-        Err(e) => (
-            EditorConfig::default(),
-            Some(format!(
-                "Failed to load config from {}: {e}",
-                cfg_path.display()
-            )),
-        ),
+
+    let cfg = toml::from_str::<EditorConfig>(&cfg_str);
+    if let Ok(cfg) = cfg {
+        Ok(cfg)
+    }
+    else {
+        Err(io::Error::new(io::ErrorKind::Other, cfg.err().unwrap()))
     }
 }
 
-pub fn save(cfg: &EditorConfig) -> String {
+pub fn load_entity_drawing() -> io::Result<EntityDrawingConfig> {
+    let cfg_path = util::get_config_dir()
+        .expect("Failed to get config dir")
+        .join("ent_drawing.toml");
+    if !cfg_path.exists() {
+        let cfg = EntityDrawingConfig::default();
+        let cfg_str = toml::to_string_pretty(&cfg).expect("Serialize entity drawing config");
+        let mut cfg_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&cfg_path)
+            .expect("Failed to create entity drawing config");
+        cfg_file
+            .write_all(cfg_str.as_bytes())
+            .expect("Failed to write entity drawing config");
+        return Ok(cfg);
+    }
+    let mut cfg_file = OpenOptions::new()
+        .read(true)
+        .open(&cfg_path)
+        .expect("Failed to open entity drawing config");
+    let mut cfg_str = String::new();
+    cfg_file
+        .read_to_string(&mut cfg_str)
+        .expect("Failed to read entity drawing config");
+
+    let cfg = toml::from_str::<EntityDrawingConfig>(&cfg_str);
+    if let Ok(cfg) = cfg {
+        Ok(cfg)
+    } else {
+        Err(io::Error::new(io::ErrorKind::Other, cfg.err().unwrap()))
+    }
+}
+
+pub fn save(cfg: &EditorConfig) -> io::Result<String> {
+    let old = load()?;
+    if &old == cfg {
+        return Ok("Not saving config".to_string());
+    }
     let cfg_str: String = toml::to_string(cfg).expect("Serialize config");
     let cfg_path = util::get_config_dir()
         .expect("Failed to get config dir")
@@ -48,12 +85,8 @@ pub fn save(cfg: &EditorConfig) -> String {
         .open(&cfg_path)
         .expect("Failed to open config");
     match cfg_file.write(cfg_str.as_bytes()) {
-        Ok(_) => format!("Saved configuration to {}", cfg_path.display()),
-        Err(e) => format!(
-            "Error saving configuration to {}: {}",
-            cfg_path.display(),
-            e
-        ),
+        Ok(_) => Ok(format!("Saved configuration to {}", cfg_path.display())),
+        Err(e) => Err(e)
     }
 }
 
@@ -100,6 +133,59 @@ pub fn update(
                 console,
                 "Set rendermode to {}",
                 cfg.view.rendermode.as_ref()
+            );
+        }
+        "show_models" => {
+            let value_u8: u8 = util::to_num(value);
+            let res = value_u8 == 1;
+            cfg.view.show.models = res;
+            *view_config_rev = view_config_rev.wrapping_add(1);
+            log_info!(
+                console,
+                "Set show models to {}",
+                res
+            );
+        }
+        "show_clip" => {
+            let value_u8: u8 = util::to_num(value);
+            let res = value_u8 == 1;
+            cfg.view.show.clip_brushes = res;
+            *view_config_rev = view_config_rev.wrapping_add(1);
+            log_info!(
+                console,
+                "Set show clip brushes to {}",
+                res
+            );
+        }
+        "show_patches" => {
+            let value_u8: u8 = util::to_num(value);
+            let res = value_u8 == 1;
+            cfg.view.show.patches = res;
+            *view_config_rev = view_config_rev.wrapping_add(1);
+            log_info!(
+                console,
+                "Set show patches to {}",
+                res
+            );
+        }
+        "show_convex" => {
+            let value_u8: u8 = util::to_num(value);
+            let res = value_u8 == 1;
+            cfg.view.show.convex = res;
+            *view_config_rev = view_config_rev.wrapping_add(1);
+            log_info!(
+                console,
+                "Set show convex to {}",
+                res
+            );
+        }
+        "perf_tex_load_num" => {
+            let value_u: usize = util::to_num(value);
+            cfg.perf.tex_load_num = value_u;
+            log_info!(
+                console,
+                "Change texture loading batch size to {}",
+                value_u
             );
         }
         _ => (),

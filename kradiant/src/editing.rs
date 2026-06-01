@@ -809,6 +809,7 @@ pub fn add_convex_brush_from_aabb(
             classname: "worldspawn".to_string(),
             properties: Default::default(),
             brushes: vec![],
+            model: None,
         });
     }
 
@@ -892,19 +893,30 @@ pub fn pick_convex_brush_by_ray(
     map: &mut Map,
     ray_origin: Vec3,
     ray_dir: Vec3,
+    mask: PickMask,
 ) -> Option<(usize, usize)> {
-    pick_brush_by_ray(map, ray_origin, ray_dir, PickMask::CONVEX)
+    pick_brush_by_ray(map, ray_origin, ray_dir, mask)
 }
 
 pub fn pick_convex_face_by_ray(
     map: &mut Map,
     ray_origin: Vec3,
     ray_dir: Vec3,
+    mask: PickMask,
 ) -> Option<(usize, usize, usize)> {
     let mut best: Option<(usize, usize, usize, f32)> = None;
 
+    let sel_clip = mask.contains(PickMask::CLIP);
+    let sel_convex = mask.contains(PickMask::CONVEX);
+
     for (entity_index, entity) in map.entities.iter_mut().enumerate() {
         for (brush_index, brush) in entity.brushes.iter_mut().enumerate() {
+            if !sel_convex {
+                continue;
+            }
+            if brush.is_clip() && !sel_clip {
+                continue;
+            }
             let BrushContent::Convex(_) = &mut brush.content else {
                 continue;
             };
@@ -951,12 +963,18 @@ pub fn pick_convex_face_by_ray(
 pub struct PickMask(u8);
 
 impl PickMask {
+    pub const NONE: PickMask = PickMask(0);
     pub const CONVEX: PickMask = PickMask(1 << 0);
     pub const PATCH: PickMask = PickMask(1 << 1);
-    pub const ALL: PickMask = PickMask(Self::CONVEX.0 | Self::PATCH.0);
+    pub const CLIP: PickMask = PickMask(1 << 2);
+    pub const ALL: PickMask = PickMask(Self::CONVEX.0 | Self::PATCH.0 | Self::CLIP.0);
 
     pub fn contains(self, other: PickMask) -> bool {
         (self.0 & other.0) != 0
+    }
+
+    pub fn add(&mut self, other: PickMask) {
+        self.0 |= other.0
     }
 }
 
@@ -973,6 +991,9 @@ pub fn pick_brush_by_ray(
             match &mut brush.content {
                 BrushContent::Convex(_) => {
                     if !mask.contains(PickMask::CONVEX) {
+                        continue;
+                    }
+                    if brush.is_clip() && !mask.contains(PickMask::CLIP) {
                         continue;
                     }
 
@@ -1522,12 +1543,14 @@ mod tests {
             classname: "worldspawn".to_string(),
             properties: std::collections::HashMap::new(),
             brushes: vec![brush1],
+            model: None
         });
         map.entities.push(Entity {
             id: EntityId(1),
             classname: "func_group".to_string(),
             properties: std::collections::HashMap::new(),
             brushes: vec![brush2],
+            model: None,
         });
 
         // Brush at entity 0, brush 0 should touch brush at entity 1, brush 0
@@ -1562,12 +1585,14 @@ mod tests {
             classname: "worldspawn".to_string(),
             properties: std::collections::HashMap::new(),
             brushes: vec![brush1],
+            model: None
         });
         map.entities.push(Entity {
             id: EntityId(1),
             classname: "func_group".to_string(),
             properties: std::collections::HashMap::new(),
             brushes: vec![brush2],
+            model: None
         });
 
         // With small epsilon, they don't touch (gap of 1 unit)
@@ -1600,6 +1625,7 @@ mod tests {
             classname: "worldspawn".to_string(),
             properties: std::collections::HashMap::new(),
             brushes: vec![brush],
+            model: None
         });
 
         let touching = find_touching_brushes(&mut map, 0, 0, 0.1);

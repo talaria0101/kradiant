@@ -12,6 +12,7 @@ pub mod assets;
 pub mod core_util;
 pub mod editing;
 pub mod editor;
+pub mod ffi;
 pub mod geometry;
 pub mod loader;
 pub mod map;
@@ -21,7 +22,7 @@ pub mod render;
 pub mod shader;
 pub mod texmap;
 pub mod texture;
-pub mod ffi;
+pub mod xmodel;
 
 /*
 pub use geometry::{

@@ -6,6 +6,7 @@
 
 use crate::shader::{ShaderDb, parse_shader_source_into_db};
 use crate::texture::{TextureError, TextureImage, decode_texture_rgba8, load_texture_rgba8};
+use crate::xmodel::{XModel, XModelError, resolve_xmodel_texture_name};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,8 @@ impl AssetRoots {
     /// - We try a preferred extension order (`dds`, `tga`, `jpg`, `jpeg`).
     /// - We look under `(main)/textures/<name>` first, then fall back to `(main)/<name>` in case
     /// the material already includes a `textures/...` prefix.
+    ///
+    /// Loose files are matched case-sensitively.
     pub fn resolve_texture_path(&self, material: &str) -> Option<PathBuf> {
         let rel = normalize_material_name(material);
         resolve_texture_path_under(&self.textures_dir, &rel)
@@ -161,6 +164,8 @@ pub struct AssetDb {
     pk3_paths: Vec<PathBuf>,
     // key is normalized (lowercase, forward slashes, no leading slash)
     pk3_index: HashMap<String, Pk3EntryRef>,
+    // Per-archive case-insensitive lookup table: normalized virtual path -> exact zip entry name.
+    pk3_case_index: HashMap<PathBuf, HashMap<String, String>>,
     // Open pk3 archives, so repeated reads don't re-parse the central directory.
     pk3_open: HashMap<PathBuf, ZipArchive<File>>,
 }
@@ -175,6 +180,8 @@ pub struct AssetDbOptions {
     pub index_textures: bool,
     /// Index shader scripts under `scripts/` inside `.pk3` archives.
     pub index_shaders: bool,
+    /// Index models
+    pub index_models: bool,
 }
 
 impl Default for AssetDbOptions {
@@ -186,13 +193,14 @@ impl Default for AssetDbOptions {
             full_index: false,
             index_textures: false,
             index_shaders: false,
+            index_models: false,
         }
     }
 }
 
 impl AssetDb {
     /// Build a `.pk3` index by scanning `<maindir>` for archives.
-    pub fn from_maindir(maindir: impl Into<PathBuf>) -> Result<Self, AssetDbError> {
+    pub fn from_maindir(maindir: impl Into<PathBuf>) -> Result<(Self, Vec<String>), AssetDbError> {
         Self::from_maindir_with_options(maindir, AssetDbOptions::default())
     }
 
@@ -200,15 +208,20 @@ impl AssetDb {
     pub fn from_maindir_with_options(
         maindir: impl Into<PathBuf>,
         opts: AssetDbOptions,
-    ) -> Result<Self, AssetDbError> {
+    ) -> Result<(Self, Vec<String>), AssetDbError> {
+        let mut log: Vec<String> = Vec::new();
+        log.push("[AssetDb] Initializing...".into());
         let roots = AssetRoots::new(maindir);
+        log.push(format!("[AssetDb] Main directory: {}", roots.maindir.display()));
         let mut pk3_paths = find_pk3_files(roots.maindir())?;
         pk3_paths.sort();
+        log.push(format!("[AssetDb] Total {} pk3 files", pk3_paths.len()));
 
         // Build index in ascending order so later filenames (e.g. pak1.pk3) override earlier (pak0.pk3).
         let mut pk3_index: HashMap<String, Pk3EntryRef> = HashMap::new();
         if opts.full_index || opts.index_shaders || opts.index_textures {
             for pk3_path in &pk3_paths {
+                let mut count: usize = 0;
                 let f = File::open(pk3_path)?;
                 let zip = ZipArchive::new(f)?;
 
@@ -218,6 +231,7 @@ impl AssetDb {
                 //
                 // Full indexing is available for future expansion (models, sounds, etc.).
                 for name in zip.file_names() {
+                    count += 1;
                     if !opts.full_index && !is_useful_index_entry_raw(name, &opts) {
                         continue;
                     }
@@ -233,15 +247,19 @@ impl AssetDb {
                         },
                     );
                 }
+                log.push(format!("    {:6} files in {}", count, pk3_path.file_name().unwrap().display()));
             }
         }
 
-        Ok(Self {
+        log.push("[AssetDb] Initialized".into());
+
+        Ok((Self {
             roots,
             pk3_paths,
             pk3_index,
+            pk3_case_index: HashMap::new(),
             pk3_open: HashMap::new(),
-        })
+        }, log))
     }
 
     pub fn file_useful_for_radiant(ext: &str) -> bool {
@@ -291,12 +309,6 @@ impl AssetDb {
         if loose.is_file() {
             return Some(ResolvedAsset::Loose(loose));
         }
-        if v_key != v_zip {
-            let loose2 = self.roots.maindir.join(&v_key);
-            if loose2.is_file() {
-                return Some(ResolvedAsset::Loose(loose2));
-            }
-        }
 
         if let Some(pk3) = self.pk3_index.get(&v_key) {
             return Some(ResolvedAsset::Pk3 {
@@ -310,46 +322,19 @@ impl AssetDb {
         // When found, memoize into the index so subsequent lookups are fast.
         let pk3s: Vec<PathBuf> = self.pk3_paths.iter().cloned().collect();
         for pk3_path in pk3s.iter().rev() {
-            // Try exact/canonical name first (fast).
-            let has_exact = {
-                let zip = self.open_pk3_cached(pk3_path).ok()?;
-                zip.by_name(&v_zip).is_ok()
-            };
-            if has_exact {
+            if let Some(entry_name) = self.pk3_lookup_case_insensitive(pk3_path, &v_zip) {
                 self.pk3_index.insert(
                     v_key.clone(),
                     Pk3EntryRef {
                         pk3_path: pk3_path.clone(),
-                        entry_name: v_zip.clone(),
+                        entry_name: entry_name.clone(),
                     },
                 );
                 return Some(ResolvedAsset::Pk3 {
                     pk3_path: pk3_path.clone(),
-                    entry_name: v_zip,
+                    entry_name,
                     virtual_path: v_key,
                 });
-            }
-
-            // Try lowercase variant (common in pk3).
-            if v_key != v_zip {
-                let has_lower = {
-                    let zip = self.open_pk3_cached(pk3_path).ok()?;
-                    zip.by_name(&v_key).is_ok()
-                };
-                if has_lower {
-                    self.pk3_index.insert(
-                        v_key.clone(),
-                        Pk3EntryRef {
-                            pk3_path: pk3_path.clone(),
-                            entry_name: v_key.clone(),
-                        },
-                    );
-                    return Some(ResolvedAsset::Pk3 {
-                        pk3_path: pk3_path.clone(),
-                        entry_name: v_key.clone(),
-                        virtual_path: v_key,
-                    });
-                }
             }
         }
 
@@ -382,8 +367,7 @@ impl AssetDb {
     /// - Tries under `textures/` first, then falls back to the raw material string in case it
     /// already contains a `textures/...` prefix.
     pub fn resolve_texture(&mut self, material: &str) -> Option<ResolvedAsset> {
-        let rel = normalize_material_name(material);
-        let rel = normalize_asset_path(&rel);
+        let rel = canonical_virtual_path(&normalize_material_name(material));
 
         // If material includes an extension, try it directly (both with and without textures/ prefix).
         if Path::new(&rel).extension().is_some() {
@@ -413,7 +397,7 @@ impl AssetDb {
             }
         }
 
-        // Loose-file-only fallback: scan directory for case variants.
+        // Loose-file-only fallback: exact-case filesystem lookup only.
         self.find_first_supported_loose(&rel)
     }
 
@@ -439,6 +423,25 @@ impl AssetDb {
         };
 
         Ok(decode_texture_rgba8(&bytes, &ext)?)
+    }
+
+    /// Resolve a model material to the texture asset it should display.
+    pub fn resolve_xmodel_texture(
+        &mut self,
+        material: &str,
+        shader_db: Option<&ShaderDb>,
+    ) -> Option<ResolvedAsset> {
+        let texture_name = resolve_xmodel_texture_name(material, shader_db, self)?;
+        self.resolve_texture(&texture_name)
+    }
+
+    /// Load a CoD1 XMODEL (LOD0) with transformed geometry, UVs, and resolved texture references.
+    pub fn load_xmodel(
+        &mut self,
+        name: &str,
+        shader_db: Option<&ShaderDb>,
+    ) -> Result<XModel, XModelError> {
+        XModel::load(self, name, shader_db)
     }
 
     /// Resolve and memoize textures for a set of materials.
@@ -506,39 +509,26 @@ impl AssetDb {
 
             let mut updates: Vec<(String, String)> = Vec::new(); // (key, entry_name)
 
-            {
-                let zip = match self.open_pk3_cached(pk3_path) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+            for (idx, mat) in mats.iter().enumerate() {
+                if !unresolved[idx] {
+                    continue;
+                }
 
-                for (idx, mat) in mats.iter().enumerate() {
-                    if !unresolved[idx] {
-                        continue;
+                // Try candidates in priority order; first hit wins for this pk3 priority level.
+                let mut found: Option<(String, String)> = None; // (key, entry_name)
+                for cand_zip in &mat.candidates {
+                    let cand_key = normalize_asset_path(cand_zip);
+                    if let Some(entry_name) = self.pk3_lookup_case_insensitive(pk3_path, cand_zip)
+                    {
+                        found = Some((cand_key, entry_name));
+                        break;
                     }
+                }
 
-                    // Try candidates in priority order; first hit wins for this pk3 priority level.
-                    let mut found: Option<(String, String)> = None; // (key, entry_name)
-                    for cand_zip in &mat.candidates {
-                        let cand_key = normalize_asset_path(cand_zip);
-
-                        if zip.by_name(cand_zip).is_ok() {
-                            found = Some((cand_key, cand_zip.clone()));
-                            break;
-                        }
-
-                        // Try lowercase variant.
-                        if cand_key != *cand_zip && zip.by_name(&cand_key).is_ok() {
-                            found = Some((cand_key.clone(), cand_key));
-                            break;
-                        }
-                    }
-
-                    if let Some((key, entry_name)) = found {
-                        updates.push((key, entry_name));
-                        unresolved[idx] = false;
-                        remaining -= 1;
-                    }
+                if let Some((key, entry_name)) = found {
+                    updates.push((key, entry_name));
+                    unresolved[idx] = false;
+                    remaining -= 1;
                 }
             }
 
@@ -692,11 +682,43 @@ impl AssetDb {
         let supported = ["dds", "tga", "jpg", "jpeg"];
         for stem in stems {
             let stem = stem.with_extension("");
-            if let Some(found) = find_first_supported_in_dir(&stem, &supported) {
+            if let Some(found) = find_first_supported_loose_exact(&stem, &supported) {
                 return Some(ResolvedAsset::Loose(found));
             }
         }
         None
+    }
+
+    fn pk3_lookup_case_insensitive(
+        &mut self,
+        pk3_path: &Path,
+        target: &str,
+    ) -> Option<String> {
+        let target_key = normalize_asset_path(target);
+
+        if let Some(entry) = self.pk3_index.get(&target_key) {
+            if entry.pk3_path == pk3_path {
+                return Some(entry.entry_name.clone());
+            }
+        }
+
+        if !self.pk3_case_index.contains_key(pk3_path) {
+            let zip = self.open_pk3_cached(pk3_path).ok()?;
+            let mut index = HashMap::<String, String>::new();
+            for i in 0..zip.len() {
+                let file = zip.by_index(i).ok()?;
+                if file.is_dir() {
+                    continue;
+                }
+                let name = file.name().to_string();
+                index.insert(normalize_asset_path(&name), name);
+            }
+            self.pk3_case_index.insert(pk3_path.to_path_buf(), index);
+        }
+
+        self.pk3_case_index
+            .get(pk3_path)
+            .and_then(|index| index.get(&target_key).cloned())
     }
 }
 
@@ -742,6 +764,9 @@ fn is_useful_index_entry_raw(name: &str, opts: &AssetDbOptions) -> bool {
             || name.ends_with(".jpg")
             || name.ends_with(".jpeg");
     }
+    if opts.index_models && (name.starts_with("xmodel") || name.starts_with("skins")) {
+        return true;
+    }
     false
 }
 
@@ -761,33 +786,22 @@ fn resolve_texture_path_under(root: &Path, rel: &str) -> Option<PathBuf> {
         }
     }
 
-    find_first_supported_in_dir(&stem, &preferred)
+    None
 }
 
-fn find_first_supported_in_dir(stem: &Path, supported: &[&str]) -> Option<PathBuf> {
-    let parent = stem.parent()?;
-    let base = stem.file_name()?.to_string_lossy().to_string();
-
-    let rd = std::fs::read_dir(parent).ok()?;
-    for entry in rd.flatten() {
-        let p = entry.path();
-        if !p.is_file() {
-            continue;
-        }
-        let file_stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if !file_stem.eq_ignore_ascii_case(&base) {
-            continue;
-        }
-        let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if supported.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
-            return Some(p);
+fn find_first_supported_loose_exact(stem: &Path, supported: &[&str]) -> Option<PathBuf> {
+    let stem = stem.with_extension("");
+    for ext in supported {
+        let cand = stem.with_extension(ext);
+        if cand.exists() {
+            return Some(cand);
         }
     }
     None
 }
 
 fn shader_cache_path(maindir: &Path) -> PathBuf {
-    maindir.join(".radiant_core").join("shader_qer_cache.tsv")
+    maindir.join(".kradiant").join("shader_qer_cache.tsv")
 }
 
 fn shader_cache_fingerprint(maindir: &Path, pk3_paths: &[PathBuf]) -> Result<u64, std::io::Error> {
@@ -795,7 +809,7 @@ fn shader_cache_fingerprint(maindir: &Path, pk3_paths: &[PathBuf]) -> Result<u64
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
-    1u32.hash(&mut hasher); // cache version salt
+    2u32.hash(&mut hasher); // cache version salt
 
     // pk3 archives (sorted by caller).
     for p in pk3_paths {
@@ -859,10 +873,10 @@ fn shader_cache_header_matches(line0: &str, fingerprint: u64) -> bool {
     let tag = it.next().unwrap_or("");
     let ver = it.next().unwrap_or("");
     let fp = it.next().unwrap_or("");
-    if tag != "radiant_core_shader_cache" {
+    if tag != "kradiant_shader_cache" {
         return false;
     }
-    if ver != "1" {
+    if ver != "2" {
         return false;
     }
     fp.parse::<u64>().ok() == Some(fingerprint)
@@ -896,6 +910,7 @@ fn parse_shader_cache_line(line: &str) -> Option<crate::shader::ShaderDef> {
             no_carve,
             extra: HashMap::new(),
         },
+        diffuse_map: None,
     })
 }
 
@@ -908,7 +923,7 @@ fn write_shader_cache(path: &Path, fingerprint: u64, db: &ShaderDb) -> Result<()
 
     // Write directly; this is best-effort, not crash-critical.
     let mut f = File::create(path)?;
-    writeln!(f, "radiant_core_shader_cache\t1\t{fingerprint}")?;
+    writeln!(f, "kradiant_shader_cache\t2\t{fingerprint}")?;
     for sh in db.iter() {
         let e = sh.qer.editor_image.as_deref().unwrap_or("");
         let l = sh.qer.light_image.as_deref().unwrap_or("");
@@ -922,4 +937,57 @@ fn write_shader_cache(path: &Path, fingerprint: u64, db: &ShaderDb) -> Result<()
         writeln!(f, "{}\t{}\t{}\t{}\t{}\t{}", sh.name, e, l, t, nd, nc)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    fn make_temp_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("kradiant-{name}-{stamp}"));
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn loose_files_are_case_sensitive() {
+        let root = make_temp_dir("loose-case");
+        fs::create_dir_all(root.join("textures")).expect("textures dir");
+        fs::write(root.join("textures/Foo.tga"), b"loose").expect("write loose texture");
+
+        let (mut db, _) =
+            AssetDb::from_maindir_with_options(&root, AssetDbOptions::default()).expect("db");
+
+        assert!(db.resolve_texture("Foo").is_some());
+        assert!(db.resolve_texture("foo").is_none());
+    }
+
+    #[test]
+    fn pk3_entries_are_case_insensitive() {
+        let root = make_temp_dir("pk3-case");
+        let pk3_path = root.join("pak0.pk3");
+
+        let f = File::create(&pk3_path).expect("create pk3");
+        let mut zip = ZipWriter::new(f);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file("Textures/Foo.TGA", opts)
+            .expect("start pk3 file");
+        zip.write_all(b"pk3").expect("write pk3 file");
+        zip.finish().expect("finish pk3");
+
+        let (mut db, _) =
+            AssetDb::from_maindir_with_options(&root, AssetDbOptions::default()).expect("db");
+
+        assert!(db.resolve_texture("foo").is_some());
+        assert!(db.resolve_texture("textures/foo").is_some());
+    }
 }

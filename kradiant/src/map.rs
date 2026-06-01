@@ -5,7 +5,9 @@
 //! - Faces carry texture and classic "9‑number" surface parameters as written by level editors.
 
 use crate::editing::{Aabb, aabb_from_polys, aabb_from_positions};
+use crate::editor::SurfInspector;
 use crate::map_utils::rotate_vector;
+use crate::xmodel::XModel;
 use crate::{IVec2, Vec2, Vec3};
 use std::collections::{HashMap, HashSet};
 
@@ -150,6 +152,15 @@ pub struct Patch {
     //last_generation: u64
 }
 
+impl Face {
+    pub fn apply_params(&mut self, si: &SurfInspector) {
+        self.texture = si.tex_in.to_owned();
+        self.params.shift = IVec2::new(si.hshift_in, si.vshift_in);
+        self.params.scale = Vec2::new(si.hstretch_in, si.vstretch_in);
+        self.params.rotate = si.rotate_in;
+    }
+}
+
 impl Brush {
     /// Create a new brush with the given identifier and content.
     pub fn new(id: BrushId, content: BrushContent) -> Self {
@@ -242,7 +253,39 @@ impl Brush {
         self.aabb.max += delta;
     }
 
-    pub fn apply_texture(&mut self, texture: &str) {
+    pub fn get_texture_last(&self) -> String
+    {
+        match &self.content {
+            BrushContent::Convex(faces) => {
+                faces.last().unwrap().texture.clone()
+            }
+            BrushContent::Patch(patch) => {
+                patch.texture.clone()
+            }
+        }
+    }
+
+    pub fn get_last_face(&self) -> Option<Face>
+    {
+        if let BrushContent::Convex(faces) = &self.content {
+            faces.last().cloned()
+        }
+        else { None }
+    }
+
+    /*pub fn get_textures(&self) -> Vec<String>
+    {
+        match &self.content {
+            BrushContent::Convex(faces) => {
+                faces.iter().map(|f| f.texture.clone()).collect()
+            }
+            BrushContent::Patch(patch) => {
+                vec![patch.texture.clone()]
+            }
+        }
+    }*/
+
+    pub fn set_texture(&mut self, texture: &str) {
         match &mut self.content {
             BrushContent::Convex(faces) => {
                 for face in faces.iter_mut() {
@@ -254,13 +297,33 @@ impl Brush {
             }
         }
     }
-
-    /*pub fn recompute_aabb(&mut self)
-    {
-        if let Some(polys) = self.get_polygons() {
-            self.aabb = aabb_from_polys(polys);
+    pub fn set_texture_params(&mut self, si: SurfInspector) {
+        match &mut self.content {
+            BrushContent::Convex(faces) => {
+                for f in faces {
+                    f.apply_params(&si);
+                }
+            }
+            BrushContent::Patch(patch) => {
+                patch.texture = si.tex_in;
+                // TODO: other params
+            }
         }
-    }*/
+    }
+
+    pub fn is_clip(&self) -> bool {
+        match &self.content {
+            BrushContent::Convex(faces) => {
+                for f in faces {
+                    if f.texture.contains("clip") {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false
+        }
+    }
 }
 
 impl Patch {
@@ -353,6 +416,7 @@ pub struct Entity {
     /// Arbitrary key/value pairs such as `"origin"`, `"targetname"`, etc.
     pub properties: HashMap<String, String>,
     pub brushes: Vec<Brush>,
+    pub model: Option<XModel>,
 }
 
 /// Top‑level map structure, mirroring a complete `.map` file.

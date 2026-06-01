@@ -1,5 +1,5 @@
-use crate::editor::EditorState;
 use crate::KRADIANT_VERSION;
+use crate::editor::EditorState;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
@@ -23,10 +23,7 @@ pub unsafe extern "C" fn kr_editor_free(ptr: *mut EditorState) {
 /// Load a map into the editor.
 /// Returns true on success, false on failure.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kr_editor_load_map(
-    ptr: *mut EditorState,
-    path: *const c_char,
-) -> bool {
+pub unsafe extern "C" fn kr_editor_load_map(ptr: *mut EditorState, path: *const c_char) -> bool {
     if ptr.is_null() || path.is_null() {
         return false;
     }
@@ -51,10 +48,7 @@ pub unsafe extern "C" fn kr_editor_load_map(
 /// Save the current map.
 /// Returns true on success, false on failure.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kr_editor_save_map(
-    ptr: *mut EditorState,
-    path: *const c_char,
-) -> bool {
+pub unsafe extern "C" fn kr_editor_save_map(ptr: *mut EditorState, path: *const c_char) -> bool {
     if ptr.is_null() || path.is_null() {
         return false;
     }
@@ -161,7 +155,11 @@ pub unsafe extern "C" fn kr_editor_redo(ptr: *mut EditorState) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kr_editor_get_entity_count(ptr: *mut EditorState) -> i32 {
     if let Some(state) = unsafe { ptr.as_ref() } {
-        state.map.as_ref().map(|m| m.entities.len() as i32).unwrap_or(0)
+        state
+            .map
+            .as_ref()
+            .map(|m| m.entities.len() as i32)
+            .unwrap_or(0)
     } else {
         0
     }
@@ -218,7 +216,11 @@ impl Vec3 {
     pub fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
-    pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
 }
 
 #[repr(C)]
@@ -246,7 +248,11 @@ pub struct Quat {
 
 impl From<glam::Vec3> for Vec3 {
     fn from(v: glam::Vec3) -> Self {
-        Self { x: v.x, y: v.y, z: v.z }
+        Self {
+            x: v.x,
+            y: v.y,
+            z: v.z,
+        }
     }
 }
 
@@ -270,7 +276,12 @@ impl From<glam::IVec2> for IVec2 {
 
 impl From<glam::Quat> for Quat {
     fn from(q: glam::Quat) -> Self {
-        Self { x: q.x, y: q.y, z: q.z, w: q.w }
+        Self {
+            x: q.x,
+            y: q.y,
+            z: q.z,
+            w: q.w,
+        }
     }
 }
 
@@ -282,16 +293,15 @@ pub unsafe extern "C" fn kr_editor_select_brush(
     brush_idx: i32,
 ) {
     if let Some(state) = unsafe { ptr.as_mut() } {
-        state.selected_brushes.push((entity_idx as usize, brush_idx as usize));
+        state
+            .selected_brushes
+            .push((entity_idx as usize, brush_idx as usize));
     }
 }
 
 /// Translate the current selection.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kr_editor_translate_selection(
-    ptr: *mut EditorState,
-    delta: Vec3,
-) -> bool {
+pub unsafe extern "C" fn kr_editor_translate_selection(ptr: *mut EditorState, delta: Vec3) -> bool {
     if let Some(state) = unsafe { ptr.as_mut() } {
         let dv = glam::Vec3::from(delta);
         if dv == glam::Vec3::ZERO {
@@ -355,7 +365,11 @@ pub unsafe extern "C" fn kr_compute_normal(p1: Vec3, p2: Vec3, p3: Vec3) -> Vec3
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kr_editor_get_map_ptr(ptr: *mut EditorState) -> *mut crate::map::Map {
     if let Some(state) = unsafe { ptr.as_mut() } {
-        state.map.as_mut().map(|m| m as *mut _).unwrap_or(std::ptr::null_mut())
+        state
+            .map
+            .as_mut()
+            .map(|m| m as *mut _)
+            .unwrap_or(std::ptr::null_mut())
     } else {
         std::ptr::null_mut()
     }
@@ -375,7 +389,7 @@ pub unsafe extern "C" fn kr_asset_db_new(maindir: *const c_char) -> *mut crate::
     };
 
     match crate::assets::AssetDb::from_maindir(path) {
-        Ok(db) => Box::into_raw(Box::new(db)),
+        Ok(db) => Box::into_raw(Box::new(db.0)),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -434,7 +448,10 @@ pub unsafe extern "C" fn kr_texture_image_free(ptr: *mut TextureImage) {
         unsafe {
             let img = Box::from_raw(ptr);
             // Re-construct the slice to free the data
-            let _ = Box::from_raw(std::slice::from_raw_parts_mut(img.data, (img.width * img.height * 4) as usize));
+            let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+                img.data,
+                (img.width * img.height * 4) as usize,
+            ));
         }
     }
 }
@@ -452,7 +469,10 @@ pub unsafe extern "C" fn kr_brush_get_face_count(brush_ptr: *const crate::map::B
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kr_brush_get_face_texture(brush_ptr: *const crate::map::Brush, face_idx: i32) -> *mut c_char {
+pub unsafe extern "C" fn kr_brush_get_face_texture(
+    brush_ptr: *const crate::map::Brush,
+    face_idx: i32,
+) -> *mut c_char {
     if let Some(brush) = unsafe { brush_ptr.as_ref() } {
         match &brush.content {
             crate::map::BrushContent::Convex(faces) => {
@@ -485,10 +505,18 @@ pub unsafe extern "C" fn kr_editor_set_grid_snap(ptr: *mut EditorState, enabled:
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kr_editor_get_view2d_pan(ptr: *const EditorState, x: *mut f32, y: *mut f32) {
+pub unsafe extern "C" fn kr_editor_get_view2d_pan(
+    ptr: *const EditorState,
+    x: *mut f32,
+    y: *mut f32,
+) {
     if let Some(state) = unsafe { ptr.as_ref() } {
-        if !x.is_null() { unsafe { *x = state.view2d.pan[0] }; }
-        if !y.is_null() { unsafe { *y = state.view2d.pan[1] }; }
+        if !x.is_null() {
+            unsafe { *x = state.view2d.pan[0] };
+        }
+        if !y.is_null() {
+            unsafe { *y = state.view2d.pan[1] };
+        }
     }
 }
 
@@ -517,13 +545,23 @@ pub unsafe extern "C" fn kr_brush_get_face_plane_point(
             crate::map::BrushContent::Patch(_) => {}
         }
     }
-    Vec3 { x: 0.0, y: 0.0, z: 0.0 }
+    Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kr_map_get_entity(map_ptr: *mut crate::map::Map, idx: i32) -> *mut crate::map::Entity {
+pub unsafe extern "C" fn kr_map_get_entity(
+    map_ptr: *mut crate::map::Map,
+    idx: i32,
+) -> *mut crate::map::Entity {
     if let Some(map) = unsafe { map_ptr.as_mut() } {
-        map.entities.get_mut(idx as usize).map(|e| e as *mut _).unwrap_or(std::ptr::null_mut())
+        map.entities
+            .get_mut(idx as usize)
+            .map(|e| e as *mut _)
+            .unwrap_or(std::ptr::null_mut())
     } else {
         std::ptr::null_mut()
     }
@@ -539,16 +577,24 @@ pub unsafe extern "C" fn kr_entity_get_brush_count(ent_ptr: *const crate::map::E
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kr_entity_get_brush(ent_ptr: *mut crate::map::Entity, idx: i32) -> *mut crate::map::Brush {
+pub unsafe extern "C" fn kr_entity_get_brush(
+    ent_ptr: *mut crate::map::Entity,
+    idx: i32,
+) -> *mut crate::map::Brush {
     if let Some(ent) = unsafe { ent_ptr.as_mut() } {
-        ent.brushes.get_mut(idx as usize).map(|b| b as *mut _).unwrap_or(std::ptr::null_mut())
+        ent.brushes
+            .get_mut(idx as usize)
+            .map(|b| b as *mut _)
+            .unwrap_or(std::ptr::null_mut())
     } else {
         std::ptr::null_mut()
     }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kr_shader_db_load(main_dir: *const c_char) -> *mut crate::shader::ShaderDb {
+pub unsafe extern "C" fn kr_shader_db_load(
+    main_dir: *const c_char,
+) -> *mut crate::shader::ShaderDb {
     if main_dir.is_null() {
         return std::ptr::null_mut();
     }
@@ -585,10 +631,19 @@ pub unsafe extern "C" fn kr_geom_update_brush_plane(
         // Note: we need a way to pass generation. For simplicity in FFI, we might want a version that handles it.
         // But for now, we'll just use a dummy generation or expose it.
         let mut dummy_gen = 0u64;
-        brush.update_brush_plane(&mut dummy_gen, plane_idx as usize, [glam::Vec3::from(p1), glam::Vec3::from(p2), glam::Vec3::from(p3)]);
+        brush.update_brush_plane(
+            &mut dummy_gen,
+            plane_idx as usize,
+            [
+                glam::Vec3::from(p1),
+                glam::Vec3::from(p2),
+                glam::Vec3::from(p3),
+            ],
+        );
     }
 }
 
+// TODO: update to take mask as argument
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kr_edit_pick_brush_by_ray(
     map_ptr: *mut crate::map::Map,
@@ -604,8 +659,12 @@ pub unsafe extern "C" fn kr_edit_pick_brush_by_ray(
             glam::Vec3::from(ray_dir),
             crate::editing::PickMask::ALL,
         ) {
-            if !out_ent.is_null() { unsafe { *out_ent = res.0 as i32 }; }
-            if !out_brush.is_null() { unsafe { *out_brush = res.1 as i32 }; }
+            if !out_ent.is_null() {
+                unsafe { *out_ent = res.0 as i32 };
+            }
+            if !out_brush.is_null() {
+                unsafe { *out_brush = res.1 as i32 };
+            }
             return true;
         }
     }
@@ -624,8 +683,15 @@ pub unsafe extern "C" fn kr_tex_q3_axes_from_normal(normal: Vec3, s: *mut Vec3, 
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kr_tex_rotate_axes(s: Vec3, t: Vec3, angle_rad: f32, rs: *mut Vec3, rt: *mut Vec3) {
-    let (os, ot) = crate::texmap::rotate_texture_axes(glam::Vec3::from(s), glam::Vec3::from(t), angle_rad);
+pub unsafe extern "C" fn kr_tex_rotate_axes(
+    s: Vec3,
+    t: Vec3,
+    angle_rad: f32,
+    rs: *mut Vec3,
+    rt: *mut Vec3,
+) {
+    let (os, ot) =
+        crate::texmap::rotate_texture_axes(glam::Vec3::from(s), glam::Vec3::from(t), angle_rad);
     if !rs.is_null() {
         unsafe { *rs = Vec3::from(os) };
     }
@@ -655,18 +721,24 @@ pub unsafe extern "C" fn kr_brush_get_polygon_data(
     if let Some(brush) = unsafe { brush_ptr.as_mut() } {
         if let Some(polys) = brush.get_polygons() {
             if let Some((verts, indices)) = polys.get(poly_idx as usize) {
-                if !out_vertex_count.is_null() { unsafe { *out_vertex_count = verts.len() as i32 }; }
-                if !out_index_count.is_null() { unsafe { *out_index_count = indices.len() as i32 }; }
-                
+                if !out_vertex_count.is_null() {
+                    unsafe { *out_vertex_count = verts.len() as i32 };
+                }
+                if !out_index_count.is_null() {
+                    unsafe { *out_index_count = indices.len() as i32 };
+                }
+
                 if !out_vertices.is_null() {
-                    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_vertices, verts.len()) };
+                    let out_slice =
+                        unsafe { std::slice::from_raw_parts_mut(out_vertices, verts.len()) };
                     for (i, v) in verts.iter().enumerate() {
                         out_slice[i] = Vec3::from(*v);
                     }
                 }
-                
+
                 if !out_indices.is_null() {
-                    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_indices, indices.len()) };
+                    let out_slice =
+                        unsafe { std::slice::from_raw_parts_mut(out_indices, indices.len()) };
                     out_slice.copy_from_slice(indices);
                 }
                 return true;
@@ -686,9 +758,15 @@ pub unsafe extern "C" fn kr_editor_get_view3d_cam(
     zoom: *mut f32,
 ) {
     if let Some(state) = unsafe { ptr.as_ref() } {
-        if !pos.is_null() { unsafe { *pos = Vec3::from(state.view3d.cam.pos) }; }
-        if !angles.is_null() { unsafe { *angles = Vec3::from(state.view3d.cam.angles) }; }
-        if !zoom.is_null() { unsafe { *zoom = state.view3d.cam.zoom }; }
+        if !pos.is_null() {
+            unsafe { *pos = Vec3::from(state.view3d.cam.pos) };
+        }
+        if !angles.is_null() {
+            unsafe { *angles = Vec3::from(state.view3d.cam.angles) };
+        }
+        if !zoom.is_null() {
+            unsafe { *zoom = state.view3d.cam.zoom };
+        }
     }
 }
 
@@ -711,7 +789,9 @@ pub unsafe extern "C" fn kr_editor_set_view3d_cam(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kr_editor_get_new_prop_key(ptr: *const EditorState) -> *mut c_char {
     if let Some(state) = unsafe { ptr.as_ref() } {
-        CString::new(state.new_prop_key.as_str()).unwrap().into_raw()
+        CString::new(state.new_prop_key.as_str())
+            .unwrap()
+            .into_raw()
     } else {
         std::ptr::null_mut()
     }
@@ -731,7 +811,9 @@ pub unsafe extern "C" fn kr_editor_set_new_prop_key(ptr: *mut EditorState, val: 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kr_editor_get_new_prop_val(ptr: *const EditorState) -> *mut c_char {
     if let Some(state) = unsafe { ptr.as_ref() } {
-        CString::new(state.new_prop_val.as_str()).unwrap().into_raw()
+        CString::new(state.new_prop_val.as_str())
+            .unwrap()
+            .into_raw()
     } else {
         std::ptr::null_mut()
     }
@@ -888,8 +970,12 @@ pub unsafe extern "C" fn kr_patch_get_tessellation_counts(
     if let Some(brush) = unsafe { brush_ptr.as_mut() } {
         if let crate::map::BrushContent::Patch(patch) = &brush.content {
             if let Ok(tess) = crate::geometry::tessellate_patch(patch) {
-                if !out_vertex_count.is_null() { unsafe { *out_vertex_count = tess.positions.len() as i32 }; }
-                if !out_index_count.is_null() { unsafe { *out_index_count = tess.indices.len() as i32 }; }
+                if !out_vertex_count.is_null() {
+                    unsafe { *out_vertex_count = tess.positions.len() as i32 };
+                }
+                if !out_index_count.is_null() {
+                    unsafe { *out_index_count = tess.indices.len() as i32 };
+                }
                 return true;
             }
         }
@@ -907,7 +993,9 @@ pub unsafe extern "C" fn kr_patch_get_tessellation_data(
         if let crate::map::BrushContent::Patch(patch) = &brush.content {
             if let Ok(tess) = crate::geometry::tessellate_patch(patch) {
                 if !out_vertices.is_null() {
-                    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_vertices, tess.positions.len()) };
+                    let out_slice = unsafe {
+                        std::slice::from_raw_parts_mut(out_vertices, tess.positions.len())
+                    };
                     for i in 0..tess.positions.len() {
                         out_slice[i] = TexVertex {
                             pos: Vec3::from(tess.positions[i]),
@@ -917,7 +1005,8 @@ pub unsafe extern "C" fn kr_patch_get_tessellation_data(
                     }
                 }
                 if !out_indices.is_null() {
-                    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_indices, tess.indices.len()) };
+                    let out_slice =
+                        unsafe { std::slice::from_raw_parts_mut(out_indices, tess.indices.len()) };
                     out_slice.copy_from_slice(&tess.indices);
                 }
                 return true;

@@ -87,6 +87,7 @@ pub struct Camera {
 pub struct View3DState {
     pub rect: [f32; 4],
     pub cam: Camera,
+    pub drag_mode: DragMode,
 }
 
 impl Default for View3DState {
@@ -98,6 +99,7 @@ impl Default for View3DState {
                 angles: Vec3::new(0.8, -0.35, 0.0),
                 zoom: 64.0,
             },
+            drag_mode: DragMode::RectangularSelection,
         }
     }
 }

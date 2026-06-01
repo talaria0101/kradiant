@@ -1,12 +1,17 @@
 //! 2D Viewport
 
 use crate::core_util::{self, project_to_2d};
+use crate::assets::normalize_material_name;
 use crate::editing::AffineScale;
 use crate::editor::EditorState;
+use crate::editor::config::{EntityDrawAnchor, EntityDrawKind};
 use crate::editor::viewport::{DragMode, Ortho, StretchMode};
 use crate::map::BrushContent;
 use crate::render::RenderBackend;
+use crate::xmodel::XModel;
 use glam::Vec3;
+use crate::core_util::{arrow_line_vertices, box_line_vertices, entity_angles_forward};
+use crate::xmodel::model_wireframe_lines;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct View2dCache {
@@ -21,10 +26,12 @@ pub struct View2dCache {
     cull_right: f32,
     cull_top: f32,
     cull_bottom: f32,
+    view_config_rev: u64,
 }
 
 pub struct Viewport2D {
     line_vertices: Vec<Vec3>,
+    entity_line_batches: Vec<([f32; 4], Vec<Vec3>)>,
     selected_vertices: Vec<Vec3>,
     control_vertices: Vec<Vec3>,
     control_selected_vertices: Vec<Vec3>,
@@ -45,6 +52,7 @@ impl Viewport2D {
     ) -> Self {
         Self {
             line_vertices: vec![],
+            entity_line_batches: Vec::new(),
             selected_vertices: vec![],
             control_vertices: vec![],
             control_selected_vertices: vec![],
@@ -282,6 +290,7 @@ impl Viewport2D {
             let map_generation = editor.map.as_ref().map(|m| m.generation).unwrap_or(0u64);
             let map_revision = editor.map_revision;
             let map_present = editor.map.is_some();
+            let view_config_rev = editor.view_config_rev;
 
             if !map_present {
                 self.grid_vertices.clear();
@@ -300,6 +309,7 @@ impl Viewport2D {
                         || cache.map_generation != map_generation
                         || cache.map_revision != map_revision
                         || (cache.zoom - zoom).abs() > 1.0e-6
+                        || cache.view_config_rev != view_config_rev
                     {
                         rebuild_view2d = true;
                     } else {
@@ -317,6 +327,7 @@ impl Viewport2D {
 
             if rebuild_view2d {
                 self.line_vertices.clear();
+                self.entity_line_batches.clear();
 
                 let margin_x = (view_right - view_left).abs() * 0.50;
                 let margin_y = (view_bottom - view_top).abs() * 0.50;
@@ -336,26 +347,234 @@ impl Viewport2D {
                     cull_right,
                     cull_top,
                     cull_bottom,
+                    view_config_rev
                 });
             }
 
             if rebuild_view2d {
                 if let Some(cache) = self.cache {
-                    let view_dir = match axis {
-                        Ortho::XY => glam::Vec3::new(0.0, 0.0, -1.0),
-                        Ortho::XZ => glam::Vec3::new(0.0, -1.0, 0.0),
-                        Ortho::YZ => glam::Vec3::new(-1.0, 0.0, 0.0),
-                    };
                     let view_min_x = cache.cull_left.min(cache.cull_right);
                     let view_max_x = cache.cull_left.max(cache.cull_right);
                     let view_min_y = cache.cull_top.min(cache.cull_bottom);
                     let view_max_y = cache.cull_top.max(cache.cull_bottom);
 
                     if let Some(map) = &mut editor.map {
+                        let project_line_batch = |lines: Vec<Vec3>| -> Vec<Vec3> {
+                            lines
+                                .into_iter()
+                                .map(|p| {
+                                    let p2 = project_to_2d(p, axis);
+                                    Vec3::new(p2[0], p2[1], 0.0)
+                                })
+                                .collect()
+                        };
+
                         for entity in &mut map.entities {
+                            let has_model = entity.properties.get("model").is_some();
+                            let style = editor
+                                .entity_drawing
+                                .resolve(&entity.classname, has_model);
+                            let draw_entity_visual = entity.classname != "worldspawn"
+                                && !matches!(style.kind, EntityDrawKind::Hidden);
+
+                            let origin = entity
+                                .properties
+                                .get("origin")
+                                .map(|s| core_util::origin_to_vec3(s))
+                                .unwrap_or(Vec3::ZERO);
+                            let angles = entity
+                                .properties
+                                .get("angles")
+                                .and_then(|s| core_util::vec3_from_whitespace_triplet(s));
+                            let model_rot = angles.map(core_util::entity_angles_to_quat);
+
+                            let needs_model = editor.config.view.show.models
+                                || matches!(
+                                    style.kind,
+                                    EntityDrawKind::ModelBounds | EntityDrawKind::ModelWireframe
+                                );
+                            if needs_model {
+                                if let Some(model_name) = entity.properties.get("model") {
+                                    let expected_name = {
+                                        let normalized = normalize_material_name(model_name);
+                                        if normalized.starts_with("xmodel/") {
+                                            normalized
+                                        } else {
+                                            format!("xmodel/{normalized}")
+                                        }
+                                    };
+                                    let needs_load = entity
+                                        .model
+                                        .as_ref()
+                                        .map(|model| model.name != expected_name)
+                                        .unwrap_or(true);
+                                    if needs_load {
+                                        if let Some(model_asset_db) = editor.model_asset_db.as_mut()
+                                        {
+                                            match XModel::load(
+                                                model_asset_db,
+                                                model_name,
+                                                editor.shader_db.as_ref(),
+                                            ) {
+                                                Ok(m) => entity.model = Some(m),
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "Failed load model {model_name}: {e}"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if draw_entity_visual {
+                                let pivot = origin;
+
+                            match style.kind {
+                                EntityDrawKind::Box => {
+                                    let mut lines = project_line_batch(match style.anchor {
+                                        EntityDrawAnchor::Base => crate::core_util::box_line_vertices_from_base(
+                                            pivot,
+                                            Vec3::from_array(style.size),
+                                            None,
+                                        ),
+                                        EntityDrawAnchor::Center => crate::core_util::box_line_vertices(
+                                            pivot,
+                                            Vec3::from_array(style.size),
+                                            None,
+                                        ),
+                                    });
+                                    if style.show_arrow {
+                                        if let Some(angles) = angles.filter(|a| {
+                                            a.length_squared() > 1.0e-6
+                                        }) {
+                                            lines.extend(project_line_batch(
+                                                arrow_line_vertices(
+                                                    pivot,
+                                                    entity_angles_forward(angles),
+                                                    Vec3::from_array(style.size).length(),
+                                                    Vec3::Z,
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                    self.entity_line_batches.push((style.color, lines));
+                                }
+                                EntityDrawKind::SolidBox => {
+                                    let mut lines = project_line_batch(match style.anchor {
+                                        EntityDrawAnchor::Base => crate::core_util::box_line_vertices_from_base(
+                                            pivot,
+                                            Vec3::from_array(style.size),
+                                            None,
+                                        ),
+                                        EntityDrawAnchor::Center => crate::core_util::box_line_vertices(
+                                            pivot,
+                                            Vec3::from_array(style.size),
+                                            None,
+                                        ),
+                                    });
+                                    if style.show_arrow {
+                                        if let Some(angles) = angles.filter(|a| {
+                                            a.length_squared() > 1.0e-6
+                                        }) {
+                                            lines.extend(project_line_batch(
+                                                arrow_line_vertices(
+                                                    pivot,
+                                                    entity_angles_forward(angles),
+                                                    Vec3::from_array(style.size).length(),
+                                                    Vec3::Z,
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                    self.entity_line_batches.push((style.color, lines));
+                                }
+                                EntityDrawKind::ModelBounds => {
+                                    if let Some(model) = entity.model.as_ref() {
+                                        let model_origin = pivot + model.origin;
+                                            let box_center =
+                                                model_origin + (model.mins + model.maxs) * 0.5;
+                                            let mut lines = project_line_batch(box_line_vertices(
+                                                box_center,
+                                                model.maxs - model.mins,
+                                                None,
+                                            ));
+                                            if style.show_arrow {
+                                                if let Some(angles) = angles.filter(|a| {
+                                                    a.length_squared() > 1.0e-6
+                                                }) {
+                                                    lines.extend(project_line_batch(arrow_line_vertices(
+                                                        model_origin,
+                                                        entity_angles_forward(angles),
+                                                        model.radius,
+                                                        Vec3::Z,
+                                                    )));
+                                                }
+                                            }
+                                            self.entity_line_batches.push((style.color, lines));
+                                        }
+                                    }
+                                    EntityDrawKind::ModelWireframe => {
+                                        if let Some(model) = entity.model.as_ref() {
+                                            let model_origin = pivot + model.origin;
+                                            let mut lines = project_line_batch(model_wireframe_lines(
+                                                model,
+                                                model_origin,
+                                                model_rot,
+                                            ));
+                                            if style.show_arrow {
+                                                if let Some(angles) = angles.filter(|a| {
+                                                    a.length_squared() > 1.0e-6
+                                                }) {
+                                                    lines.extend(project_line_batch(arrow_line_vertices(
+                                                        model_origin,
+                                                        entity_angles_forward(angles),
+                                                        model.radius,
+                                                        Vec3::Z,
+                                                    )));
+                                                }
+                                            }
+                                            self.entity_line_batches.push((style.color, lines));
+                                        }
+                                    }
+                                EntityDrawKind::Hidden => {}
+                                }
+
+                                if editor.config.view.show.models {
+                                    if let Some(model) = entity.model.as_ref() {
+                                        let model_origin = pivot + model.origin;
+                                        let mut lines = project_line_batch(
+                                            model_wireframe_lines(model, model_origin, model_rot),
+                                        );
+                                        if style.show_arrow {
+                                            if let Some(angles) = angles.filter(|a| {
+                                                a.length_squared() > 1.0e-6
+                                            }) {
+                                                lines.extend(project_line_batch(
+                                                    arrow_line_vertices(
+                                                        model_origin,
+                                                        entity_angles_forward(angles),
+                                                        model.radius,
+                                                        Vec3::Z,
+                                                    ),
+                                                ));
+                                            }
+                                        }
+                                        self.entity_line_batches.push((style.color, lines));
+                                    }
+                                }
+                            }
+
                             for brush in &mut entity.brushes {
+                                if brush.is_clip() && !editor.config.view.show.clip_brushes {
+                                    continue;
+                                }
                                 match &mut brush.content {
                                     BrushContent::Convex(_) => {
+                                        if !editor.config.view.show.convex {
+                                            continue;
+                                        }
                                         let Some((aabb, polys)) = brush.get_polygons_and_aabb()
                                         else {
                                             continue;
@@ -394,17 +613,6 @@ impl Viewport2D {
                                             if verts.len() < 2 {
                                                 continue;
                                             }
-                                            if verts.len() >= 3 {
-                                                let n = (verts[1] - verts[0])
-                                                    .cross(verts[2] - verts[0]);
-                                                let n_len = n.length();
-                                                if n_len.is_finite() && n_len > 1e-6 {
-                                                    let dot = (n / n_len).dot(view_dir);
-                                                    if dot > 1e-4 {
-                                                        continue;
-                                                    }
-                                                }
-                                            }
 
                                             for i in 0..verts.len() {
                                                 let a = verts[i];
@@ -433,6 +641,9 @@ impl Viewport2D {
                                         }
                                     }
                                     BrushContent::Patch(patch) => {
+                                        if !editor.config.view.show.convex {
+                                            continue;
+                                        }
                                         let Some((mesh, patch_aabb, edges)) =
                                             patch.get_mesh_aabb_wire()
                                         else {
@@ -509,6 +720,13 @@ impl Viewport2D {
                 draw_lines(backend, &self.line_vertices, editor.palette.view2d_geometry);
             }
 
+            for (color, lines) in &self.entity_line_batches {
+                if lines.is_empty() {
+                    continue;
+                }
+                draw_lines(backend, lines, *color);
+            }
+
             self.selected_vertices.clear();
             if !editor.edit_faces && !editor.edit_vertices && !editor.selected_brushes.is_empty() {
                 let view_min_x = view_left.min(view_right);
@@ -566,17 +784,6 @@ impl Viewport2D {
                                                 for (positions, _) in polys {
                                                     if positions.len() < 2 {
                                                         continue;
-                                                    }
-                                                    if positions.len() >= 3 {
-                                                        let n = (positions[1] - positions[0])
-                                                            .cross(positions[2] - positions[0]);
-                                                        let n_len = n.length();
-                                                        if n_len.is_finite() && n_len > 1e-6 {
-                                                            let dot = (n / n_len).dot(view_dir);
-                                                            if dot > 1e-4 {
-                                                                continue;
-                                                            }
-                                                        }
                                                     }
                                                     for i in 0..positions.len() {
                                                         let a = positions[i];

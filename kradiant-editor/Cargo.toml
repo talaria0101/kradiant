@@ -6,13 +6,12 @@ build = "build.rs"
 
 [dependencies]
 kradiant = { path = "../kradiant" }
-dear-imgui-rs = "0.10.3"
-dear-imgui-glow = { version = "0.10.3", features = ["gl_extensions_support"] }
-glow = "0.16"
-dear-imgui-winit = "0.10.3"
+dear-imgui-rs = "0.13"
+dear-imgui-glow = { version = "0.13", features = ["gl_extensions_support"] }
+glow = "0.17"
+dear-imgui-winit = "0.13"
 winit = "0.30.12"
 glutin = { git = "https://github.com/rust-windowing/glutin.git", branch = "0.32.x", version = "0.32.3" }
-dear-imguizmo = "0.10.3"
 raw-window-handle = "0.6.2"
 glutin-winit = { git = "https://github.com/rust-windowing/glutin.git", branch = "0.32.x", version = "0.5.0" }
 rfd = "0.17.2"
