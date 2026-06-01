@@ -1,5 +1,5 @@
 # <img src="kradiant_banner.png" alt="kradiant banner" align="right" /> <br>kradiant
-A mapping tool for CoD 1/UO written in Rust, inspired by [netradiant-custom](https://github.com/Garux/netradiant-custom).
+CoD 1/UO level editing library and tool written in Rust.
 
 ## What's done
 - Backend library that can:
@@ -7,6 +7,9 @@ A mapping tool for CoD 1/UO written in Rust, inspired by [netradiant-custom](htt
   - Create geometry for loaded map
   - Load textures and shaders from paks
   - Save maps
+  - Loading models
+  - Editing Brushes
+  - And more...
 
 ## Work in Progress
 - The editor
@@ -16,6 +19,9 @@ A mapping tool for CoD 1/UO written in Rust, inspired by [netradiant-custom](htt
 - **Face deletion with joining**: Implement algorithm to delete selected faces and join the remaining faces at the center of the deleted face
 - **Context menu in 2D view**
 - **Edge edit mode**
+- Improve **Surface Inspector**
+- Improve **entity drawing**
+- Implement **editing in 3D view**
 
 ## FAQs
 <details><summary>FAQs</summary>
