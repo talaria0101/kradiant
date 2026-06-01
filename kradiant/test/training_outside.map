@@ -876,52 +876,58 @@
 }
 // entity 1
 {
-"origin" "-328 224 960"
-"classname" "mp_retrieval_spawn_allied"
+"origin" "-320 104 272"
+"model" "xmodel/health_medium"
+"classname" "item_health"
 }
 // entity 2
 {
-"origin" "-336 264 960"
-"classname" "mp_retrieval_spawn_axis"
+"classname" "mp_retrieval_spawn_allied"
+"origin" "-328 224 960"
 }
 // entity 3
 {
-"origin" "-292 1496 258"
-"script_gameobjectname " "bombzone"
-"targetname" "exploder"
-"script_exploder" "2"
-"model" "xmodel/german_radio2_d"
-"classname" "script_model"
+"classname" "mp_retrieval_spawn_axis"
+"origin" "-336 264 960"
 }
 // entity 4
 {
-"model" "xmodel/german_radio2"
-"origin" "-292 1496 258"
-"script_exploder" "2"
 "classname" "script_model"
+"model" "xmodel/german_radio2_d"
+"script_exploder" "2"
+"targetname" "exploder"
+"script_gameobjectname " "bombzone"
+"origin" "-292 1496 258"
 }
 // entity 5
 {
-"origin" "-96 1520 256"
-"script_gameobjectname " "bombzone"
-"model" "xmodel/german_radio1_d"
-"targetname" "exploder"
-"script_exploder " "1"
 "classname" "script_model"
+"script_exploder" "2"
+"origin" "-292 1496 258"
+"model" "xmodel/german_radio2"
 }
 // entity 6
 {
-"origin" "-96 1520 256"
-"script_exploder" "1"
-"model" "xmodel/german_radio1"
 "classname" "script_model"
+"script_exploder " "1"
+"targetname" "exploder"
+"model" "xmodel/german_radio1_d"
+"script_gameobjectname " "bombzone"
+"origin" "-96 1520 256"
 }
 // entity 7
 {
-"script_gameobjectname" "bombzone"
-"script_noteworthy" "2"
-"targetname" "bombzone_B"
+"classname" "script_model"
+"model" "xmodel/german_radio1"
+"script_exploder" "1"
+"origin" "-96 1520 256"
+}
+// entity 8
+{
 "classname" "trigger_multiple"
+"targetname" "bombzone_B"
+"script_noteworthy" "2"
+"script_gameobjectname" "bombzone"
 // brush 0
 {
 ( -254 1532 256 ) ( -318 1532 256 ) ( -318 1460 256 ) common/trigger 0 0 0 0.25 0.25 0 0 0 0
@@ -941,11 +947,11 @@
 ( -308 1512 268 ) ( -308 1488 268 ) ( -308 1488 260 ) common/origin -16 0 0 0.25 0.25 0 0 0 0
 }
 }
-// entity 8
+// entity 9
 {
-"targetname" "bombtrigger"
-"script_gameobjectname" "bombzone"
 "classname" "trigger_lookat"
+"script_gameobjectname" "bombzone"
+"targetname" "bombtrigger"
 // brush 0
 {
 ( -260 1502 858 ) ( -266 1502 858 ) ( -266 1494 858 ) common/trigger 32 0 0 0.25 0.25 0 0 0 0
@@ -965,12 +971,12 @@
 ( -266 1510 854 ) ( -270 1510 854 ) ( -270 1494 854 ) common/origin 0 0 0 0.25 0.25 0 0 0 0
 }
 }
-// entity 9
+// entity 10
 {
-"script_noteworthy" "1"
-"targetname" "bombzone_A"
-"script_gameobjectname" "bombzone"
 "classname" "trigger_multiple"
+"script_gameobjectname" "bombzone"
+"targetname" "bombzone_A"
+"script_noteworthy" "1"
 // brush 0
 {
 ( -40 1544 256 ) ( -148 1544 256 ) ( -148 1472 256 ) common/trigger 0 0 0 0.25 0.25 0 0 0 0
@@ -990,10 +996,10 @@
 ( -112 1542 260 ) ( -112 1500 260 ) ( -112 1500 258 ) common/origin -64 -120 0 0.25 0.25 0 0 0 0
 }
 }
-// entity 10
+// entity 11
 {
-"targetname" "practicetarget2"
 "classname" "script_brushmodel"
+"targetname" "practicetarget2"
 // brush 0
 {
 ( -638 398 258 ) ( -638 398 310 ) ( -638 396 310 ) _development/testtarget 0 0 0 0.25 0.55 0 0 0 0
@@ -1004,10 +1010,10 @@
 ( -586 398 258 ) ( -638 398 258 ) ( -638 396 258 ) common/caulk 40 0 0 0.25 0.25 0 0 0 0
 }
 }
-// entity 11
+// entity 12
 {
-"targetname" "practicetarget"
 "classname" "script_brushmodel"
+"targetname" "practicetarget"
 // brush 0
 {
 ( -135 185 258 ) ( -187 185 258 ) ( -187 183 258 ) common/caulk -92 -20 0 0.25 0.25 0 0 0 0
@@ -1018,340 +1024,340 @@
 ( -187 185 258 ) ( -187 185 310 ) ( -187 183 310 ) _development/testtarget 0 0 0 0.35 0.25 0 0 0 0
 }
 }
-// entity 12
-{
-"origin" "-908 1523 264"
-"classname" "mp_teamdeathmatch_spawn"
-}
 // entity 13
 {
-"origin" "530 -520 264"
-"classname" "mp_deathmatch_spawn"
+"classname" "mp_teamdeathmatch_spawn"
+"origin" "-908 1523 264"
 }
 // entity 14
 {
-"origin" "-441 217 978"
-"classname" "mp_deathmatch_intermission"
+"classname" "mp_deathmatch_spawn"
+"origin" "530 -520 264"
 }
 // entity 15
 {
-"origin" "-375 308 978"
-"classname" "mp_teamdeathmatch_intermission"
+"classname" "mp_deathmatch_intermission"
+"origin" "-441 217 978"
 }
 // entity 16
 {
-"origin" "-351 -749 265"
-"classname" "mp_teamdeathmatch_spawn"
+"classname" "mp_teamdeathmatch_intermission"
+"origin" "-375 308 978"
 }
 // entity 17
 {
-"origin" "219 1385 310"
-"model" "xmodel/weapon_panzerfaust_ammo"
-"classname" "mpweapon_panzerfaust"
+"classname" "mp_teamdeathmatch_spawn"
+"origin" "-351 -749 265"
 }
 // entity 18
 {
-"origin" "-1016 -720 300"
-"model" "xmodel/crate_champagne1"
-"classname" "misc_model"
+"classname" "mpweapon_panzerfaust"
+"model" "xmodel/weapon_panzerfaust_ammo"
+"origin" "219 1385 310"
 }
 // entity 19
 {
-"origin" "-1008 -720 256"
-"model" "xmodel/barrel_green2snowy"
 "classname" "misc_model"
+"model" "xmodel/crate_champagne1"
+"origin" "-1016 -720 300"
 }
 // entity 20
 {
-"angles" "0 90 0"
-"model" "xmodel/weapon_antitankrifle"
-"origin" "-534 -582 256"
-"weaponinfo" "PTRS41_antitank_rifle_mp"
-"classname" "misc_turret"
+"classname" "misc_model"
+"model" "xmodel/barrel_green2snowy"
+"origin" "-1008 -720 256"
 }
 // entity 21
 {
-"model" "xmodel/sandbags_corner_winter"
-"origin" "-580 -604 255"
-"angles" "0 270 0"
-"classname" "misc_model"
+"classname" "misc_turret"
+"weaponinfo" "PTRS41_antitank_rifle_mp"
+"origin" "-534 -582 256"
+"model" "xmodel/weapon_antitankrifle"
+"angles" "0 90 0"
 }
 // entity 22
 {
-"model" "xmodel/sandbags_corner_winter"
-"origin" "-582 1248 256"
 "classname" "misc_model"
+"angles" "0 270 0"
+"origin" "-580 -604 255"
+"model" "xmodel/sandbags_corner_winter"
 }
 // entity 23
 {
-"model" "xmodel/weapon_antitankrifle"
-"origin" "-534 1236 256"
-"angles" "0 270 0"
-"weaponinfo" "PTRS41_antitank_rifle_mp"
-"classname" "misc_turret"
+"classname" "misc_model"
+"origin" "-582 1248 256"
+"model" "xmodel/sandbags_corner_winter"
 }
 // entity 24
 {
-"origin" "-978 -720 256"
-"model" "xmodel/barrel_green2snowy"
-"classname" "misc_model"
+"classname" "misc_turret"
+"weaponinfo" "PTRS41_antitank_rifle_mp"
+"angles" "0 270 0"
+"origin" "-534 1236 256"
+"model" "xmodel/weapon_antitankrifle"
 }
 // entity 25
 {
-"origin" "632 1584 300"
-"model" "xmodel/crate_champagne1"
 "classname" "misc_model"
+"model" "xmodel/barrel_green2snowy"
+"origin" "-978 -720 256"
 }
 // entity 26
 {
-"origin" "594 1584 256"
-"model" "xmodel/barrel_green2snowy"
 "classname" "misc_model"
+"model" "xmodel/crate_champagne1"
+"origin" "632 1584 300"
 }
 // entity 27
 {
-"origin" "624 1584 256"
-"model" "xmodel/barrel_green2snowy"
 "classname" "misc_model"
+"model" "xmodel/barrel_green2snowy"
+"origin" "594 1584 256"
 }
 // entity 28
 {
-"origin" "521 -784 264"
-"model" "xmodel/airborne"
-"classname" "mp_searchanddestroy_spawn_allied"
+"classname" "misc_model"
+"model" "xmodel/barrel_green2snowy"
+"origin" "624 1584 256"
 }
 // entity 29
 {
-"model" "xmodel/airborne"
-"origin" "-862 -818 264"
 "classname" "mp_searchanddestroy_spawn_allied"
+"model" "xmodel/airborne"
+"origin" "521 -784 264"
 }
 // entity 30
 {
-"origin" "-862 -882 264"
-"model" "xmodel/airborne"
 "classname" "mp_searchanddestroy_spawn_allied"
+"origin" "-862 -818 264"
+"model" "xmodel/airborne"
 }
 // entity 31
 {
-"origin" "564 -800 264"
-"model" "xmodel/airborne"
 "classname" "mp_searchanddestroy_spawn_allied"
+"model" "xmodel/airborne"
+"origin" "-862 -882 264"
 }
 // entity 32
 {
-"model" "xmodel/airborne"
-"origin" "-450 -784 264"
 "classname" "mp_searchanddestroy_spawn_allied"
+"model" "xmodel/airborne"
+"origin" "564 -800 264"
 }
 // entity 33
 {
-"model" "xmodel/airborne"
-"origin" "-37 -801 264"
 "classname" "mp_searchanddestroy_spawn_allied"
+"origin" "-450 -784 264"
+"model" "xmodel/airborne"
 }
 // entity 34
 {
-"angles" "0 180 0"
-"origin" "-853 1441 264"
-"model" "xmodel/wehrmacht_soldier"
-"classname" "mp_searchanddestroy_spawn_axis"
+"classname" "mp_searchanddestroy_spawn_allied"
+"origin" "-37 -801 264"
+"model" "xmodel/airborne"
 }
 // entity 35
 {
-"origin" "7 1415 264"
-"model" "xmodel/wehrmacht_soldier"
-"angles" "0 180 0"
 "classname" "mp_searchanddestroy_spawn_axis"
+"model" "xmodel/wehrmacht_soldier"
+"origin" "-853 1441 264"
+"angles" "0 180 0"
 }
 // entity 36
 {
-"origin" "-391 1437 264"
-"model" "xmodel/wehrmacht_soldier"
-"angles" "0 180 0"
 "classname" "mp_searchanddestroy_spawn_axis"
+"angles" "0 180 0"
+"model" "xmodel/wehrmacht_soldier"
+"origin" "7 1415 264"
 }
 // entity 37
 {
-"model" "xmodel/wehrmacht_soldier"
-"angles" "0 180 0"
-"origin" "504 1456 264"
 "classname" "mp_searchanddestroy_spawn_axis"
+"angles" "0 180 0"
+"model" "xmodel/wehrmacht_soldier"
+"origin" "-391 1437 264"
 }
 // entity 38
 {
+"classname" "mp_searchanddestroy_spawn_axis"
+"origin" "504 1456 264"
 "angles" "0 180 0"
 "model" "xmodel/wehrmacht_soldier"
-"origin" "504 1392 264"
-"classname" "mp_searchanddestroy_spawn_axis"
 }
 // entity 39
 {
-"angles" "0 180 0"
-"origin" "-917 1409 264"
-"model" "xmodel/wehrmacht_soldier"
 "classname" "mp_searchanddestroy_spawn_axis"
+"origin" "504 1392 264"
+"model" "xmodel/wehrmacht_soldier"
+"angles" "0 180 0"
 }
 // entity 40
 {
-"angles" "0 165 0"
-"origin" "-415 263 978"
-"classname" "mp_searchanddestroy_intermission"
+"classname" "mp_searchanddestroy_spawn_axis"
+"model" "xmodel/wehrmacht_soldier"
+"origin" "-917 1409 264"
+"angles" "0 180 0"
 }
 // entity 41
 {
-"origin" "280 -793 256"
-"model" "xmodel/crate_misc1"
-"classname" "misc_model"
+"classname" "mp_searchanddestroy_intermission"
+"origin" "-415 263 978"
+"angles" "0 165 0"
 }
 // entity 42
 {
-"origin" "309 -793 256"
-"model" "xmodel/crate_misc1"
 "classname" "misc_model"
+"model" "xmodel/crate_misc1"
+"origin" "280 -793 256"
 }
 // entity 43
 {
-"angles" "0 270 0"
-"model" "xmodel/crate_misc1"
-"origin" "295 -831 256"
 "classname" "misc_model"
+"model" "xmodel/crate_misc1"
+"origin" "309 -793 256"
 }
 // entity 44
 {
-"model" "xmodel/crate_misc1"
-"angles" "0 293 0"
-"origin" "290 -783 283"
 "classname" "misc_model"
+"origin" "295 -831 256"
+"model" "xmodel/crate_misc1"
+"angles" "0 270 0"
 }
 // entity 45
 {
-"origin" "208 1416 256"
-"model" "xmodel/crate_misc1"
 "classname" "misc_model"
+"origin" "290 -783 283"
+"angles" "0 293 0"
+"model" "xmodel/crate_misc1"
 }
 // entity 46
 {
-"model" "xmodel/crate_misc1"
-"origin" "236 1416 256"
 "classname" "misc_model"
+"model" "xmodel/crate_misc1"
+"origin" "208 1416 256"
 }
 // entity 47
 {
-"model" "xmodel/crate_misc1"
-"origin" "221 1377 256"
-"angles" "0 270 0"
 "classname" "misc_model"
+"origin" "236 1416 256"
+"model" "xmodel/crate_misc1"
 }
 // entity 48
 {
-"angles" "0 250 0"
-"model" "xmodel/crate_misc1"
-"origin" "217 1385 283"
 "classname" "misc_model"
+"angles" "0 270 0"
+"origin" "221 1377 256"
+"model" "xmodel/crate_misc1"
 }
 // entity 49
 {
-"origin" "-451 -879 265"
-"classname" "mp_teamdeathmatch_spawn"
+"classname" "misc_model"
+"origin" "217 1385 283"
+"model" "xmodel/crate_misc1"
+"angles" "0 250 0"
 }
 // entity 50
 {
-"origin" "60 -766 265"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "-451 -879 265"
 }
 // entity 51
 {
-"origin" "-40 -896 265"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "60 -766 265"
 }
 // entity 52
 {
-"origin" "-876 -754 265"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "-40 -896 265"
 }
 // entity 53
 {
-"origin" "-976 -884 265"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "-876 -754 265"
 }
 // entity 54
 {
-"origin" "526 -733 265"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "-976 -884 265"
 }
 // entity 55
 {
-"origin" "426 -863 265"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "526 -733 265"
 }
 // entity 56
 {
-"origin" "-972 -542 264"
-"classname" "mp_deathmatch_spawn"
+"classname" "mp_teamdeathmatch_spawn"
+"origin" "426 -863 265"
 }
 // entity 57
 {
-"origin" "-978 -782 264"
 "classname" "mp_deathmatch_spawn"
+"origin" "-972 -542 264"
 }
 // entity 58
 {
-"origin" "606 -730 264"
 "classname" "mp_deathmatch_spawn"
+"origin" "-978 -782 264"
 }
 // entity 59
 {
-"origin" "-983 1449 264"
 "classname" "mp_deathmatch_spawn"
+"origin" "606 -730 264"
 }
 // entity 60
 {
-"origin" "601 1501 264"
 "classname" "mp_deathmatch_spawn"
+"origin" "-983 1449 264"
 }
 // entity 61
 {
-"origin" "-975 1140 264"
 "classname" "mp_deathmatch_spawn"
+"origin" "601 1501 264"
 }
 // entity 62
 {
-"origin" "609 1192 264"
 "classname" "mp_deathmatch_spawn"
+"origin" "-975 1140 264"
 }
 // entity 63
 {
-"origin" "-921 309 264"
 "classname" "mp_deathmatch_spawn"
+"origin" "609 1192 264"
 }
 // entity 64
 {
-"origin" "663 361 264"
 "classname" "mp_deathmatch_spawn"
+"origin" "-921 309 264"
 }
 // entity 65
 {
-"origin" "-804 1564 264"
-"classname" "mp_teamdeathmatch_spawn"
+"classname" "mp_deathmatch_spawn"
+"origin" "663 361 264"
 }
 // entity 66
 {
-"origin" "-424 1380 264"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "-804 1564 264"
 }
 // entity 67
 {
-"origin" "65 1386 264"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "-424 1380 264"
 }
 // entity 68
 {
-"origin" "602 1455 264"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "65 1386 264"
 }
 // entity 69
 {
-"origin" "444 1382 264"
 "classname" "mp_teamdeathmatch_spawn"
+"origin" "602 1455 264"
+}
+// entity 70
+{
+"classname" "mp_teamdeathmatch_spawn"
+"origin" "444 1382 264"
 }

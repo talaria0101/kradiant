@@ -24,6 +24,7 @@ use kradiant::loader::asset_loader;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
+use winit::dpi::PhysicalPosition;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
@@ -87,6 +88,7 @@ struct AppState {
     needs_redraw: bool,
     last_render_mode: RenderMode,
     cursor_grabbed: bool,
+    ignore_next_cursor_move: bool,
 }
 
 /// Register a texture image with the renderer.
@@ -670,6 +672,7 @@ impl AppState {
             needs_redraw: true,
             last_render_mode,
             cursor_grabbed: false,
+            ignore_next_cursor_move: false,
         }
     }
 
@@ -854,22 +857,11 @@ impl AppState {
         ui::draw_editor(ui, &mut self.editor, delta);
         self.editor.sync_viewports_to_core();
 
-        if self.editor.view3d.wants_cursor_grab {
-            if !self.cursor_grabbed {
-                let _ = self
-                    .window
-                    .set_cursor_grab(winit::window::CursorGrabMode::Locked);
-                self.window.set_cursor_visible(false);
-                self.cursor_grabbed = true;
-            }
+        if self.editor.view3d.right_dragging {
+            self.window.set_cursor_visible(false);
         } else {
-            if self.cursor_grabbed {
-                let _ = self
-                    .window
-                    .set_cursor_grab(winit::window::CursorGrabMode::None);
-                self.window.set_cursor_visible(true);
-                self.cursor_grabbed = false;
-            }
+            self.window.set_cursor_visible(true);
+            self.editor.view3d.last_cursor_pos = None;
         }
 
         self.platform.prepare_render(&mut self.imgui, &self.window);
@@ -971,8 +963,63 @@ impl ApplicationHandler for App {
                 state.needs_redraw = true;
                 state.window.request_redraw();
             }
-            WindowEvent::CursorMoved { .. }
-            | WindowEvent::MouseWheel { .. }
+            WindowEvent::CursorMoved { position, .. } => {
+                if state.ignore_next_cursor_move {
+                    state.ignore_next_cursor_move = false;
+                    state.editor.view3d.last_cursor_pos =
+                        Some([position.x as f32, position.y as f32]);
+                    state.needs_redraw = true;
+                    state.window.request_redraw();
+                    return;
+                }
+
+                if state.editor.view3d.right_dragging {
+                    if let Some([last_x, last_y]) = state.editor.view3d.last_cursor_pos {
+                        state.editor.view3d.accumulated_mouse_delta[0] +=
+                            position.x as f32 - last_x;
+                        state.editor.view3d.accumulated_mouse_delta[1] +=
+                            position.y as f32 - last_y;
+                    }
+
+                    let rect = state.editor.view3d.rect;
+                    let left = rect[0] as f64;
+                    let top = rect[1] as f64;
+                    let right = (rect[0] + rect[2]) as f64;
+                    let bottom = (rect[1] + rect[3]) as f64;
+                    let mut warp_x = position.x;
+                    let mut warp_y = position.y;
+                    let pad = 24.0f64;
+
+                    if position.x <= left {
+                        warp_x = right - pad;
+                    } else if position.x >= right {
+                        warp_x = left + pad;
+                    }
+
+                    if position.y <= top {
+                        warp_y = bottom - pad;
+                    } else if position.y >= bottom {
+                        warp_y = top + pad;
+                    }
+
+                    if (warp_x - position.x).abs() > f64::EPSILON
+                        || (warp_y - position.y).abs() > f64::EPSILON
+                    {
+                        state.ignore_next_cursor_move = true;
+                        let _ = state
+                            .window
+                            .set_cursor_position(PhysicalPosition::new(warp_x, warp_y));
+                        state.editor.view3d.last_cursor_pos =
+                            Some([warp_x as f32, warp_y as f32]);
+                    } else {
+                        state.editor.view3d.last_cursor_pos =
+                            Some([position.x as f32, position.y as f32]);
+                    }
+                }
+                state.needs_redraw = true;
+                state.window.request_redraw();
+            }
+            WindowEvent::MouseWheel { .. }
             | WindowEvent::Touch(_)
             | WindowEvent::TouchpadPressure { .. }
             | WindowEvent::AxisMotion { .. } => {
@@ -980,6 +1027,16 @@ impl ApplicationHandler for App {
                 state.window.request_redraw();
             }
             // Any input/UI event should schedule a redraw; we avoid continuous rendering when idle
+            WindowEvent::MouseInput {
+                button: winit::event::MouseButton::Right,
+                state: winit::event::ElementState::Released,
+                ..
+            } => {
+                state.ignore_next_cursor_move = false;
+                state.needs_redraw = true;
+                state.render();
+                state.needs_redraw = false;
+            }
             WindowEvent::MouseInput { .. }
             | WindowEvent::KeyboardInput { .. }
             | WindowEvent::ModifiersChanged(_) => {
@@ -1021,7 +1078,7 @@ impl ApplicationHandler for App {
     ) {
         if let Some(state) = &mut self.state {
             if let winit::event::DeviceEvent::MouseMotion { delta } = event {
-                if state.cursor_grabbed {
+                if state.editor.view3d.right_dragging {
                     state.editor.view3d.accumulated_mouse_delta[0] += delta.0 as f32;
                     state.editor.view3d.accumulated_mouse_delta[1] += delta.1 as f32;
                     state.needs_redraw = true;

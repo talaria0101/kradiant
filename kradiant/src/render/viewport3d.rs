@@ -655,7 +655,7 @@ impl Viewport3D {
                 }
 
                 self.last_selection_hash = 5382;
-                let prev_load_count = self.cache.map(|c| c.map_load_count).unwrap_or(0);
+                let prev_map_ptr = self.cache.map(|c| c.map_ptr).unwrap_or(0);
 
                 self.cache = Some(View3dCache {
                     map_present,
@@ -666,9 +666,9 @@ impl Viewport3D {
                     view_config_rev,
                 });
 
-                // Auto-frame camera on new map load
+                // Auto-frame camera only when the actual map instance changes.
                 if map_ptr != 0
-                    && map_load_count != prev_load_count  // Only on actual new map, not undo
+                    && map_ptr != prev_map_ptr
                     && bounds_min.x.is_finite()
                     && bounds_max.x.is_finite()
                 {

@@ -17,6 +17,8 @@ pub struct View3D {
     pub core: View3DState,
     pub tex_id: Option<TextureId>,
     pub wants_cursor_grab: bool,
+    pub right_dragging: bool,
+    pub last_cursor_pos: Option<[f32; 2]>,
     pub accumulated_mouse_delta: [f32; 2],
     /// Brushes touched during current selection drag (to avoid toggling multiple times)
     pub selection_drag_touched: Option<HashSet<(usize, usize)>>,
@@ -32,6 +34,8 @@ impl Default for View3D {
             core: View3DState::default(),
             tex_id: None,
             wants_cursor_grab: false,
+            right_dragging: false,
+            last_cursor_pos: None,
             accumulated_mouse_delta: [0.0, 0.0],
             selection_drag_touched: None,
             selection_drag_touched_faces: None,
@@ -111,9 +115,19 @@ impl View3D {
                 ui.invisible_button("##3d_canvas", [w, h]);
                 let canvas_interacting = ui.is_item_hovered() || ui.is_item_active();
 
+                if canvas_interacting && ui.is_mouse_clicked(MouseButton::Right) {
+                    self.right_dragging = true;
+                    self.last_cursor_pos = Some(ui.io().mouse_pos());
+                    self.accumulated_mouse_delta = [0.0, 0.0];
+                }
+                if !ui.is_mouse_down(MouseButton::Right) {
+                    self.right_dragging = false;
+                    self.last_cursor_pos = None;
+                }
+                self.wants_cursor_grab = self.right_dragging;
+
                 if canvas_interacting {
-                    if !ui.is_mouse_down(MouseButton::Right) {
-                        self.wants_cursor_grab = false;
+                    if !self.right_dragging {
                         self.accumulated_mouse_delta = [0.0, 0.0];
                     }
 
@@ -126,9 +140,7 @@ impl View3D {
                     const TURN_SENS: f32 = 0.010;
                     const PITCH_SENS: f32 = 0.010;
                     const MOVE_SENS: f32 = 0.030;
-                    if ui.is_mouse_down(MouseButton::Right) {
-                        self.wants_cursor_grab = true;
-
+                    if self.right_dragging {
                         let dx = self.accumulated_mouse_delta[0];
                         let dy = self.accumulated_mouse_delta[1];
                         self.accumulated_mouse_delta = [0.0, 0.0];
