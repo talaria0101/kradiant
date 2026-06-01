@@ -73,6 +73,14 @@ fn solid_box_lit_vertices_from_base(base: Vec3, size: Vec3) -> Vec<LitVertex> {
     out
 }
 
+fn resolved_arrow_length(style: &crate::editor::config::EntityDrawStyle, fallback: f32) -> f32 {
+    if style.arrow_length > 0.0 {
+        style.arrow_length
+    } else {
+        fallback
+    }
+}
+
 pub struct Viewport3D {
     line_vertices: Vec<Vec3>,
     entity_line_batches: Vec<([f32; 4], Vec<Vec3>)>,
@@ -289,10 +297,14 @@ impl Viewport3D {
                                         if let Some(angles) = angles.filter(|a| {
                                             a.length_squared() > 1.0e-6
                                         }) {
+                                            let arrow_len = resolved_arrow_length(
+                                                &style,
+                                                Vec3::from_array(style.size).length(),
+                                            );
                                             lines.extend(crate::core_util::arrow_line_vertices(
                                                 pivot,
                                                 crate::core_util::entity_angles_forward(angles),
-                                                Vec3::from_array(style.size).length(),
+                                                arrow_len,
                                                 Vec3::Z,
                                             ));
                                         }
@@ -332,6 +344,10 @@ impl Viewport3D {
                                             if let Some(angles) = angles.filter(|a| {
                                                 a.length_squared() > 1.0e-6
                                             }) {
+                                                let arrow_len = resolved_arrow_length(
+                                                    &style,
+                                                    model.radius,
+                                                );
                                                 self.entity_line_batches.push((
                                                     style.color,
                                                     crate::core_util::arrow_line_vertices(
@@ -339,7 +355,7 @@ impl Viewport3D {
                                                         crate::core_util::entity_angles_forward(
                                                             angles,
                                                         ),
-                                                        model.radius,
+                                                        arrow_len,
                                                         Vec3::Z,
                                                     ),
                                                 ));
@@ -358,6 +374,10 @@ impl Viewport3D {
                                             if let Some(angles) = angles.filter(|a| {
                                                 a.length_squared() > 1.0e-6
                                             }) {
+                                                let arrow_len = resolved_arrow_length(
+                                                    &style,
+                                                    model.radius,
+                                                );
                                                 self.entity_line_batches.push((
                                                     style.color,
                                                     crate::core_util::arrow_line_vertices(
@@ -365,7 +385,7 @@ impl Viewport3D {
                                                         crate::core_util::entity_angles_forward(
                                                             angles,
                                                         ),
-                                                        model.radius,
+                                                        arrow_len,
                                                         Vec3::Z,
                                                     ),
                                                 ));
@@ -374,6 +394,18 @@ impl Viewport3D {
                                     }
                                 }
                                 EntityDrawKind::Hidden => {}
+                            }
+
+                            if ent.classname == "misc_model" && model_ref.is_some() {
+                                let proxy_lines = crate::core_util::box_line_vertices_from_base(
+                                    pivot,
+                                    Vec3::splat(32.0),
+                                    None,
+                                );
+                                self.entity_line_batches.push((
+                                    editor.entity_drawing.default_with_model.color,
+                                    proxy_lines,
+                                ));
                             }
                         }
 

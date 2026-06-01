@@ -173,7 +173,15 @@ impl Viewport2D {
                 }
             }
 
-            let axis = editor.view2d.ortho_axis;
+        let axis = editor.view2d.ortho_axis;
+        let resolved_arrow_length =
+            |style: &crate::editor::config::EntityDrawStyle, fallback: f32| {
+                if style.arrow_length > 0.0 {
+                    style.arrow_length
+                } else {
+                    fallback
+                }
+            };
 
             // Draw grid under map lines.
             const MIN_MINOR_STEP_PX: f32 = 1.0;
@@ -453,7 +461,10 @@ impl Viewport2D {
                                                 arrow_line_vertices(
                                                     pivot,
                                                     entity_angles_forward(angles),
-                                                    Vec3::from_array(style.size).length(),
+                                                    resolved_arrow_length(
+                                                        &style,
+                                                        Vec3::from_array(style.size).length(),
+                                                    ),
                                                     Vec3::Z,
                                                 ),
                                             ));
@@ -482,7 +493,10 @@ impl Viewport2D {
                                                 arrow_line_vertices(
                                                     pivot,
                                                     entity_angles_forward(angles),
-                                                    Vec3::from_array(style.size).length(),
+                                                    resolved_arrow_length(
+                                                        &style,
+                                                        Vec3::from_array(style.size).length(),
+                                                    ),
                                                     Vec3::Z,
                                                 ),
                                             ));
@@ -507,7 +521,7 @@ impl Viewport2D {
                                                     lines.extend(project_line_batch(arrow_line_vertices(
                                                         model_origin,
                                                         entity_angles_forward(angles),
-                                                        model.radius,
+                                                        resolved_arrow_length(&style, model.radius),
                                                         Vec3::Z,
                                                     )));
                                                 }
@@ -530,16 +544,30 @@ impl Viewport2D {
                                                     lines.extend(project_line_batch(arrow_line_vertices(
                                                         model_origin,
                                                         entity_angles_forward(angles),
-                                                        model.radius,
+                                                        resolved_arrow_length(&style, model.radius),
                                                         Vec3::Z,
                                                     )));
                                                 }
                                             }
                                             self.entity_line_batches.push((style.color, lines));
                                         }
-                                    }
-                                EntityDrawKind::Hidden => {}
                                 }
+                                EntityDrawKind::Hidden => {}
+                            }
+
+                            if entity.classname == "misc_model" && entity.model.is_some() {
+                                let lines = project_line_batch(
+                                    crate::core_util::box_line_vertices_from_base(
+                                        pivot,
+                                        Vec3::splat(32.0),
+                                        None,
+                                    ),
+                                );
+                                self.entity_line_batches.push((
+                                    editor.entity_drawing.default_with_model.color,
+                                    lines,
+                                ));
+                            }
 
                                 if editor.config.view.show.models {
                                     if let Some(model) = entity.model.as_ref() {
@@ -555,7 +583,7 @@ impl Viewport2D {
                                                     arrow_line_vertices(
                                                         model_origin,
                                                         entity_angles_forward(angles),
-                                                        model.radius,
+                                                        resolved_arrow_length(&style, model.radius),
                                                         Vec3::Z,
                                                     ),
                                                 ));
