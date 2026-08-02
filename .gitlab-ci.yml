@@ -19,7 +19,7 @@ include:
 
 rust-test:
   stage: test
-  image: rust:1.94.0
+  image: rust:1.95.0
   script:
     # - rustup default stable || true
     - apt update
