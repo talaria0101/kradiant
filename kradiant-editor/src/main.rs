@@ -11,7 +11,6 @@ use std::time::Instant;
 use dear_imgui_glow::GlowRenderer;
 use dear_imgui_rs::{Context, FontSource, TextureFormat};
 use dear_imgui_winit::WinitPlatform;
-use glam::Vec3;
 use glow::HasContext;
 use glutin::config::ConfigTemplateBuilder;
 use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext, Version};
@@ -19,8 +18,6 @@ use glutin::display::GetGlDisplay;
 use glutin::prelude::*;
 use glutin::surface::{SurfaceAttributesBuilder, WindowSurface};
 use glutin_winit::DisplayBuilder;
-use kradiant::assets::AssetDbOptions;
-use kradiant::loader::asset_loader;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -87,7 +84,7 @@ struct AppState {
     vp3d: Viewport3D,
     needs_redraw: bool,
     last_render_mode: RenderMode,
-    cursor_grabbed: bool,
+    // cursor_grabbed: bool,
     ignore_next_cursor_move: bool,
 }
 
@@ -226,10 +223,7 @@ fn compile_wire_shader(
 ) -> (glow::Program, glow::UniformLocation, glow::UniformLocation) {
     unsafe {
         let vert = gl.create_shader(glow::VERTEX_SHADER).unwrap();
-        gl.shader_source(
-            vert,
-            include_str!("glsl/wire_vert.glsl"),
-        );
+        gl.shader_source(vert, include_str!("glsl/wire_vert.glsl"));
         gl.compile_shader(vert);
 
         if !gl.get_shader_compile_status(vert) {
@@ -240,10 +234,7 @@ fn compile_wire_shader(
         }
 
         let frag = gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
-        gl.shader_source(
-            frag,
-            include_str!("glsl/wire_frag.glsl"),
-        );
+        gl.shader_source(frag, include_str!("glsl/wire_frag.glsl"));
         gl.compile_shader(frag);
 
         if !gl.get_shader_compile_status(frag) {
@@ -570,8 +561,7 @@ impl AppState {
             for entry in log {
                 if entry.starts_with("Fail") {
                     editor.console.error(entry);
-                }
-                else {
+                } else {
                     editor.console.info(entry);
                 }
             }
@@ -671,7 +661,7 @@ impl AppState {
             vp3d,
             needs_redraw: true,
             last_render_mode,
-            cursor_grabbed: false,
+            // cursor_grabbed: false,
             ignore_next_cursor_move: false,
         }
     }
@@ -769,17 +759,13 @@ impl AppState {
 
         let lit_program = unsafe {
             let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
-            self.gl.shader_source(
-                vert,
-                include_str!("glsl/lit_vert.glsl"),
-            );
+            self.gl
+                .shader_source(vert, include_str!("glsl/lit_vert.glsl"));
             self.gl.compile_shader(vert);
 
             let frag = self.gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
-            self.gl.shader_source(
-                frag,
-                include_str!("glsl/lit_frag.glsl"),
-            );
+            self.gl
+                .shader_source(frag, include_str!("glsl/lit_frag.glsl"));
             self.gl.compile_shader(frag);
 
             let prog = self.gl.create_program().unwrap();
@@ -810,17 +796,13 @@ impl AppState {
 
         let tex_program = unsafe {
             let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
-            self.gl.shader_source(
-                vert,
-                include_str!("glsl/tex_vert.glsl")
-            );
+            self.gl
+                .shader_source(vert, include_str!("glsl/tex_vert.glsl"));
             self.gl.compile_shader(vert);
 
             let frag = self.gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
-            self.gl.shader_source(
-                frag,
-                include_str!("glsl/tex_frag.glsl")
-            );
+            self.gl
+                .shader_source(frag, include_str!("glsl/tex_frag.glsl"));
             self.gl.compile_shader(frag);
 
             let prog = self.gl.create_program().unwrap();
@@ -974,13 +956,6 @@ impl ApplicationHandler for App {
                 }
 
                 if state.editor.view3d.right_dragging {
-                    if let Some([last_x, last_y]) = state.editor.view3d.last_cursor_pos {
-                        state.editor.view3d.accumulated_mouse_delta[0] +=
-                            position.x as f32 - last_x;
-                        state.editor.view3d.accumulated_mouse_delta[1] +=
-                            position.y as f32 - last_y;
-                    }
-
                     let rect = state.editor.view3d.rect;
                     let left = rect[0] as f64;
                     let top = rect[1] as f64;
@@ -1009,11 +984,6 @@ impl ApplicationHandler for App {
                         let _ = state
                             .window
                             .set_cursor_position(PhysicalPosition::new(warp_x, warp_y));
-                        state.editor.view3d.last_cursor_pos =
-                            Some([warp_x as f32, warp_y as f32]);
-                    } else {
-                        state.editor.view3d.last_cursor_pos =
-                            Some([position.x as f32, position.y as f32]);
                     }
                 }
                 state.needs_redraw = true;
@@ -1037,11 +1007,15 @@ impl ApplicationHandler for App {
                 state.render();
                 state.needs_redraw = false;
             }
-            WindowEvent::MouseInput { .. }
-            | WindowEvent::KeyboardInput { .. }
-            | WindowEvent::ModifiersChanged(_) => {
+            WindowEvent::MouseInput { .. } | WindowEvent::ModifiersChanged(_) => {
                 state.needs_redraw = true;
                 state.render();
+                state.needs_redraw = false;
+            }
+            WindowEvent::KeyboardInput { .. } => {
+                state.needs_redraw = true;
+                state.render();
+                state.render(); // TODO: find a better approach maybe later
                 state.needs_redraw = false;
             }
             WindowEvent::Focused(_)

@@ -1,16 +1,19 @@
 use dear_imgui_rs::Ui;
 use kradiant::editing::{self, Aabb};
+use kradiant::editor::config::EntityDef;
+use kradiant::editor::viewport::Ortho;
 use kradiant::loader::map_loader;
 use kradiant::map::Map;
 use num_traits::{NumCast, ToPrimitive};
+use std::collections::BTreeMap;
 use std::fs::create_dir_all;
 use std::io;
 use std::path::PathBuf;
 
+use crate::ui::EditorState;
 use crate::ui::console::ConsoleLogger;
-use crate::ui::{EditorState, Ortho};
 use glam::{Vec2, Vec3};
-use kradiant::editor::selection::{FaceSelection, PatchVertexSelection};
+use kradiant::editor::selection::{EdgeSelection, FaceSelection, PatchVertexSelection};
 use kradiant::editor::undo::UndoRedo;
 
 pub fn get_config_dir() -> io::Result<PathBuf> {
@@ -184,8 +187,9 @@ pub fn new_map(state: &mut EditorState) {
     state.core.bump_revision();
     state.core.selected_brushes.clear();
     state.core.selected_faces.clear();
+    state.core.selected_edges.clear();
     state.core.selected_patch_vertices.clear();
-    state.core.selected_entity = None;
+    state.core.selected_entities.clear();
     state.core.undo.clear();
     state.core.map_load_count = state.core.map_load_count.wrapping_add(1);
     log_info!(state.console, "New map");
@@ -211,8 +215,9 @@ pub fn open_map(state: &mut EditorState) {
         perform_open_map(
             &mut state.core.selected_brushes,
             &mut state.core.selected_faces,
+            &mut state.core.selected_edges,
             &mut state.core.selected_patch_vertices,
-            &mut state.core.selected_entity,
+            &mut state.core.selected_entities,
             &mut state.core.map_path,
             &mut state.core.map,
             &mut state.core.map_revision,
@@ -229,8 +234,9 @@ pub fn open_recent_map(state: &mut EditorState, path: &str) {
     perform_open_map(
         &mut state.core.selected_brushes,
         &mut state.core.selected_faces,
+        &mut state.core.selected_edges,
         &mut state.core.selected_patch_vertices,
-        &mut state.core.selected_entity,
+        &mut state.core.selected_entities,
         &mut state.core.map_path,
         &mut state.core.map,
         &mut state.core.map_revision,
@@ -245,8 +251,9 @@ pub fn open_recent_map(state: &mut EditorState, path: &str) {
 fn perform_open_map(
     selected_brushes: &mut Vec<(usize, usize)>,
     selected_faces: &mut Vec<FaceSelection>,
+    selected_edges: &mut Vec<EdgeSelection>,
     selected_patch_vertices: &mut Vec<PatchVertexSelection>,
-    selected_entity: &mut Option<usize>,
+    selected_entities: &mut Vec<usize>,
     map_path: &mut String,
     map: &mut Option<Map>,
     map_revision: &mut u64,
@@ -260,8 +267,9 @@ fn perform_open_map(
         Ok(loaded_map) => {
             selected_brushes.clear();
             selected_faces.clear();
+            selected_edges.clear();
             selected_patch_vertices.clear();
-            *selected_entity = None;
+            selected_entities.clear();
             *map_path = path.to_string();
             *map = Some(loaded_map);
             *map_revision = map_revision.wrapping_add(1);
@@ -339,44 +347,6 @@ fn perform_save_map(state: &mut EditorState, path: &PathBuf) {
     }
 }
 
-pub fn click_in_selection_aabb(
-    selected_brushes: &[(usize, usize)],
-    map: &kradiant::map::Map,
-    pt: Vec2,
-    ortho: Ortho,
-) -> bool {
-    if selected_brushes.is_empty() {
-        return false;
-    }
-
-    let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
-    let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
-    let mut any = false;
-
-    for &(entity_idx, brush_idx) in selected_brushes {
-        let Some(entity) = map.entities.get(entity_idx) else {
-            continue;
-        };
-        let Some(brush) = entity.brushes.get(brush_idx) else {
-            continue;
-        };
-        min = min.min(brush.aabb.min);
-        max = max.max(brush.aabb.max);
-        any = true;
-    }
-    if !any {
-        return false;
-    }
-
-    let (min_x, max_x, min_y, max_y) = match ortho {
-        Ortho::XY => (min.x, max.x, -max.y, -min.y),
-        Ortho::XZ => (min.x, max.x, -max.z, -min.z),
-        Ortho::YZ => (min.y, max.y, -max.z, -min.z),
-    };
-
-    pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y
-}
-
 use crate::ui::AxisLock;
 pub fn drag_delta_to_3d(d: Vec2, axis: Ortho, lock: &AxisLock) -> Vec3 {
     match axis {
@@ -397,11 +367,6 @@ pub fn drag_delta_to_3d(d: Vec2, axis: Ortho, lock: &AxisLock) -> Vec3 {
             Vec3 { x: 0.0, y, z }
         }
     }
-}
-
-pub fn div_ceil_f32(a: f32, b: f32) -> f32 {
-    debug_assert!(b > 0.0);
-    -((-a).div_euclid(b))
 }
 
 pub fn normalize_depth(v: f32, fallback: f32) -> f32 {
@@ -608,4 +573,44 @@ pub fn center_next(ui: &Ui, item_width: f32) {
 pub fn other_corners(tl: [f32; 2], br: [f32; 2]) -> ([f32; 2], [f32; 2]) {
     ([br[0], tl[1]], [tl[0], br[1]])
 }
+/*
+pub fn get_ent_categories(ents: Vec<EntityDef>) -> BTreeMap<String, Vec<EntityDef>>
+{
+    let mut map: BTreeMap<String, Vec<EntityDef>> = BTreeMap::new();
+    for ent in ents {
+        let (cat, e) = {
+            let split = ent.class.split_once("_").unwrap();
+            (split.0, split.1.to_string())
+        };
+        if map.contains_key(cat) {
+            if let Some(cat_vec) = map.get_mut(cat) {
+                if !cat_vec.contains(&(e, ent)) {
+                    cat_vec.push((e, ent));
+                }
+            }
+        }
+        else {
+            map.insert(cat.to_string(), vec![(e, ent)]);
+        }
+    }
 
+    map
+}*/
+
+pub fn get_ent_categories(ents: Vec<EntityDef>) -> BTreeMap<String, Vec<(String, EntityDef)>> {
+    let mut map: BTreeMap<String, Vec<(String, EntityDef)>> = BTreeMap::new();
+    for ent in ents {
+        let Some((cat, e)) = ent.class.split_once('_') else {
+            continue;
+        };
+        let cat = cat.to_string();
+        let e = e.to_string();
+
+        let cat_vec = map.entry(cat).or_insert_with(Vec::new);
+        if !cat_vec.iter().any(|(name, _)| name == &e) {
+            cat_vec.push((e, ent));
+        }
+    }
+
+    map
+}

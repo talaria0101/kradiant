@@ -57,38 +57,38 @@ impl RenderBackend<'_> {
         }
     }
 
-    /*pub unsafe fn draw_triangles(
-         *        &self,
-         *        vertices: &[Vec3],
-         *        color: [f32; 4],
-         *        mvp: glam::Mat4,
-         *    ) {
-         *        if vertices.is_empty() {
-         *            return;
+    pub unsafe fn draw_triangles(
+        &self,
+        vertices: &[Vec3],
+        color: [f32; 4],
+        mvp: glam::Mat4,
+    ) {
+        if vertices.is_empty() {
+            return;
+        }
+
+        unsafe {
+            self.gl.use_program(Some(self.wire_program)); // fine for now
+            self.gl
+                .uniform_matrix_4_f32_slice(Some(&self.mvp_loc), false, &mvp.to_cols_array());
+            self.gl.uniform_4_f32_slice(Some(&self.color_loc), &color);
+
+            self.gl.bind_vertex_array(Some(self.vao));
+            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+
+            self.gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(vertices),
+                glow::STREAM_DRAW,
+            );
+
+            self.gl
+                .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
+            self.gl.enable_vertex_attrib_array(0);
+
+            self.gl.draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
+        }
     }
-
-    unsafe {
-    self.gl.use_program(Some(self.wire_program)); // fine for now
-    self.gl
-    .uniform_matrix_4_f32_slice(Some(&self.mvp_loc), false, &mvp.to_cols_array());
-    self.gl.uniform_4_f32_slice(Some(&self.color_loc), &color);
-
-    self.gl.bind_vertex_array(Some(self.vao));
-    self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-
-    self.gl.buffer_data_u8_slice(
-        glow::ARRAY_BUFFER,
-        bytemuck::cast_slice(vertices),
-        glow::STREAM_DRAW,
-        );
-
-        self.gl
-        .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
-        self.gl.enable_vertex_attrib_array(0);
-
-        self.gl.draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
-    }
-    }*/
 
     pub unsafe fn draw_triangles_lit(
         &self,

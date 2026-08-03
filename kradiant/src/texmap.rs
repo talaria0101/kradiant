@@ -54,6 +54,10 @@ impl FaceUvMapper {
     }
 
     /// Compute UVs in "repeat" space (not clamped to 0..1).
+    ///
+    /// Matches Q3Radiant `Face_TextureVectors`: world coordinates are projected
+    /// onto the texture axes, so texture alignment is relative to the world grid
+    /// (not the face origin), exactly like Radiant/CoDRadiant.
     pub fn uv(&self, point: Vec3) -> Vec2 {
         // Scale makes texture appear smaller/larger on surface:
         // scale=0.25 means texture is 1/4 size, so 4× more repeats
@@ -107,14 +111,17 @@ pub fn q3_texture_axes_from_normal(n: Vec3) -> (Vec3, Vec3) {
 }
 
 /// Rotate the (S,T) texture axes in their plane by `angle_rad`.
+///
+/// Matches Q3Radiant `Face_TextureVectors` rotation:
+/// `S' = cos*S - sin*T`, `T' = sin*S + cos*T`.
 pub fn rotate_texture_axes(s: Vec3, t: Vec3, angle_rad: f32) -> (Vec3, Vec3) {
     if angle_rad.abs() < 1e-6 {
         return (s, t);
     }
     let c = angle_rad.cos();
     let sn = angle_rad.sin();
-    let s2 = s * c + t * sn;
-    let t2 = t * c - s * sn;
+    let s2 = s * c - t * sn;
+    let t2 = s * sn + t * c;
     (s2, t2)
 }
 

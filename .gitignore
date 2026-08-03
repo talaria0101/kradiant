@@ -2,3 +2,5 @@
 *__old
 kradiant_editor*.ini*
 *~
+.env
+.smallcode

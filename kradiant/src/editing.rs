@@ -1,13 +1,68 @@
+use crate::editor::config::{EntityDef, EntityDrawAnchor, EntityDrawKind, EntityDrawStyle};
+use crate::editor::selection::EdgeSelection;
 use crate::map::{
     Brush, BrushContent, BrushId, Entity, EntityId, Face, Map, SurfaceFlags, TextureParams,
 };
 use crate::texmap::face_plane_normal;
 use crate::{Quat, Vec3};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AffineScale {
     pub anchor: Vec3,
     pub scale: Vec3,
+}
+
+fn entity_pick_bounds(entity: &Entity, origin: Vec3, style: &EntityDrawStyle) -> (Vec3, Vec3) {
+    if matches!(
+        style.kind,
+        EntityDrawKind::ModelBounds | EntityDrawKind::ModelWireframe
+    ) {
+        if let Some(model) = &entity.model {
+            let model_origin = origin + model.origin;
+            return (model_origin + model.mins, model_origin + model.maxs);
+        }
+    }
+
+    // Match the drawn proxy box orientation: enclose the rotated corners so the
+    // pick area tracks the box (Center spins about origin, Base about Z/2).
+    let size = Vec3::from_array(style.size);
+    let half_size = size * 0.5;
+    let box_center = match style.anchor {
+        EntityDrawAnchor::Center => origin,
+        EntityDrawAnchor::Base => origin + Vec3::new(0.0, 0.0, half_size.z),
+    };
+    let angles = entity
+        .properties
+        .get("angles")
+        .and_then(|s| crate::core_util::vec3_from_whitespace_triplet(s));
+    let rot = angles.map(crate::core_util::entity_angles_to_quat);
+    let corners = crate::core_util::oriented_box_corners(box_center, half_size, rot);
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for c in corners {
+        min = min.min(c);
+        max = max.max(c);
+    }
+    (min, max)
+}
+
+/// Resolve the pick bounds for a ray test against an entity: start from the
+/// style-resolved bounds, then union the loaded model's world-space bounds so
+/// the pick box covers the model regardless of the style's anchor/kind.
+fn entity_ray_pick_bounds(entity: &Entity, origin: Vec3, style: &EntityDrawStyle) -> (Vec3, Vec3) {
+    // Entities with a loaded model are pickable exactly within their rotated
+    // bounds (the visible wireframe box), not the unrotated proxy/box position.
+    if let Some(model) = &entity.model {
+        let model_origin = origin + model.origin;
+        let angles = entity
+            .properties
+            .get("angles")
+            .and_then(|s| crate::core_util::vec3_from_whitespace_triplet(s));
+        let rot = angles.map(crate::core_util::entity_angles_to_quat);
+        return crate::core_util::model_bounds_aabb(model_origin, model.mins, model.maxs, rot);
+    }
+    entity_pick_bounds(entity, origin, style)
 }
 
 impl AffineScale {
@@ -895,7 +950,7 @@ pub fn pick_convex_brush_by_ray(
     ray_dir: Vec3,
     mask: PickMask,
 ) -> Option<(usize, usize)> {
-    pick_brush_by_ray(map, ray_origin, ray_dir, mask)
+    pick_brush_by_ray(map, ray_origin, ray_dir, mask, None)
 }
 
 pub fn pick_convex_face_by_ray(
@@ -983,11 +1038,19 @@ pub fn pick_brush_by_ray(
     ray_origin: Vec3,
     ray_dir: Vec3,
     mask: PickMask,
+    exclude: Option<&HashSet<(usize, usize)>>,
 ) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize, f32)> = None;
 
     for (entity_index, entity) in map.entities.iter_mut().enumerate() {
         for (brush_index, brush) in entity.brushes.iter_mut().enumerate() {
+            // Skip excluded brushes
+            if let Some(exclude_set) = exclude {
+                if exclude_set.contains(&(entity_index, brush_index)) {
+                    continue;
+                }
+            }
+
             match &mut brush.content {
                 BrushContent::Convex(_) => {
                     if !mask.contains(PickMask::CONVEX) {
@@ -1072,6 +1135,457 @@ pub fn pick_brush_by_ray(
     best.map(|(e, b, _)| (e, b))
 }
 
+/// Pick an edge by ray casting in 3D space.
+/// Returns the closest edge (as face pair indices) that the ray intersects.
+pub fn pick_edge_by_ray(
+    map: &mut Map,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    mask: PickMask,
+    exclude: Option<&HashSet<(usize, usize)>>,
+) -> Option<(usize, usize, usize, usize)> {
+    let mut best: Option<(usize, usize, usize, usize, f32)> = None;
+    const EDGE_PICK_THRESHOLD: f32 = 4.0; // Distance threshold for edge picking in world units
+
+    for (entity_index, entity) in map.entities.iter_mut().enumerate() {
+        for (brush_index, brush) in entity.brushes.iter_mut().enumerate() {
+            // Skip excluded brushes
+            if let Some(exclude_set) = exclude {
+                if exclude_set.contains(&(entity_index, brush_index)) {
+                    continue;
+                }
+            }
+
+            match &mut brush.content {
+                BrushContent::Convex(_) => {
+                    if !mask.contains(PickMask::CONVEX) {
+                        continue;
+                    }
+                    if brush.is_clip() && !mask.contains(PickMask::CLIP) {
+                        continue;
+                    }
+
+                    let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
+                        continue;
+                    };
+
+                    // First check AABB intersection
+                    let Some((_t_enter, t_exit)) =
+                        ray_aabb_intersection(aabb.min, aabb.max, ray_origin, ray_dir)
+                    else {
+                        continue;
+                    };
+                    if t_exit < 0.0 {
+                        continue;
+                    }
+
+                    // Find all edges in this brush
+                    for face_a_idx in 0..polys.len() {
+                        for face_b_idx in face_a_idx + 1..polys.len() {
+                            if let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
+                                polys, face_a_idx, face_b_idx,
+                            )
+                            {
+                                let edge_dir = edge_end - edge_start;
+                                let edge_len = edge_dir.length();
+                                if edge_len < 1e-6 {
+                                    continue;
+                                }
+                                let edge_dir = edge_dir / edge_len;
+
+                                // Closest distance between ray and finite segment
+                                // Ray: R(t) = ray_origin + t * ray_dir, t >= 0
+                                // Segment: S(s) = edge_start + s * edge_dir, 0 <= s <= edge_len
+                                let w0 = edge_start - ray_origin;
+                                let b = ray_dir.dot(edge_dir); // cos(theta)
+                                let d = ray_dir.dot(w0);
+                                let e = edge_dir.dot(w0);
+                                let denom = 1.0 - b * b; // 1 - cos^2 = sin^2
+
+                                let (mut t_ray, mut s_edge) = if denom > 1e-12 {
+                                    // Non-parallel lines
+                                    let t = (b * e - d) / denom;
+                                    let s = (e - b * d) / denom;
+                                    (t, s)
+                                } else {
+                                    // Parallel lines: closest point on segment to ray
+                                    let s = (-e).clamp(0.0, edge_len);
+                                    let closest_on_seg = edge_start + edge_dir * s;
+                                    let t = ray_dir.dot(closest_on_seg - ray_origin);
+                                    (t, s)
+                                };
+
+                                // Clamp parameters
+                                t_ray = t_ray.max(0.0);
+                                s_edge = s_edge.clamp(0.0, edge_len);
+
+                                // If segment parameter was clamped to endpoint, recompute optimal ray parameter
+                                let clamped_at_start = s_edge == 0.0 && e < 0.0;
+                                let clamped_at_end = s_edge == edge_len && e > edge_len;
+                                if clamped_at_start || clamped_at_end {
+                                    let closest_on_seg = edge_start + edge_dir * s_edge;
+                                    t_ray = ray_dir.dot(closest_on_seg - ray_origin).max(0.0);
+                                }
+
+                                let closest_on_ray = ray_origin + ray_dir * t_ray;
+                                let closest_on_seg = edge_start + edge_dir * s_edge;
+                                let dist = (closest_on_ray - closest_on_seg).length();
+
+                                if dist > EDGE_PICK_THRESHOLD {
+                                    continue;
+                                }
+
+                                // Check if this is the closest edge so far
+                                match best {
+                                    None => {
+                                        best = Some((
+                                            entity_index,
+                                            brush_index,
+                                            face_a_idx,
+                                            face_b_idx,
+                                            dist,
+                                        ))
+                                    }
+                                    Some((_, _, _, _, best_dist)) if dist < best_dist => {
+                                        best = Some((
+                                            entity_index,
+                                            brush_index,
+                                            face_a_idx,
+                                            face_b_idx,
+                                            dist,
+                                        ))
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                BrushContent::Patch(_) => {
+                    // Patches don't have traditional edges, skip for now
+                    continue;
+                }
+            }
+        }
+    }
+
+    best.map(|(e, b, fa, fb, _)| (e, b, fa, fb))
+}
+
+pub fn pick_ent_by_ray(
+    map: &mut Map,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    config: &crate::editor::config::EntityDrawingConfig,
+    exclude: Option<&HashSet<usize>>,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+
+    for (entity_index, entity) in map.entities.iter_mut().enumerate() {
+        if entity_index == 0 {
+            continue; // Skip worldspawn
+        }
+        if let Some(exclude_set) = exclude {
+            if exclude_set.contains(&entity_index) {
+                continue;
+            }
+        }
+
+        let origin_str = entity.properties.get("origin");
+        let origin = if let Some(s) = origin_str {
+            crate::core_util::origin_to_vec3(s)
+        } else {
+            continue; // Need an origin to be picked this way
+        };
+
+        let classname = &entity.classname;
+        let has_model = entity.model.is_some();
+        let style = config.resolve(classname, has_model);
+
+        if matches!(style.kind, EntityDrawKind::Hidden) {
+            continue;
+        }
+
+        let (min, max) = entity_ray_pick_bounds(entity, origin, &style);
+
+        if let Some((t_enter, t_exit)) = ray_aabb_intersection(min, max, ray_origin, ray_dir) {
+            if t_exit >= 0.0 {
+                let t = if t_enter >= 0.0 { t_enter } else { 0.0 };
+                match best {
+                    None => best = Some((entity_index, t)),
+                    Some((_, best_t)) if t < best_t => best = Some((entity_index, t)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    best.map(|(e, _)| e)
+}
+
+/// Unified picking function that picks either a brush or entity, whichever is closer to the ray origin.
+/// Returns Some(Ok((entity_idx, brush_idx))) for brush hit, Some(Err(entity_idx)) for entity hit, or None for no hit.
+pub fn pick_brush_or_ent_by_ray(
+    map: &mut Map,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    mask: PickMask,
+    config: &crate::editor::config::EntityDrawingConfig,
+    exclude_brushes: Option<&HashSet<(usize, usize)>>,
+    exclude_entities: Option<&HashSet<usize>>,
+) -> Option<Result<(usize, usize), usize>> {
+    let mut best_brush: Option<(usize, usize, f32)> = None;
+    let mut best_entity: Option<(usize, f32)> = None;
+
+    // Pick brushes
+    for (entity_index, entity) in map.entities.iter_mut().enumerate() {
+        for (brush_index, brush) in entity.brushes.iter_mut().enumerate() {
+            if let Some(exclude_set) = exclude_brushes {
+                if exclude_set.contains(&(entity_index, brush_index)) {
+                    continue;
+                }
+            }
+
+            match &mut brush.content {
+                BrushContent::Convex(_) => {
+                    if !mask.contains(PickMask::CONVEX) {
+                        continue;
+                    }
+                    if brush.is_clip() && !mask.contains(PickMask::CLIP) {
+                        continue;
+                    }
+
+                    let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
+                        continue;
+                    };
+                    let Some((t_enter, t_exit)) =
+                        ray_aabb_intersection(aabb.min, aabb.max, ray_origin, ray_dir)
+                    else {
+                        continue;
+                    };
+                    if t_exit < 0.0 {
+                        continue;
+                    }
+
+                    if let Some((_, _, best_t)) = best_brush {
+                        if t_enter > best_t {
+                            continue;
+                        }
+                    }
+
+                    let Some(t) = ray_polys_first_hit(polys, ray_origin, ray_dir) else {
+                        continue;
+                    };
+                    if t >= 0.0 {
+                        match best_brush {
+                            None => best_brush = Some((entity_index, brush_index, t)),
+                            Some((_, _, best_t)) if t < best_t => {
+                                best_brush = Some((entity_index, brush_index, t))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                BrushContent::Patch(patch) => {
+                    if !mask.contains(PickMask::PATCH) {
+                        continue;
+                    }
+
+                    let Some((mesh, patch_aabb, _edges)) = patch.get_mesh_aabb_wire() else {
+                        continue;
+                    };
+                    brush.aabb = patch_aabb.clone();
+
+                    let Some((t_enter, t_exit)) =
+                        ray_aabb_intersection(patch_aabb.min, patch_aabb.max, ray_origin, ray_dir)
+                    else {
+                        continue;
+                    };
+                    if t_exit < 0.0 {
+                        continue;
+                    }
+                    if let Some((_, _, best_t)) = best_brush {
+                        if t_enter > best_t {
+                            continue;
+                        }
+                    }
+
+                    let Some(t) = ray_patch_mesh_first_hit(mesh, ray_origin, ray_dir) else {
+                        continue;
+                    };
+                    if t >= 0.0 {
+                        match best_brush {
+                            None => best_brush = Some((entity_index, brush_index, t)),
+                            Some((_, _, best_t)) if t < best_t => {
+                                best_brush = Some((entity_index, brush_index, t))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Pick entities
+    for (entity_index, entity) in map.entities.iter_mut().enumerate() {
+        if entity_index == 0 {
+            continue; // Skip worldspawn
+        }
+        if let Some(exclude_set) = exclude_entities {
+            if exclude_set.contains(&entity_index) {
+                continue;
+            }
+        }
+
+        let origin_str = entity.properties.get("origin");
+        let origin = if let Some(s) = origin_str {
+            crate::core_util::origin_to_vec3(s)
+        } else {
+            continue; // Need an origin to be picked this way
+        };
+
+        let classname = &entity.classname;
+        let has_model = entity.model.is_some();
+        let style = config.resolve(classname, has_model);
+
+        if matches!(style.kind, EntityDrawKind::Hidden) {
+            continue;
+        }
+
+        let (min, max) = entity_ray_pick_bounds(entity, origin, &style);
+
+        if let Some((t_enter, t_exit)) = ray_aabb_intersection(min, max, ray_origin, ray_dir) {
+            if t_exit >= 0.0 {
+                let t = if t_enter >= 0.0 { t_enter } else { 0.0 };
+                match best_entity {
+                    None => best_entity = Some((entity_index, t)),
+                    Some((_, best_t)) if t < best_t => best_entity = Some((entity_index, t)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Filter out brushes that contain the camera (ray_origin)
+    let best_brush = best_brush.and_then(|(ei, bi, t)| {
+        if let Some(brush) = map.entities.get(ei).and_then(|e| e.brushes.get(bi)) {
+            if let BrushContent::Convex(_) = &brush.content {
+                if is_point_inside_convex_brush(map, ei, bi, ray_origin) {
+                    return None; // Exclude brushes containing the camera
+                }
+            }
+        }
+        Some((ei, bi, t))
+    });
+
+    // Return the closest hit
+    match (best_brush, best_entity) {
+        (Some((ei, bi, t_brush)), Some((ei_ent, t_ent))) => {
+            if t_brush < t_ent {
+                Some(Ok((ei, bi)))
+            } else {
+                Some(Err(ei_ent))
+            }
+        }
+        (Some((ei, bi, _)), None) => Some(Ok((ei, bi))),
+        (None, Some((ei, _))) => Some(Err(ei)),
+        (None, None) => None,
+    }
+}
+
+/// Translate selected edges by moving their vertices.
+/// This moves the actual edge vertices, not the faces that define them.
+pub fn translate_selected_edges_by_vertices(
+    map: &mut Map,
+    selected_edges: &[EdgeSelection],
+    delta: Vec3,
+) -> bool {
+    if selected_edges.is_empty() || delta == Vec3::ZERO {
+        return false;
+    }
+
+    // Collect all vertices that need to be moved using a simple list approach
+    let mut vertex_moves: Vec<((usize, usize), Vec3, Vec3)> = Vec::new();
+
+    // Collect all vertices that need to be moved
+    for sel in selected_edges {
+        let entity_idx = sel.entity_idx;
+        let brush_idx = sel.brush_idx;
+
+        let Some(entity) = map.entities.get(entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get(brush_idx) else {
+            continue;
+        };
+        let BrushContent::Convex(_) = &brush.content else {
+            continue;
+        };
+
+        // Clone brush to get mutable reference for get_polygons_and_aabb
+        let mut brush_clone = brush.clone();
+        let Some((_, polys)) = brush_clone.get_polygons_and_aabb() else {
+            continue;
+        };
+
+        if let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
+            polys, sel.face_a_idx, sel.face_b_idx,
+        )
+        {
+            // Both edge vertices need to be moved
+            vertex_moves.push(((entity_idx, brush_idx), edge_start, delta));
+            vertex_moves.push(((entity_idx, brush_idx), edge_end, delta));
+        }
+    }
+
+    if vertex_moves.is_empty() {
+        return false;
+    }
+
+    // Apply vertex moves to brushes
+    let mut any = false;
+    for ((entity_idx, brush_idx), edge_vertex, move_delta) in vertex_moves {
+        let Some(entity) = map.entities.get_mut(entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+            continue;
+        };
+        let BrushContent::Convex(faces) = &mut brush.content else {
+            continue;
+        };
+
+        // Move all vertices in the brush by delta if they match the edge vertex
+        let mut brush_changed = false;
+        for face in faces {
+            for point in &mut face.plane_points {
+                // Check if this point should be moved
+                if (*point - edge_vertex).length_squared() < 0.01 * 0.01 {
+                    *point += move_delta;
+                    brush_changed = true;
+                }
+            }
+        }
+
+        if brush_changed {
+            map.generation = map.generation.wrapping_add(1);
+            any = true;
+        }
+    }
+
+    any
+}
+
+pub fn translate_selected_edges(
+    map: &mut Map,
+    selected_edges: &[EdgeSelection],
+    delta: Vec3,
+) -> bool {
+    translate_selected_edges_by_vertices(map, selected_edges, delta)
+}
+
+/// Find the shared edge points between two faces in a convex brush.
 fn ray_aabb_intersection(min: Vec3, max: Vec3, origin: Vec3, dir: Vec3) -> Option<(f32, f32)> {
     let eps = 1.0e-8;
     let mut tmin = f32::NEG_INFINITY;
@@ -1458,6 +1972,55 @@ pub fn find_inside_brushes(
     inside
 }
 
+/// Check if a point is inside a convex brush.
+/// Returns true if the point is on the inside side of all face planes.
+pub fn is_point_inside_convex_brush(
+    map: &Map,
+    entity_idx: usize,
+    brush_idx: usize,
+    point: Vec3,
+) -> bool {
+    let brush = &map.entities[entity_idx].brushes[brush_idx];
+
+    let planes: Vec<(Vec3, f32)> = match &brush.content {
+        BrushContent::Convex(faces) => faces
+            .iter()
+            .map(|f| {
+                let n = face_plane_normal(f);
+                let d = -n.dot(f.plane_points[0]);
+                (n, d)
+            })
+            .collect(),
+        BrushContent::Patch(_) => return false, // Not a convex brush
+    };
+
+    // Check if point is on the inside side of all planes
+    planes.iter().all(|(n, d)| {
+        n.dot(point) + d >= -0.001 // epsilon for floating point
+    })
+}
+
+pub fn add_entity(def: &EntityDef, loc: Vec3, map: &mut Map) {
+    let mut properties = HashMap::new();
+    properties.insert(
+        "origin".to_string(),
+        format!("{} {} {}", loc[0], loc[1], loc[2]),
+    );
+    // properties.insert("classname".to_string(), def.class.clone());
+    for prop in &def.props {
+        properties.insert(prop.0.clone(), prop.1.clone());
+    }
+    let ent = Entity {
+        id: EntityId(map.entities.len() as u32),
+        classname: def.class.clone(),
+        properties,
+        brushes: vec![],
+        model: None,
+    };
+
+    map.entities.push(ent);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1543,7 +2106,7 @@ mod tests {
             classname: "worldspawn".to_string(),
             properties: std::collections::HashMap::new(),
             brushes: vec![brush1],
-            model: None
+            model: None,
         });
         map.entities.push(Entity {
             id: EntityId(1),
@@ -1585,14 +2148,14 @@ mod tests {
             classname: "worldspawn".to_string(),
             properties: std::collections::HashMap::new(),
             brushes: vec![brush1],
-            model: None
+            model: None,
         });
         map.entities.push(Entity {
             id: EntityId(1),
             classname: "func_group".to_string(),
             properties: std::collections::HashMap::new(),
             brushes: vec![brush2],
-            model: None
+            model: None,
         });
 
         // With small epsilon, they don't touch (gap of 1 unit)
@@ -1611,6 +2174,77 @@ mod tests {
     }
 
     #[test]
+    fn pick_base_anchored_entity_hits_all_heights() {
+        let mut map = Map::default();
+        map.entities.push(Entity {
+            id: EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: std::collections::HashMap::new(),
+            brushes: vec![],
+            model: None,
+        });
+        // Simulate an entity created by add_entity before classname was stored in
+        // properties: the struct field is set, the property key is missing.
+        let mut props = std::collections::HashMap::new();
+        props.insert("origin".to_string(), "0 0 0".to_string());
+        map.entities.push(Entity {
+            id: EntityId(1),
+            classname: "mp_deathmatch_spawn".to_string(),
+            properties: props,
+            brushes: vec![],
+            model: None,
+        });
+
+        let config = crate::editor::config::EntityDrawingConfig::cod_default();
+        let mask = PickMask::ALL;
+
+        // 3D view style: camera above, ray aimed at the upper half (z=60 of a 0..72 box)
+        let ray_origin = Vec3::new(0.0, 0.0, 120.0);
+        let ray_dir = (Vec3::new(0.5, 0.5, 60.0) - ray_origin).normalize();
+        let hit =
+            pick_brush_or_ent_by_ray(&mut map, ray_origin, ray_dir, mask, &config, None, None);
+        assert_eq!(
+            hit,
+            Some(Err(1)),
+            "ray through upper half (z=60) must hit the entity"
+        );
+
+        // Same camera, ray aimed at the bottom of the box (z=8)
+        let ray_dir = (Vec3::new(0.5, 0.5, 8.0) - ray_origin).normalize();
+        let hit =
+            pick_brush_or_ent_by_ray(&mut map, ray_origin, ray_dir, mask, &config, None, None);
+        assert_eq!(
+            hit,
+            Some(Err(1)),
+            "ray through bottom (z=8) must hit the entity"
+        );
+
+        // 2D XZ view style: vertical ray at click height z=60 (upper half)
+        let hit = pick_brush_or_ent_by_ray(
+            &mut map,
+            Vec3::new(0.5, 1.0e6, 60.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            mask,
+            &config,
+            None,
+            None,
+        );
+        assert_eq!(hit, Some(Err(1)), "2D XZ ray at z=60 must hit the entity");
+
+        // 2D XZ view style: click at z=8 (bottom region)
+        let hit = pick_brush_or_ent_by_ray(
+            &mut map,
+            Vec3::new(0.5, 1.0e6, 8.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            mask,
+            &config,
+            None,
+            None,
+        );
+        assert_eq!(hit, Some(Err(1)), "2D XZ ray at z=8 must hit the entity");
+    }
+
+    #[test]
     fn find_touching_brushes_excludes_self() {
         // Create a single brush
         let brush = convex_brush_from_aabb(
@@ -1625,7 +2259,7 @@ mod tests {
             classname: "worldspawn".to_string(),
             properties: std::collections::HashMap::new(),
             brushes: vec![brush],
-            model: None
+            model: None,
         });
 
         let touching = find_touching_brushes(&mut map, 0, 0, 0.1);
