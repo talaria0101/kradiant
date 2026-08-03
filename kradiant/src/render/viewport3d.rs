@@ -6,13 +6,13 @@ use crate::editor::EditorState;
 use crate::editor::config::{EntityDrawAnchor, EntityDrawKind, RenderMode};
 use crate::render::RenderBackend;
 //use crate::ui;
-use crate::geometry::tessellate_patch;
 use crate::assets::normalize_material_name;
 use crate::core_util;
+use crate::geometry::tessellate_patch;
 use crate::map::BrushContent;
 use crate::texmap::FaceUvMapper;
-use crate::xmodel::{model_wireframe_lines, XModel};
-use glam::Vec3;
+use crate::xmodel::XModel;
+use glam::{Quat, Vec3};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct View3dCache {
@@ -39,9 +39,10 @@ pub struct TexVertex {
     pub uv: [f32; 2],
 }
 
-fn solid_box_lit_vertices_from_base(base: Vec3, size: Vec3) -> Vec<LitVertex> {
+fn solid_box_lit_vertices_from_base(base: Vec3, size: Vec3, rot: Option<Quat>) -> Vec<LitVertex> {
     let min = base;
     let max = base + size;
+    let center = base + size * 0.5;
     let corners = [
         Vec3::new(min.x, min.y, min.z),
         Vec3::new(max.x, min.y, min.z),
@@ -52,6 +53,14 @@ fn solid_box_lit_vertices_from_base(base: Vec3, size: Vec3) -> Vec<LitVertex> {
         Vec3::new(min.x, max.y, max.z),
         Vec3::new(max.x, max.y, max.z),
     ];
+    let corners: [Vec3; 8] = rot
+        .map(|r| {
+            corners.map(|c| {
+                let o = c - center;
+                center + r * o
+            })
+        })
+        .unwrap_or(corners);
     const FACES: [([usize; 6], Vec3); 6] = [
         ([0, 2, 3, 0, 3, 1], Vec3::NEG_Z),
         ([4, 5, 7, 4, 7, 6], Vec3::Z),
@@ -63,6 +72,7 @@ fn solid_box_lit_vertices_from_base(base: Vec3, size: Vec3) -> Vec<LitVertex> {
 
     let mut out = Vec::with_capacity(36);
     for (idxs, normal) in FACES {
+        let normal = rot.map(|r| r * normal).unwrap_or(normal);
         for i in idxs {
             out.push(LitVertex {
                 pos: corners[i].into(),
@@ -73,11 +83,10 @@ fn solid_box_lit_vertices_from_base(base: Vec3, size: Vec3) -> Vec<LitVertex> {
     out
 }
 
-fn resolved_arrow_length(style: &crate::editor::config::EntityDrawStyle, fallback: f32) -> f32 {
-    if style.arrow_length > 0.0 {
-        style.arrow_length
-    } else {
-        fallback
+fn entity_solid_box_base(origin: Vec3, size: Vec3, anchor: EntityDrawAnchor) -> Vec3 {
+    match anchor {
+        EntityDrawAnchor::Base => origin - Vec3::new(size.x * 0.5, size.y * 0.5, 0.0),
+        EntityDrawAnchor::Center => origin - size * 0.5,
     }
 }
 
@@ -220,15 +229,14 @@ impl Viewport3D {
                     let mut tex_batches: HashMap<String, Vec<TexVertex>> = HashMap::new();
 
                     for ent in &mut map.entities {
-                        let has_model = ent.properties.get("model").is_some();
-                        let style = editor
-                            .entity_drawing
-                            .resolve(&ent.classname, has_model);
                         let origin = ent
                             .properties
                             .get("origin")
                             .map(|s| core_util::origin_to_vec3(s))
-                            .unwrap_or(Vec3::ZERO);
+                            .unwrap_or({
+                                // println!("entity {} has no origin: {:?}", ent.classname, &ent.properties);
+                                Vec3::ZERO
+                            });
                         let angles = ent
                             .properties
                             .get("angles")
@@ -236,14 +244,17 @@ impl Viewport3D {
                         let model_rot = angles.map(core_util::entity_angles_to_quat);
                         let pivot = origin;
 
+                        // Resolve style early using actual loaded state so
+                        // Hidden entities skip model loading entirely.
+                        let has_model_prop = ent.properties.get("model").is_some();
+                        let has_model = ent.model.is_some();
+                        let style = editor.entity_drawing.resolve(&ent.classname, has_model);
+
+                        let draw_entity_visual = ent.classname != "worldspawn"
+                            && !matches!(style.kind, EntityDrawKind::Hidden);
+
                         let mut model_ref: Option<&crate::xmodel::XModel> = None;
-                        let needs_model = ent.properties.get("model").is_some()
-                            && (editor.config.view.show.models
-                                || matches!(
-                                    style.kind,
-                                    EntityDrawKind::ModelBounds | EntityDrawKind::ModelWireframe
-                                ));
-                        if needs_model {
+                        if draw_entity_visual && has_model_prop {
                             if let Some(model_name) = ent.properties.get("model") {
                                 let expected_name = {
                                     let normalized = normalize_material_name(model_name);
@@ -258,12 +269,13 @@ impl Viewport3D {
                                     .as_ref()
                                     .map(|model| model.name != expected_name)
                                     .unwrap_or(true);
-                                if needs_load {
+                                if needs_load && !editor.failed_models.contains(&expected_name) {
                                     if let Some(model_asset_db) = editor.model_asset_db.as_mut() {
                                         match XModel::load(model_asset_db, model_name, shader_db) {
                                             Ok(m) => ent.model = Some(m),
                                             Err(e) => {
                                                 eprintln!("Failed load model {model_name}: {e}");
+                                                editor.failed_models.insert(expected_name);
                                             }
                                         }
                                     }
@@ -272,116 +284,100 @@ impl Viewport3D {
                             model_ref = ent.model.as_ref();
                         }
 
-                        let draw_entity_visual = ent.classname != "worldspawn"
-                            && !matches!(style.kind, EntityDrawKind::Hidden);
+                        // Recompute style with post-load model state
+                        let has_model = ent.model.is_some();
+                        let style = editor.entity_drawing.resolve(&ent.classname, has_model);
+
                         if draw_entity_visual {
                             match style.kind {
-                                EntityDrawKind::Box => {
-                                    let mut lines = match style.anchor {
-                                        EntityDrawAnchor::Base => {
-                                            crate::core_util::box_line_vertices_from_base(
-                                                pivot,
-                                                Vec3::from_array(style.size),
-                                                None,
-                                            )
-                                        }
-                                        EntityDrawAnchor::Center => {
-                                            crate::core_util::box_line_vertices(
-                                                pivot,
-                                                Vec3::from_array(style.size),
-                                                None,
-                                            )
-                                        }
-                                    };
-                                    if style.show_arrow {
-                                        if let Some(angles) = angles.filter(|a| {
-                                            a.length_squared() > 1.0e-6
-                                        }) {
-                                            let arrow_len = resolved_arrow_length(
-                                                &style,
-                                                Vec3::from_array(style.size).length(),
-                                            );
-                                            lines.extend(crate::core_util::arrow_line_vertices(
-                                                pivot,
-                                                crate::core_util::entity_angles_forward(angles),
-                                                arrow_len,
-                                                Vec3::Z,
-                                            ));
-                                        }
-                                    }
-                                    self.entity_line_batches.push((style.color, lines));
-                                }
-                                EntityDrawKind::SolidBox => {
-                                    let size = Vec3::from_array(style.size);
-                                    let tris = match style.anchor {
-                                        EntityDrawAnchor::Base => {
-                                            solid_box_lit_vertices_from_base(pivot, size)
-                                        }
-                                        EntityDrawAnchor::Center => {
-                                            solid_box_lit_vertices_from_base(
-                                                pivot - size * 0.5,
-                                                size,
-                                            )
-                                        }
-                                    };
-                                    self.entity_solid_batches.push((style.color, tris));
-                                }
-                                EntityDrawKind::ModelBounds => {
+                                EntityDrawKind::Box
+                                | EntityDrawKind::SolidBox
+                                | EntityDrawKind::ModelBounds
+                                | EntityDrawKind::ModelWireframe => {
                                     if let Some(model) = model_ref {
                                         let model_origin = pivot + model.origin;
-                                        let center_offset = (model.mins + model.maxs) * 0.5;
-                                        let box_center = model_origin + center_offset;
-                                        let half = (model.maxs - model.mins) * 0.5;
                                         self.entity_line_batches.push((
                                             style.color,
-                                            crate::core_util::box_line_vertices(
-                                                box_center,
-                                                half * 2.0,
-                                                None,
+                                            crate::core_util::model_bounds_line_vertices(
+                                                model_origin,
+                                                model.mins,
+                                                model.maxs,
+                                                model_rot,
                                             ),
                                         ));
+                                        // Vertical center guide line (top to bottom)
+                                        let (min_b, max_b) = crate::core_util::
+                                            model_bounds_aabb(
+                                                model_origin,
+                                                model.mins,
+                                                model.maxs,
+                                                model_rot,
+                                            );
+                                        let cx = (min_b.x + max_b.x) * 0.5;
+                                        let cy = (min_b.y + max_b.y) * 0.5;
+                                        self.entity_line_batches.push((
+                                            style.color,
+                                            vec![
+                                                Vec3::new(cx, cy, min_b.z),
+                                                Vec3::new(cx, cy, max_b.z),
+                                            ],
+                                        ));
+                                        if style.show_origin_box {
+                                            self.entity_line_batches.push((
+                                                [1.0, 1.0, 1.0, 1.0],
+                                                crate::core_util::box_line_vertices(
+                                                    model_origin,
+                                                    Vec3::from_array(style.origin_box_size),
+                                                    None,
+                                                ),
+                                            ));
+                                        }
                                         if style.show_arrow {
-                                            if let Some(angles) = angles.filter(|a| {
-                                                a.length_squared() > 1.0e-6
-                                            }) {
-                                                let arrow_len = resolved_arrow_length(
-                                                    &style,
-                                                    model.radius,
-                                                );
+                                            if let Some(angles) =
+                                                angles.filter(|a| a.length_squared() > 1.0e-6)
+                                            {
+                                                let forward =
+                                                    crate::core_util::entity_angles_forward(angles);
+                                                let arrow_len =
+                                                    core_util::resolved_arrow_length(&style, model.radius);
                                                 self.entity_line_batches.push((
                                                     style.color,
                                                     crate::core_util::arrow_line_vertices(
-                                                        model_origin,
-                                                        crate::core_util::entity_angles_forward(
-                                                            angles,
+                                                        crate::core_util::model_front_center(
+                                                            model_origin,
+                                                            model.mins,
+                                                            model.maxs,
+                                                            forward,
                                                         ),
+                                                        forward,
                                                         arrow_len,
                                                         Vec3::Z,
                                                     ),
                                                 ));
                                             }
                                         }
-
-                                    }
-                                }
-                                EntityDrawKind::ModelWireframe => {
-                                    if let Some(model) = model_ref {
-                                        let model_origin = pivot + model.origin;
-                                        let lines =
-                                            model_wireframe_lines(model, model_origin, model_rot);
-                                        self.entity_line_batches.push((style.color, lines));
+                                    } else {
+                                        let size = Vec3::from_array(style.size);
+                                        let tris = solid_box_lit_vertices_from_base(
+                                            entity_solid_box_base(pivot, size, style.anchor),
+                                            size,
+                                            model_rot,
+                                        );
+                                        self.entity_solid_batches.push((style.color, tris));
                                         if style.show_arrow {
-                                            if let Some(angles) = angles.filter(|a| {
-                                                a.length_squared() > 1.0e-6
-                                            }) {
-                                                let arrow_len = resolved_arrow_length(
-                                                    &style,
-                                                    model.radius,
-                                                );
+                                            if let Some(angles) =
+                                                angles.filter(|a| a.length_squared() > 1.0e-6)
+                                            {
+                                                let arrow_len =
+                                                    core_util::resolved_arrow_length(&style, size.length());
                                                 self.entity_line_batches.push((
                                                     style.color,
                                                     crate::core_util::arrow_line_vertices(
-                                                        model_origin,
+                                                        crate::core_util::proxy_box_center(
+                                                            style.anchor,
+                                                            pivot,
+                                                            size,
+                                                        ),
                                                         crate::core_util::entity_angles_forward(
                                                             angles,
                                                         ),
@@ -394,18 +390,6 @@ impl Viewport3D {
                                     }
                                 }
                                 EntityDrawKind::Hidden => {}
-                            }
-
-                            if ent.classname == "misc_model" && model_ref.is_some() {
-                                let proxy_lines = crate::core_util::box_line_vertices_from_base(
-                                    pivot,
-                                    Vec3::splat(32.0),
-                                    None,
-                                );
-                                self.entity_line_batches.push((
-                                    editor.entity_drawing.default_with_model.color,
-                                    proxy_lines,
-                                ));
                             }
                         }
 
@@ -447,15 +431,12 @@ impl Viewport3D {
                                         let p2 = model_rot
                                             .map(|r| model_origin + r * v2.position)
                                             .unwrap_or(model_origin + v2.position);
-                                        let n0 = model_rot
-                                            .map(|r| r * v0.normal)
-                                            .unwrap_or(v0.normal);
-                                        let n1 = model_rot
-                                            .map(|r| r * v1.normal)
-                                            .unwrap_or(v1.normal);
-                                        let n2 = model_rot
-                                            .map(|r| r * v2.normal)
-                                            .unwrap_or(v2.normal);
+                                        let n0 =
+                                            model_rot.map(|r| r * v0.normal).unwrap_or(v0.normal);
+                                        let n1 =
+                                            model_rot.map(|r| r * v1.normal).unwrap_or(v1.normal);
+                                        let n2 =
+                                            model_rot.map(|r| r * v2.normal).unwrap_or(v2.normal);
 
                                         self.tri_vertices.push(LitVertex {
                                             pos: p0.into(),
@@ -742,6 +723,16 @@ impl Viewport3D {
                         .wrapping_add(f.face_idx as u64);
                 }
 
+                let mut ents: Vec<_> = editor.selected_entities.iter().collect();
+                ents.sort();
+                for e in ents {
+                    h = h
+                        .wrapping_mul(31)
+                        .wrapping_add((*e as u64) * 1000003)
+                        .wrapping_add((*e as u64) * 1000001)
+                        .wrapping_add(*e as u64);
+                }
+
                 h
             };
             //println!("current_selection_hash: {}\nlast_selection_hash: {}", current_selection_hash, self.last_selection_hash);
@@ -757,6 +748,89 @@ impl Viewport3D {
                         .collect();
 
                     for (entity_idx, ent) in map.entities.iter_mut().enumerate() {
+                        if editor.selected_entities.contains(&entity_idx)
+                            && ent.classname != "worldspawn"
+                        {
+                            let style = editor
+                                .entity_drawing
+                                .resolve(&ent.classname, ent.model.is_some());
+                            let origin = ent
+                                .properties
+                                .get("origin")
+                                .map(|s| core_util::origin_to_vec3(s))
+                                .unwrap_or(Vec3::ZERO);
+
+                            // If entity has a model, render model triangles for selection
+                            if let Some(model) = &ent.model {
+                                let model_origin = origin + model.origin;
+                                let angles = ent
+                                    .properties
+                                    .get("angles")
+                                    .and_then(|s| core_util::vec3_from_whitespace_triplet(s));
+                                let model_rot = angles.map(core_util::entity_angles_to_quat);
+
+                                for surface in &model.surfaces {
+                                    if surface.indices.len() < 3 || surface.vertices.is_empty() {
+                                        continue;
+                                    }
+
+                                    for tri in surface.indices.chunks_exact(3) {
+                                        let i0 = tri[0] as usize;
+                                        let i1 = tri[1] as usize;
+                                        let i2 = tri[2] as usize;
+                                        if i0 >= surface.vertices.len()
+                                            || i1 >= surface.vertices.len()
+                                            || i2 >= surface.vertices.len()
+                                        {
+                                            continue;
+                                        }
+
+                                        let v0 = &surface.vertices[i0];
+                                        let v1 = &surface.vertices[i1];
+                                        let v2 = &surface.vertices[i2];
+                                        let p0 = model_rot
+                                            .map(|r| model_origin + r * v0.position)
+                                            .unwrap_or(model_origin + v0.position);
+                                        let p1 = model_rot
+                                            .map(|r| model_origin + r * v1.position)
+                                            .unwrap_or(model_origin + v1.position);
+                                        let p2 = model_rot
+                                            .map(|r| model_origin + r * v2.position)
+                                            .unwrap_or(model_origin + v2.position);
+                                        let n0 =
+                                            model_rot.map(|r| r * v0.normal).unwrap_or(v0.normal);
+                                        let n1 =
+                                            model_rot.map(|r| r * v1.normal).unwrap_or(v1.normal);
+                                        let n2 =
+                                            model_rot.map(|r| r * v2.normal).unwrap_or(v2.normal);
+
+                                        self.tri_vertices_selected.push(LitVertex {
+                                            pos: p0.into(),
+                                            normal: n0.into(),
+                                        });
+                                        self.tri_vertices_selected.push(LitVertex {
+                                            pos: p1.into(),
+                                            normal: n1.into(),
+                                        });
+                                        self.tri_vertices_selected.push(LitVertex {
+                                            pos: p2.into(),
+                                            normal: n2.into(),
+                                        });
+                                    }
+                                }
+                            } else {
+                                // Fall back to proxy box for entities without models
+                                let size = Vec3::from_array(style.size);
+                                let base = entity_solid_box_base(origin, size, style.anchor);
+                                let angles = ent
+                                    .properties
+                                    .get("angles")
+                                    .and_then(|s| core_util::vec3_from_whitespace_triplet(s));
+                                let rot = angles.map(core_util::entity_angles_to_quat);
+                                let tris = solid_box_lit_vertices_from_base(base, size, rot);
+                                self.tri_vertices_selected.extend(tris);
+                            }
+                        }
                         for (brush_idx, brush) in ent.brushes.iter_mut().enumerate() {
                             let is_brush_selected =
                                 editor.selected_brushes.contains(&(entity_idx, brush_idx));

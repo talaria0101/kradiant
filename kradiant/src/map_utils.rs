@@ -57,14 +57,17 @@ pub fn round_float<T: Float + NumCast>(value: T, points: u8) -> T {
 
 pub fn format_float<T: Float + Display>(value: T, points: u8) -> String {
     let rounded = round_float(value, points);
-    let formatted = format!("{rounded}");
-
-    formatted
+    format!("{rounded}")
 }
 
 pub fn format_float_trim<T: Float + Display>(value: T, points: u8) -> String {
     let rounded = round_float(value, points);
     let formatted = format!("{rounded}");
+    // Only trim trailing zeros after a decimal point. Whole numbers like
+    // "270" must not lose their trailing digit ("27").
+    if !formatted.contains('.') {
+        return formatted;
+    }
     let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
 
     if trimmed.is_empty() { "0" } else { trimmed }.to_string()

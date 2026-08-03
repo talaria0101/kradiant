@@ -27,7 +27,7 @@ pub struct TextureBrowser {
     /// Cached list of textures under current path
     textures: Vec<TextureEntry>,
     /// Whether to show an expandable directory tree on the left
-    show_dir_tree: bool,
+    // show_dir_tree: bool,
     /// Current selected texture
     pub selected: Option<String>,
     /// CPU loaded pixel data for textures currently displayed
@@ -170,7 +170,7 @@ impl Default for TextureBrowser {
             current_path: String::new(),
             subdirs: Vec::new(),
             textures: Vec::new(),
-            show_dir_tree: true,
+            // show_dir_tree: true,
             selected: None,
             tex_cache: HashMap::new(),
             tex_gpu_cache: HashMap::new(),
@@ -310,10 +310,10 @@ impl TextureBrowser {
     }
 
     /// Get the display name of the current directory
-    pub fn current_dir_name(&self) -> String {
-        let trimmed = self.current_path.trim_end_matches('/');
-        trimmed.rsplit('/').next().unwrap_or("textures").to_string()
-    }
+    // pub fn current_dir_name(&self) -> String {
+    //     let trimmed = self.current_path.trim_end_matches('/');
+    //     trimmed.rsplit('/').next().unwrap_or("textures").to_string()
+    // }
 
     /// Get the breadcrumb path (e.g., "common > caulk")
     pub fn breadcrumb_path(&self) -> Vec<String> {

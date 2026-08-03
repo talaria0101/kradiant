@@ -121,8 +121,9 @@ pub unsafe extern "C" fn kr_editor_undo(ptr: *mut EditorState) -> bool {
                 &mut state.map,
                 &mut state.selected_brushes,
                 &mut state.selected_faces,
+                &mut state.selected_edges,
                 &mut state.selected_patch_vertices,
-                &mut state.selected_entity,
+                &mut state.selected_entities,
                 &mut state.map_revision,
             )
             .is_some()
@@ -141,8 +142,9 @@ pub unsafe extern "C" fn kr_editor_redo(ptr: *mut EditorState) -> bool {
                 &mut state.map,
                 &mut state.selected_brushes,
                 &mut state.selected_faces,
+                &mut state.selected_edges,
                 &mut state.selected_patch_vertices,
-                &mut state.selected_entity,
+                &mut state.selected_entities,
                 &mut state.map_revision,
             )
             .is_some()
@@ -319,8 +321,9 @@ pub unsafe extern "C" fn kr_editor_translate_selection(ptr: *mut EditorState, de
             &state.map,
             &state.selected_brushes,
             &state.selected_faces,
+            &state.selected_edges,
             &state.selected_patch_vertices,
-            &state.selected_entity,
+            &state.selected_entities,
         );
 
         if let Some(map) = state.map.as_mut() {
@@ -658,6 +661,7 @@ pub unsafe extern "C" fn kr_edit_pick_brush_by_ray(
             glam::Vec3::from(ray_origin),
             glam::Vec3::from(ray_dir),
             crate::editing::PickMask::ALL,
+            None,
         ) {
             if !out_ent.is_null() {
                 unsafe { *out_ent = res.0 as i32 };

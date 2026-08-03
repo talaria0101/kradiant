@@ -4,11 +4,12 @@
 //! - Entities are key/value dictionaries plus zero or more brushes.
 //! - Faces carry texture and classic "9‑number" surface parameters as written by level editors.
 
+use crate::core_util::vec3_to_origin;
 use crate::editing::{Aabb, aabb_from_polys, aabb_from_positions};
 use crate::editor::SurfInspector;
-use crate::map_utils::rotate_vector;
+use crate::texmap::{face_plane_normal, q3_texture_axes_from_normal, rotate_texture_axes};
 use crate::xmodel::XModel;
-use crate::{IVec2, Vec2, Vec3};
+use crate::{IVec2, Vec2, Vec3, core_util};
 use std::collections::{HashMap, HashSet};
 
 /// Strongly‑typed entity identifiers (prevents mixing entity and brush indices).
@@ -159,6 +160,53 @@ impl Face {
         self.params.scale = Vec2::new(si.hstretch_in, si.vstretch_in);
         self.params.rotate = si.rotate_in;
     }
+
+    pub fn fit_texture(&mut self, poly: &[Vec3], tex_w: f32, tex_h: f32, _sample_size: i32) {
+        if poly.is_empty() {
+            return;
+        }
+
+        let tex_w = tex_w.max(1.0);
+        let tex_h = tex_h.max(1.0);
+
+        let n = face_plane_normal(self);
+        let (s_axis, t_axis) = q3_texture_axes_from_normal(n);
+        let (s_axis, t_axis) =
+            rotate_texture_axes(s_axis, t_axis, (self.params.rotate as f32).to_radians());
+
+        let mut s_min = f32::INFINITY;
+        let mut s_max = f32::NEG_INFINITY;
+        let mut t_min = f32::INFINITY;
+        let mut t_max = f32::NEG_INFINITY;
+        for &p in poly {
+            // World coordinates, matching Q3Radiant Face_FitTexture (texture
+            // alignment is relative to the world grid, not the face origin).
+            let s = p.dot(s_axis);
+            let t = p.dot(t_axis);
+            s_min = s_min.min(s);
+            s_max = s_max.max(s);
+            t_min = t_min.min(t);
+            t_max = t_max.max(t);
+        }
+
+        if !s_min.is_finite() || !t_min.is_finite() || !s_max.is_finite() || !t_max.is_finite() {
+            return;
+        }
+
+        let s_extent = (s_max - s_min).max(1.0);
+        let t_extent = (t_max - t_min).max(1.0);
+
+        self.params.scale = Vec2::new(s_extent / tex_w, t_extent / tex_h);
+        // Shift in texels, wrapped into [0, tex_w)x[0, tex_h) like Q3Radiant's
+        // Face_FitTexture (texture repeats, so only the remainder matters).
+        let wrap = |shift: f32, tex_size: f32| -> i32 {
+            shift.rem_euclid(tex_size) as i32
+        };
+        self.params.shift = IVec2::new(
+            wrap(-s_min / self.params.scale.x, tex_w),
+            wrap(-t_min / self.params.scale.y, tex_h),
+        );
+    }
 }
 
 impl Brush {
@@ -253,24 +301,27 @@ impl Brush {
         self.aabb.max += delta;
     }
 
-    pub fn get_texture_last(&self) -> String
-    {
+    pub fn get_texture_last(&self) -> String {
         match &self.content {
-            BrushContent::Convex(faces) => {
-                faces.last().unwrap().texture.clone()
-            }
-            BrushContent::Patch(patch) => {
-                patch.texture.clone()
-            }
+            BrushContent::Convex(faces) => faces.last().unwrap().texture.clone(),
+            BrushContent::Patch(patch) => patch.texture.clone(),
         }
     }
 
-    pub fn get_last_face(&self) -> Option<Face>
-    {
+    pub fn get_face(&self, idx: usize) -> Option<Face> {
+        if let BrushContent::Convex(faces) = &self.content {
+            Some(faces[idx].clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn get_last_face(&self) -> Option<Face> {
         if let BrushContent::Convex(faces) = &self.content {
             faces.last().cloned()
+        } else {
+            None
         }
-        else { None }
     }
 
     /*pub fn get_textures(&self) -> Vec<String>
@@ -321,7 +372,7 @@ impl Brush {
                 }
                 false
             }
-            _ => false
+            _ => false,
         }
     }
 }
@@ -419,6 +470,34 @@ pub struct Entity {
     pub model: Option<XModel>,
 }
 
+impl Entity {
+    pub fn aabb_for_selection(&self) -> Option<&Aabb> {
+        if self.brushes.len() != 0 {
+            println!("entity not selected because it contains brush(es)");
+        }
+        None
+    }
+
+    pub fn translate(&mut self, generation: &mut u64, delta: Vec3) {
+        if self.classname == "worldspawn" {
+            eprintln!("translate should not be called on worldspawn, check all call sites");
+            return; // just in case
+        }
+        let mut origin = self
+            .properties
+            .get("origin")
+            .map(|s| core_util::origin_to_vec3(s))
+            .unwrap_or(Vec3::ZERO);
+
+        origin += delta;
+
+        let origin_str = vec3_to_origin(origin);
+        println!("origin_str: {origin_str:?}");
+        self.properties.insert("origin".to_string(), origin_str);
+        *generation = generation.wrapping_add(1);
+    }
+}
+
 /// Top‑level map structure, mirroring a complete `.map` file.
 #[derive(Debug, Default, Clone)]
 pub struct Map {
@@ -426,4 +505,49 @@ pub struct Map {
     /// Incremented every time ANY brush or entity changes.
     /// Used for dirty-flag caching.
     pub generation: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::editing::default_texture_params;
+    use crate::texmap::FaceUvMapper;
+
+    #[test]
+    fn fit_texture_maps_min_to_zero() {
+        // Floor at z=0 (Z-dominant normal -> s=X, t=-Y).
+        let face = Face {
+            plane_points: [
+                Vec3::new(-10.0, -10.0, 0.0),
+                Vec3::new(10.0, -10.0, 0.0),
+                Vec3::new(-10.0, 10.0, 0.0),
+            ],
+            texture: "test".into(),
+            params: default_texture_params(),
+        };
+
+        let poly = [
+            Vec3::new(-10.0, -5.0, 0.0),
+            Vec3::new(10.0, -5.0, 0.0),
+            Vec3::new(10.0, 5.0, 0.0),
+            Vec3::new(-10.0, 5.0, 0.0),
+        ];
+
+        let mut face = face;
+        face.fit_texture(&poly, 64.0, 64.0, 1);
+
+        // s_extent=20, scale.x=20/64 -> shift.x=wrap(-(-10)/(20/64))=wrap(32,64)=32
+        // u(x) = x/(64*scale.x) + shift.x/64, so u(-10)=0 and u(10)=1.
+        let mapper = FaceUvMapper::new(&face, 64.0, 64.0);
+        let u_min = mapper.uv(Vec3::new(-10.0, 0.0, 0.0)).x;
+        let u_max = mapper.uv(Vec3::new(10.0, 0.0, 0.0)).x;
+        assert!(
+            u_min.abs() < 1.0e-3,
+            "expected u(-10) ~= 0, got {u_min}"
+        );
+        assert!(
+            (u_max - 1.0).abs() < 1.0e-3,
+            "expected u(10) ~= 1, got {u_max}"
+        );
+    }
 }

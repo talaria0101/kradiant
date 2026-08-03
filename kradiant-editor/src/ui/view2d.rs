@@ -5,17 +5,18 @@ use crate::ui::console::ConsoleLogger;
 use crate::util::{project_to_2d, text_height, text_width};
 use crate::{log_error, log_info, log_warn, util};
 use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui, WindowFlags};
-use glam::{Quat, Vec2, Vec3};
-use kradiant::editing;
-use kradiant::editing::Aabb;
 use editing::PickMask;
-use kradiant::editor::selection::{FaceSelection, PatchVertexSelection};
+use glam::{Quat, Vec2, Vec3};
+use kradiant::editing::Aabb;
+use kradiant::editor::config::{EntityDef, EntityDrawAnchor, EntityDrawingConfig};
+use kradiant::editor::selection::{EdgeSelection, FaceSelection, PatchVertexSelection};
 use kradiant::editor::viewport::state::{RotateDrag, StretchDrag, View2DState};
 pub use kradiant::editor::viewport::{AxisLock, DragMode, Ortho, StretchMode};
 use kradiant::editor::{EditorConfig, EditorPalette};
 use kradiant::map::{BrushContent, BrushId, Face};
 use kradiant::map_utils::format_float;
-use std::collections::HashSet;
+use kradiant::{core_util, editing};
+use std::collections::{BTreeMap, HashSet};
 use std::ops::{Deref, DerefMut};
 
 pub struct View2D {
@@ -24,14 +25,18 @@ pub struct View2D {
     pub drag_current: Option<Vec2>,
     pub tex_id: Option<TextureId>,
     pub last_aabb: Option<Aabb>,
+    pub menu_loc: [f32; 2],
     // Selection rectangle for rectangular selection mode
     //pub selection_rect: Option<[Vec2; 2]>,
     /// Brushes touched during current selection drag (to avoid toggling multiple times)
     pub selection_drag_touched: Option<HashSet<(usize, usize)>>,
     /// Faces touched during current selection drag
     pub selection_drag_touched_faces: Option<HashSet<FaceSelection>>,
+    /// Edges touched during current selection drag
+    pub selection_drag_touched_edges: Option<HashSet<EdgeSelection>>,
     /// Patch vertices touched during current selection drag
     pub selection_drag_touched_verts: Option<HashSet<usize>>, // stores hashed selection
+    pub selection_drag_touched_entities: Option<HashSet<usize>>,
 }
 
 impl Default for View2D {
@@ -42,9 +47,12 @@ impl Default for View2D {
             drag_current: None,
             tex_id: None,
             last_aabb: None,
+            menu_loc: [0.0, 0.0],
             selection_drag_touched: None,
             selection_drag_touched_faces: None,
+            selection_drag_touched_edges: None,
             selection_drag_touched_verts: None,
+            selection_drag_touched_entities: None,
         }
     }
 }
@@ -81,27 +89,6 @@ impl View2D {
 
         // Face is visible if normal points toward camera (dot product > 0)
         normal.dot(view_dir) > 0.0
-    }
-
-    pub fn stretch_preview_xform(&self) -> Option<editing::AffineScale> {
-        let stretch = self.stretch.as_ref()?;
-        editing::stretch_selection_transform(
-            &stretch.selection_aabb,
-            stretch.faces,
-            self.stretch_delta,
-        )
-        .map(|(xform, _)| xform)
-    }
-
-    pub fn face_stretch_preview(&self) -> Option<([Option<editing::StretchFace>; 2], Vec3)> {
-        let stretch = self.stretch.as_ref()?;
-        Some((stretch.faces, self.stretch_delta))
-    }
-
-    pub fn rotate_preview_xform(&self) -> Option<editing::AffineRotate> {
-        let rotate = self.rotate.as_ref()?;
-        editing::rotate_selection_transform(&rotate.selection_aabb, rotate.axis, self.rotate_angle)
-            .map(|(xform, _)| xform)
     }
 
     pub fn get_center(&self) -> Vec3 {
@@ -152,14 +139,19 @@ impl View2D {
         undo: &mut kradiant::editor::undo::UndoRedo,
         selected_brushes: &mut Vec<(usize, usize)>,
         selected_faces: &mut Vec<FaceSelection>,
+        selected_edges: &mut Vec<EdgeSelection>,
         selected_patch_vertices: &mut Vec<PatchVertexSelection>,
-        selected_entity: &mut Option<usize>,
+        selected_entities: &mut Vec<usize>,
         edit_faces: bool,
+        edit_edges: bool,
         edit_vertices: bool,
         map: &mut Option<kradiant::map::Map>,
         selection_rgba: [f32; 4],
         selection_rect_rgba: [f32; 4],
         view_config_rev: &mut u64,
+        ents_catd: &BTreeMap<String, Vec<(String, EntityDef)>>,
+        map_revision: &mut u64,
+        ent_draw_config: &EntityDrawingConfig,
         dt: f32,
     ) {
         use dear_imgui_rs::MouseButton;
@@ -181,12 +173,26 @@ impl View2D {
 
                 if edit_faces {
                     sync_selected_brushes_from_faces(selected_faces, selected_brushes);
+                    if !selected_edges.is_empty() {
+                        selected_edges.clear();
+                    }
+                    if !selected_patch_vertices.is_empty() {
+                        selected_patch_vertices.clear();
+                    }
+                } else if edit_edges {
+                    sync_selected_brushes_from_edges(selected_edges, selected_brushes);
+                    if !selected_faces.is_empty() {
+                        selected_faces.clear();
+                    }
                     if !selected_patch_vertices.is_empty() {
                         selected_patch_vertices.clear();
                     }
                 } else {
                     if !selected_faces.is_empty() {
                         selected_faces.clear();
+                    }
+                    if !selected_edges.is_empty() {
+                        selected_edges.clear();
                     }
                     if !edit_vertices && !selected_patch_vertices.is_empty() {
                         selected_patch_vertices.clear();
@@ -237,8 +243,9 @@ impl View2D {
                                         map,
                                         selected_brushes,
                                         selected_faces,
+                                        selected_edges,
                                         selected_patch_vertices,
-                                        selected_entity,
+                                        selected_entities,
                                     );
                                     if let Some(map) = map.as_mut() {
                                         if translate_selected_faces(map, selected_faces, delta) {
@@ -317,7 +324,9 @@ impl View2D {
                     // Start new selection drag - clear touched sets
                     self.selection_drag_touched = Some(HashSet::new());
                     self.selection_drag_touched_faces = Some(HashSet::new());
+                    self.selection_drag_touched_edges = Some(HashSet::new());
                     self.selection_drag_touched_verts = Some(HashSet::new());
+                    self.selection_drag_touched_entities = Some(HashSet::new());
                 }
 
                 if shift_selecting {
@@ -357,10 +366,42 @@ impl View2D {
                                 }
                             }
                             sync_selected_brushes_from_faces(selected_faces, selected_brushes);
-                            *selected_entity = Some(entity_idx);
+                            push_entity_selection(selected_entities, entity_idx);
 
-                            if let Some(aabb) = selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                            if let Some(map) = map && let Some(aabb) = selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                             {
+                                self.last_aabb = Some(aabb.clone());
+                                update_last_work_from_aabb(self, &aabb);
+                            }
+                        }
+                    } else if edit_edges {
+                        let Some(map) = map.as_mut() else {
+                            return;
+                        };
+                        let prefer = (!selected_brushes.is_empty()).then_some(&selected_brushes[..]);
+                        if let Some(esel) = pick_convex_edge_by_screen(
+                            map,
+                            prefer,
+                            self.ortho_axis,
+                            mouse,
+                            p,
+                            [w, h],
+                            self.zoom,
+                            self.pan,
+                            8.0,
+                        ) {
+                            let touched = self.selection_drag_touched_edges.get_or_insert_with(HashSet::new);
+                            if touched.insert(esel) {
+                                if !selected_edges.contains(&esel) {
+                                    selected_edges.push(esel);
+                                } else if let Some(i) = selected_edges.iter().position(|e| *e == esel) {
+                                    selected_edges.remove(i);
+                                }
+                            }
+                            sync_selected_brushes_from_edges(selected_edges, selected_brushes);
+                            push_entity_selection(selected_entities, esel.entity_idx);
+
+                            if let Some(aabb) = selection_aabb_edges_from_map(map, selected_edges) {
                                 self.last_aabb = Some(aabb.clone());
                                 update_last_work_from_aabb(self, &aabb);
                             }
@@ -401,7 +442,7 @@ impl View2D {
                             if !selected_brushes.contains(&brush_sel) {
                                 selected_brushes.push(brush_sel);
                             }
-                            *selected_entity = Some(vsel.entity_idx);
+                            push_entity_selection(selected_entities, vsel.entity_idx);
 
                             if let Some(aabb) =
                                 selection_aabb_patch_vertices_from_map(map, selected_patch_vertices)
@@ -411,26 +452,56 @@ impl View2D {
                             }
                         }
                     } else {
-                        let selected_brush = map.as_mut().and_then(|m| {
-                            editing::pick_brush_by_ray(m, ray_origin, ray_dir, mask)
+                        // Use unified picking to get the closest brush or entity
+                        let selected = map.as_mut().and_then(|m| {
+                            editing::pick_brush_or_ent_by_ray(
+                                m,
+                                ray_origin,
+                                ray_dir,
+                                mask,
+                                ent_draw_config,
+                                None,
+                                None,
+                            )
                         });
-                        if let Some(sel) = selected_brush {
-                            // Only toggle if not already touched this drag
-                            let touched = self.selection_drag_touched.get_or_insert_with(HashSet::new);
-                            if touched.insert(sel) {
-                                if !selected_brushes.contains(&sel) {
-                                    selected_brushes.push(sel);
-                                } else if let Some(i) = selected_brushes.iter().position(|b| b == &sel) {
-                                    selected_brushes.remove(i);
+
+                        if let Some(sel) = selected {
+                            match sel {
+                                Ok((ent_idx, brush_idx)) => {
+                                    // Brush hit
+                                    let touched = self.selection_drag_touched.get_or_insert_with(HashSet::new);
+                                    if touched.insert((ent_idx, brush_idx)) {
+                                        if !selected_brushes.contains(&(ent_idx, brush_idx)) {
+                                            selected_brushes.push((ent_idx, brush_idx));
+                                        } else if let Some(i) = selected_brushes.iter().position(|b| b == &(ent_idx, brush_idx)) {
+                                            selected_brushes.remove(i);
+                                        }
+                                    }
+                                    selected_faces.clear();
+                                    if let Some(map) = map && let Some(aabb) =
+                                        selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
+                                    {
+                                        self.last_aabb = Some(aabb.clone());
+                                        update_last_work_from_aabb(self, &aabb);
+                                    }
                                 }
-                            }
-                            selected_faces.clear();
-                            *selected_entity = Some(sel.0);
-                            if let Some(aabb) =
-                                selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
-                            {
-                                self.last_aabb = Some(aabb.clone());
-                                update_last_work_from_aabb(self, &aabb);
+                                Err(ent_idx) => {
+                                    // Entity hit
+                                    let touched = self.selection_drag_touched_entities.get_or_insert_with(HashSet::new);
+                                    if touched.insert(ent_idx) {
+                                        if !selected_entities.contains(&ent_idx) {
+                                            selected_entities.push(ent_idx);
+                                        } else if let Some(i) = selected_entities.iter().position(|e| *e == ent_idx) {
+                                            selected_entities.remove(i);
+                                        }
+                                    }
+                                    if let Some(map) = map && let Some(aabb) =
+                                        selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
+                                    {
+                                        self.last_aabb = Some(aabb.clone());
+                                        update_last_work_from_aabb(self, &aabb);
+                                    }
+                                }
                             }
                         }
                     }
@@ -455,22 +526,27 @@ impl View2D {
                     self.rotate = None;
                     self.rotate_angle = 0.0;
                     let has_vertex_selection = edit_vertices && !selected_patch_vertices.is_empty();
-                    let has_selection = if edit_faces {
-                        !selected_faces.is_empty()
-                    } else {
-                        !selected_brushes.is_empty()
-                    };
+                                        let has_selection = if edit_faces {
+                                            !selected_faces.is_empty()
+                                        } else if edit_edges {
+                                            !selected_edges.is_empty()
+                                        } else {
+                                            !selected_brushes.is_empty()
+                                                || !selected_entities.is_empty()
+                                        };
 
                     self.drag_mode = if ui.is_key_down(dear_imgui_rs::Key::LeftAlt) {
                         DragMode::RectangularSelection
                     } else if has_vertex_selection {
                         DragMode::MoveVertices
                     } else if has_selection {
-                        if let Some(aabb) =
-                            selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                        println!("has_selection");
+                        if let Some(map) = map && let Some(aabb) =
+                            selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                         {
+                            println!("aabb: {aabb:?}");
                             if click_in_aabb_2d(&aabb, snapped_i, self.ortho_axis) {
-                                if rotate_mode {
+                                if rotate_mode && !edit_edges {
                                     let center = (aabb.min + aabb.max) * 0.5;
                                     let pivot_uv = project_to_2d(center, self.ortho_axis);
                                     let axis = match self.ortho_axis {
@@ -488,7 +564,7 @@ impl View2D {
                                 } else {
                                     DragMode::MoveSelection
                                 }
-                            } else {
+                            } else if !edit_edges && !selected_brushes.is_empty() {
                                 let faces = stretch_faces_from_start(self.ortho_axis, &aabb, snapped_i);
                                 self.stretch = Some(StretchDrag {
                                     selection_aabb: aabb,
@@ -496,6 +572,8 @@ impl View2D {
                                 });
                                 self.stretch_delta = Vec3::ZERO;
                                 DragMode::StretchSelection
+                            } else {
+                                DragMode::MoveSelection
                             }
                         } else {
                             if edit_vertices {
@@ -564,6 +642,15 @@ impl View2D {
                                         if my_snapping {
                                             angle = angle.to_degrees().round().to_radians();
                                         }
+                                        println!(
+                                            "DRAG axis={:?} pivot=({:.3},{:.3}) start_uv=({:.3},{:.3}) world=({:.3},{:.3}) dot={dot:.3} cross={cross:.3} angle_deg={:.3} snapped={}",
+                                            self.ortho_axis,
+                                            rot.pivot_uv[0], rot.pivot_uv[1],
+                                            rot.start_uv[0], rot.start_uv[1],
+                                            world[0], world[1],
+                                            angle.to_degrees(),
+                                            my_snapping,
+                                        );
                                         angle
                                     };
                                     self.rotate_angle = angle;
@@ -606,8 +693,9 @@ impl View2D {
                                                     map,
                                                     selected_brushes,
                                                     selected_faces,
+                                                    selected_edges,
                                                     selected_patch_vertices,
-                                                    selected_entity,
+                                                    selected_entities,
                                                 );
                                             }
 
@@ -642,19 +730,30 @@ impl View2D {
                                             let delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
                                             let can_apply = if edit_faces {
                                                 delta != Vec3::ZERO && !selected_faces.is_empty()
+                                            } else if edit_edges {
+                                                delta != Vec3::ZERO && !selected_edges.is_empty()
                                             } else {
-                                                delta != Vec3::ZERO && !selected_brushes.is_empty()
+                                                delta != Vec3::ZERO
+                                                    && (!selected_brushes.is_empty()
+                                                        || !selected_entities.is_empty())
                                             };
 
                                             if can_apply {
-                                                let label = if edit_faces { "Move faces" } else { "Move selection" };
+                                                let label = if edit_faces {
+                                                    "Move faces"
+                                                } else if edit_edges {
+                                                    "Move edges"
+                                                } else {
+                                                    "Move selection"
+                                                };
                                                 undo.push(
                                                     label,
                                                     map,
                                                     selected_brushes,
                                                     selected_faces,
+                                                    selected_edges,
                                                     selected_patch_vertices,
-                                                    selected_entity,
+                                                    selected_entities,
                                                 );
                                             }
 
@@ -665,24 +764,45 @@ impl View2D {
                                                     if any {
                                                         log_info!(console, "Moved selected faces");
                                                     }
+                                                } else if edit_edges {
+                                                    let any = can_apply
+                                                        && translate_selected_edges(map, selected_edges, delta);
+                                                    if any {
+                                                        log_info!(console, "Moved selected edges");
+                                                    }
                                                 } else {
-                                                let generation = &mut map.generation;
-                                                for (entity_idx, brush_idx) in selected_brushes.iter() {
-                                                    if let Some(entity) = map.entities.get_mut(*entity_idx) {
-                                                        if let Some(brush) = entity.brushes.get_mut(*brush_idx) {
-                                                            brush.translate(generation, delta);
+                                                    let generation = &mut map.generation;
+                                                    for (entity_idx, brush_idx) in selected_brushes.iter() {
+                                                        if let Some(entity) = map.entities.get_mut(*entity_idx) {
+                                                            if let Some(brush) = entity.brushes.get_mut(*brush_idx) {
+                                                                brush.translate(generation, delta);
+                                                            }
+                                                        }
+                                                    }
+                                                    for ent_idx in selected_entities.iter().copied() {
+                                                        if ent_idx == 0 {
+                                                            continue; // Never drag worldspawn
+                                                        }
+                                                        if selected_brushes.iter().any(|(entity_idx, _)| *entity_idx == ent_idx) {
+                                                            continue;
+                                                        }
+                                                        if let Some(entity) = map.entities.get_mut(ent_idx) {
+                                                            entity.translate(generation, delta);
                                                         }
                                                     }
                                                 }
                                             }
-                                        }
 
                                             if can_apply {
-                                                if let Some(aabb) = selection_aabb_active(
+                                                if let Some(map) = map && let Some(aabb) = selection_aabb_active(
                                                     map,
                                                     selected_brushes,
                                                     selected_faces,
+                                                    selected_edges,
+                                                    selected_entities,
                                                     edit_faces,
+                                                    edit_edges,
+                                                    ent_draw_config,
                                                 ) {
                                                     self.last_aabb = Some(aabb.clone());
                                                     update_last_work_from_aabb(self, &aabb);
@@ -730,6 +850,7 @@ impl View2D {
                                                     // Normal mode: clear selection and add vertices in the rect
                                                     selected_patch_vertices.clear();
                                                     selected_brushes.clear();
+                                                    selected_entities.clear();
 
                                                     for (entity_idx, entity) in map.entities.iter().enumerate() {
                                                         for (brush_idx, brush) in entity.brushes.iter().enumerate() {
@@ -751,7 +872,7 @@ impl View2D {
                                                                             if !selected_brushes.contains(&brush_sel) {
                                                                                 selected_brushes.push(brush_sel);
                                                                             }
-                                                                            *selected_entity = Some(entity_idx);
+                                                                            push_entity_selection(selected_entities, entity_idx);
                                                                         }
                                                                     }
                                                                 }
@@ -764,6 +885,37 @@ impl View2D {
                                                     map,
                                                     selected_patch_vertices,
                                                 ) {
+                                                    self.last_aabb = Some(aabb.clone());
+                                                    update_last_work_from_aabb(self, &aabb);
+                                                }
+                                            } else if edit_edges {
+                                                let edges_in_rect = convex_edges_in_rect(
+                                                    map,
+                                                    self.ortho_axis,
+                                                    min_x,
+                                                    max_x,
+                                                    min_y,
+                                                    max_y,
+                                                );
+                                                if toggle {
+                                                    selected_edges.retain(|sel| !edges_in_rect.contains(sel));
+                                                } else {
+                                                    selected_edges.clear();
+                                                    selected_brushes.clear();
+                                                    for sel in edges_in_rect {
+                                                        if !selected_edges.contains(&sel) {
+                                                            selected_edges.push(sel);
+                                                        }
+                                                    }
+                                                }
+
+                                                sync_selected_brushes_from_edges(selected_edges, selected_brushes);
+                                                if let Some(last) = selected_edges.last() {
+                                                    push_entity_selection(selected_entities, last.entity_idx);
+                                                }
+                                                if let Some(aabb) =
+                                                    selection_aabb_edges_from_map(map, selected_edges)
+                                                {
                                                     self.last_aabb = Some(aabb.clone());
                                                     update_last_work_from_aabb(self, &aabb);
                                                 }
@@ -846,10 +998,10 @@ impl View2D {
                                                                     selected_faces.push(sel);
 
                                                                     let brush_sel = (entity_idx, brush_idx);
-                                                                    if !selected_brushes.contains(&brush_sel) {
-                                                                        selected_brushes.push(brush_sel);
-                                                                    }
-                                                                    *selected_entity = Some(entity_idx);
+                                    if !selected_brushes.contains(&brush_sel) {
+                                        selected_brushes.push(brush_sel);
+                                    }
+                                    push_entity_selection(selected_entities, entity_idx);
                                                                 }
                                                             }
                                                         }
@@ -857,7 +1009,7 @@ impl View2D {
                                                 }
 
                                                 sync_selected_brushes_from_faces(selected_faces, selected_brushes);
-                                                if let Some(aabb) = selection_aabb_active(&mut Some(map.clone()), selected_brushes, selected_faces, edit_faces) {
+                                                if let Some(aabb) = selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
                                                     self.last_aabb = Some(aabb.clone());
                                                     update_last_work_from_aabb(self, &aabb);
                                                 }
@@ -902,13 +1054,12 @@ impl View2D {
                                                             // Check if AABB overlaps with selection rectangle
                                                             if aabb_max_x >= min_x && aabb_min_x <= max_x && aabb_max_y >= min_y && aabb_min_y <= max_y {
                                                                 selected_brushes.push((entity_idx, brush_idx));
-                                                                *selected_entity = Some(entity_idx);
                                                             }
                                                         }
                                                     }
                                                 }
 
-                                                if let Some(aabb) = selection_aabb_from_map(map, selected_brushes) {
+                                                if let Some(aabb) = selection_aabb_from_map(map, selected_brushes, selected_entities, ent_draw_config) {
                                                     self.last_aabb = Some(aabb.clone());
                                                     update_last_work_from_aabb(self, &aabb);
                                                 }
@@ -918,6 +1069,8 @@ impl View2D {
                                 DragMode::NewBrush => {
                                     let can_create = if edit_faces {
                                         selected_faces.is_empty()
+                                    } else if edit_edges {
+                                        selected_edges.is_empty()
                                     } else {
                                         selected_brushes.is_empty()
                                     };
@@ -928,8 +1081,9 @@ impl View2D {
                                                 map,
                                                 selected_brushes,
                                                 selected_faces,
+                                                selected_edges,
                                                 selected_patch_vertices,
-                                                selected_entity,
+                                                selected_entities,
                                             );
                                         }
                                         if let Some(created) = create_brush_from_drag(
@@ -946,8 +1100,8 @@ impl View2D {
                                             }
                                             selected_faces.clear();
                                             selected_brushes.push((0, created.0 as usize));
-                                            if let Some(aabb) =
-                                                selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                                            if let Some(map) = map && let Some(aabb) =
+                                                selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                                             {
                                                 self.last_aabb = Some(aabb.clone());
                                                 update_last_work_from_aabb(self, &aabb);
@@ -961,6 +1115,8 @@ impl View2D {
                                     if delta != Vec3::ZERO {
                                         let has_selection = if edit_faces {
                                             !selected_faces.is_empty()
+                                        } else if edit_edges {
+                                            !selected_edges.is_empty()
                                         } else {
                                             !selected_brushes.is_empty()
                                         };
@@ -982,8 +1138,9 @@ impl View2D {
                                                 map,
                                                 selected_brushes,
                                                 selected_faces,
+                                                selected_edges,
                                                 selected_patch_vertices,
-                                                selected_entity,
+                                                selected_entities,
                                             );
                                         }
 
@@ -1136,7 +1293,7 @@ impl View2D {
 
                                                 if any {
                                                     new_sel_aabb =
-                                                        selection_aabb_from_map(map, &selected_brushes);
+                                                        selection_aabb_from_map(map, &selected_brushes, &selected_entities, &ent_draw_config);
                                                     log_info!(console, "Stretched selection");
                                                 }
                                             }
@@ -1161,6 +1318,8 @@ impl View2D {
                                     if angle.abs() > 1.0e-6 {
                                         let has_selection = if edit_faces {
                                             !selected_faces.is_empty()
+                                        } else if edit_edges {
+                                            !selected_edges.is_empty()
                                         } else {
                                             !selected_brushes.is_empty()
                                         };
@@ -1171,8 +1330,9 @@ impl View2D {
                                                 map,
                                                 selected_brushes,
                                                 selected_faces,
+                                                selected_edges,
                                                 selected_patch_vertices,
-                                                selected_entity,
+                                                selected_entities,
                                             );
                                         }
                                         let axis = rot.axis;
@@ -1214,8 +1374,40 @@ impl View2D {
                                                     }
                                                 }
 
-                                                if any {
-                                                    new_sel_aabb = selection_aabb_from_map(map, &selected_brushes);
+                                                let mut any_entity = false;
+                                                for ent_idx in selected_entities.iter().copied() {
+                                                    if ent_idx == 0 {
+                                                        continue;
+                                                    }
+                                                    let Some(entity) = map.entities.get_mut(ent_idx) else {
+                                                        continue;
+                                                    };
+                                                    let angles = entity
+                                                        .properties
+                                                        .get("angles")
+                                                        .and_then(|s| core_util::vec3_from_whitespace_triplet(s))
+                                                        .unwrap_or(Vec3::ZERO);
+                                                    println!(
+                                                        "ROTATE ent_idx={ent_idx} axis={axis:?} angle_rad={angle:.6} angle_deg={:.3} start={:?}",
+                                                        angle.to_degrees(), angles
+                                                    );
+                                                    // CoDRadiant behavior: rotate the entity's full
+                                                    // orientation quaternion about the view axis and
+                                                    // re-extract the angles (id AnglesFromMatrix).
+                                                    let q_new = Quat::from_axis_angle(axis, angle)
+                                                        * core_util::entity_angles_to_quat(angles);
+                                                    let new_angles = core_util::quat_to_entity_angles(q_new);
+                                                    println!("ROTATE q_new={q_new:?} new={new_angles:?}");
+                                                    entity.properties.insert(
+                                                        "angles".to_string(),
+                                                        core_util::vec3_to_angles(new_angles),
+                                                    );
+                                                    map.generation = map.generation.wrapping_add(1);
+                                                    any_entity = true;
+                                                }
+
+                                                if any || any_entity {
+                                                    new_sel_aabb = selection_aabb_from_map(map, &selected_brushes, &selected_entities, &ent_draw_config);
                                                     log_info!(console, "Rotated selection");
                                                 }
                                             }
@@ -1238,7 +1430,9 @@ impl View2D {
                     self.rotate_angle = 0.0;
                     self.selection_drag_touched = None;
                     self.selection_drag_touched_faces = None;
+                    self.selection_drag_touched_edges = None;
                     self.selection_drag_touched_verts = None;
+                    self.selection_drag_touched_entities = None;
                 }
 
                 if ui.is_window_hovered()
@@ -1276,8 +1470,9 @@ impl View2D {
                             map,
                             selected_brushes,
                             selected_faces,
+                            selected_edges,
                             selected_patch_vertices,
-                            selected_entity,
+                            selected_entities,
                         );
                         if let Some(map) = map.as_mut() {
                             if translate_selected_faces(map, selected_faces, delta) {
@@ -1296,13 +1491,14 @@ impl View2D {
                 if canvas_interacting && ui.is_mouse_double_clicked(MouseButton::Right) && !ui.is_popup_open("2d_view_menu") {
                     let [dx, dy] = ui.mouse_drag_delta(MouseButton::Right);
                     if dx.abs() < 2.0 && dy.abs() < 2.0 {
+                        self.menu_loc = snapped;
                         ui.open_popup("2d_view_menu");
                     }
                 }
 
                 if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
-                    if let Some(aabb) =
-                        selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                    if let Some(map) = map && let Some(aabb) =
+                        selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                     {
                         self.last_aabb = Some(aabb.clone());
                         update_last_work_from_aabb(self, &aabb);
@@ -1310,12 +1506,16 @@ impl View2D {
                     if edit_faces {
                         selected_faces.clear();
                         sync_selected_brushes_from_faces(selected_faces, selected_brushes);
+                    } else if edit_edges {
+                        selected_edges.clear();
+                        sync_selected_brushes_from_edges(selected_edges, selected_brushes);
                     } else {
                         selected_brushes.clear();
                     }
                     if edit_vertices {
                         selected_patch_vertices.clear();
                     }
+                    selected_entities.clear();
                     self.stretch = None;
                     self.stretch_delta = Vec3::ZERO;
                     self.rotate = None;
@@ -1327,22 +1527,26 @@ impl View2D {
                     if edit_faces {
                         selected_faces.clear();
                         sync_selected_brushes_from_faces(selected_faces, selected_brushes);
+                    } else if edit_edges {
+                        selected_edges.clear();
+                        sync_selected_brushes_from_edges(selected_edges, selected_brushes);
                     } else {
-                        if let Some(aabb) =
-                            selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                        if let Some(map) = map && let Some(aabb) =
+                            selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                         {
                             self.last_aabb = Some(aabb.clone());
                             update_last_work_from_aabb(self, &aabb);
                         }
 
-                        if map.is_some() && !selected_brushes.is_empty() {
+                        if map.is_some() && (!selected_brushes.is_empty() || selected_entities.iter().any(|&idx| idx != 0)) {
                             undo.push(
                                 "Delete selection",
                                 map,
                                 selected_brushes,
                                 selected_faces,
+                                selected_edges,
                                 selected_patch_vertices,
-                                selected_entity,
+                                selected_entities,
                             );
                         }
                         if let Some(map) = map.as_mut() {
@@ -1377,11 +1581,30 @@ impl View2D {
                                 map.generation = map.generation.wrapping_add(1);
                                 log_info!(console, "Deleted selected brushes");
                             }
+
+                            let mut entity_indices: Vec<usize> = selected_entities
+                                .iter()
+                                .copied()
+                                .filter(|&idx| idx != 0)
+                                .collect();
+                            entity_indices.sort_unstable_by(|a, b| b.cmp(a));
+                            let mut any_entity = false;
+                            for ent_idx in entity_indices {
+                                if ent_idx < map.entities.len() {
+                                    map.entities.remove(ent_idx);
+                                    any_entity = true;
+                                }
+                            }
+
+                            if any_entity {
+                                map.generation = map.generation.wrapping_add(1);
+                                log_info!(console, "Deleted selected entities");
+                            }
                         }
 
                         selected_brushes.clear();
                         selected_patch_vertices.clear();
-                        *selected_entity = None;
+                        selected_entities.clear();
                     }
                 }
 
@@ -1463,8 +1686,8 @@ impl View2D {
 
                         match self.drag_mode {
                                 DragMode::MoveSelection | DragMode::MoveVertices => {
-                                    let (a, b) = if let Some(sel) =
-                                        selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                                    let (a, b) = if let Some(map) = map && let Some(sel) =
+                                        selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                                     {
                                         let (min2, max2) = crate::util::project_aabb_to_2d(&sel, self.ortho_axis);
                                         let center = [
@@ -1593,8 +1816,8 @@ impl View2D {
                         }
                     }
 
-                        if let Some(mut selection_aabb) =
-                            selection_aabb_active(map, selected_brushes, selected_faces, edit_faces)
+                        if let Some(map) = map && let Some(mut selection_aabb) =
+                            selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                         {
                         if self.drag_mode == DragMode::StretchSelection {
                             if let Some(stretch) = self.stretch.as_ref() {
@@ -1738,6 +1961,38 @@ impl View2D {
                             }
                         });
                         ui.separator_horizontal();
+                        for (k, v) in ents_catd.iter() {
+                            ui.menu(k, || {
+                                for e in v {
+                                    if ui.menu_item(&e.0) {
+                                        if map.is_some() {
+                                            undo.push(
+                                                &format!("Add entity: {}", &e.1.class),
+                                                map,
+                                                selected_brushes,
+                                                selected_faces,
+                                                selected_edges,
+                                                selected_patch_vertices,
+                                                selected_entities,
+                                            );
+                                            if let Some(map_mut) = map.as_mut() {
+                                                let loc = match self.ortho_axis {
+                                                    Ortho::XY => Vec3::new(self.menu_loc[0], -self.menu_loc[1], self.work_pos.z),
+                                                    Ortho::XZ => Vec3::new(self.menu_loc[0], self.work_pos.y, -self.menu_loc[1]),
+                                                    Ortho::YZ => Vec3::new(self.work_pos.x, self.menu_loc[0], -self.menu_loc[1]),
+                                                };
+                                                editing::add_entity(
+                                                    &e.1,
+                                                    loc,
+                                                    map_mut,
+                                                );
+                                                *map_revision = map_revision.wrapping_add(1);
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
                         if ui.menu_item("Other") {
                             log_info!(console, "unimplemented");
                         }
@@ -1762,6 +2017,201 @@ pub fn sync_selected_brushes_from_faces(
     }
     selected_brushes.clear();
     selected_brushes.extend(set.into_iter());
+}
+
+pub fn sync_selected_brushes_from_edges(
+    selected_edges: &[EdgeSelection],
+    selected_brushes: &mut Vec<(usize, usize)>,
+) {
+    use std::collections::BTreeSet;
+
+    let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for sel in selected_edges {
+        set.insert((sel.entity_idx, sel.brush_idx));
+    }
+    selected_brushes.clear();
+    selected_brushes.extend(set.into_iter());
+}
+
+fn normalize_edge_selection(
+    entity_idx: usize,
+    brush_idx: usize,
+    face_a_idx: usize,
+    face_b_idx: usize,
+) -> EdgeSelection {
+    let (face_a_idx, face_b_idx) = if face_a_idx <= face_b_idx {
+        (face_a_idx, face_b_idx)
+    } else {
+        (face_b_idx, face_a_idx)
+    };
+    EdgeSelection {
+        entity_idx,
+        brush_idx,
+        face_a_idx,
+        face_b_idx,
+    }
+}
+
+fn convex_edges_for_brush(
+    entity_idx: usize,
+    brush_idx: usize,
+    polys: &[(Vec<Vec3>, Vec<u32>)],
+) -> Vec<(EdgeSelection, Vec3, Vec3)> {
+    let mut out = Vec::new();
+    for face_a_idx in 0..polys.len() {
+        for face_b_idx in face_a_idx + 1..polys.len() {
+            if let Some((a, b)) = core_util::shared_edge_points(polys, face_a_idx, face_b_idx) {
+                out.push((
+                    normalize_edge_selection(entity_idx, brush_idx, face_a_idx, face_b_idx),
+                    a,
+                    b,
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn point_segment_dist2(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let ap = [p[0] - a[0], p[1] - a[1]];
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+    if len2 <= 1.0e-6 {
+        let dx = p[0] - a[0];
+        let dy = p[1] - a[1];
+        return dx * dx + dy * dy;
+    }
+    let t = ((ap[0] * ab[0] + ap[1] * ab[1]) / len2).clamp(0.0, 1.0);
+    let q = [a[0] + ab[0] * t, a[1] + ab[1] * t];
+    let dx = p[0] - q[0];
+    let dy = p[1] - q[1];
+    dx * dx + dy * dy
+}
+
+fn pick_convex_edge_by_screen(
+    map: &mut kradiant::map::Map,
+    prefer: Option<&[(usize, usize)]>,
+    axis: Ortho,
+    mouse_screen: [f32; 2],
+    origin: [f32; 2],
+    size: [f32; 2],
+    zoom: f32,
+    pan: [f32; 2],
+    radius_px: f32,
+) -> Option<EdgeSelection> {
+    let r2 = radius_px.max(1.0) * radius_px.max(1.0);
+    let mut best: Option<(EdgeSelection, f32)> = None;
+
+    if let Some(prefer) = prefer {
+        for &(entity_idx, brush_idx) in prefer {
+            let Some(entity) = map.entities.get_mut(entity_idx) else {
+                continue;
+            };
+            let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+                continue;
+            };
+            if !matches!(brush.content, BrushContent::Convex(_)) {
+                continue;
+            }
+            let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
+                continue;
+            };
+            for (sel, a, b) in convex_edges_for_brush(entity_idx, brush_idx, polys) {
+                let pa = crate::util::project_to_2d(a, axis);
+                let pb = crate::util::project_to_2d(b, axis);
+                let sa = crate::util::world_to_screen(pa, origin, size[0], size[1], zoom, pan);
+                let sb = crate::util::world_to_screen(pb, origin, size[0], size[1], zoom, pan);
+                let d2 = point_segment_dist2(mouse_screen, sa, sb);
+                if d2 > r2 {
+                    continue;
+                }
+                match best {
+                    None => best = Some((sel, d2)),
+                    Some((_, best_d2)) if d2 < best_d2 => best = Some((sel, d2)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    if best.is_none() {
+        for (entity_idx, entity) in map.entities.iter_mut().enumerate() {
+            for (brush_idx, brush) in entity.brushes.iter_mut().enumerate() {
+                if !matches!(brush.content, BrushContent::Convex(_)) {
+                    continue;
+                }
+                let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
+                    continue;
+                };
+                for (sel, a, b) in convex_edges_for_brush(entity_idx, brush_idx, polys) {
+                    let pa = crate::util::project_to_2d(a, axis);
+                    let pb = crate::util::project_to_2d(b, axis);
+                    let sa = crate::util::world_to_screen(pa, origin, size[0], size[1], zoom, pan);
+                    let sb = crate::util::world_to_screen(pb, origin, size[0], size[1], zoom, pan);
+                    let d2 = point_segment_dist2(mouse_screen, sa, sb);
+                    if d2 > r2 {
+                        continue;
+                    }
+                    match best {
+                        None => best = Some((sel, d2)),
+                        Some((_, best_d2)) if d2 < best_d2 => best = Some((sel, d2)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(sel, _)| sel)
+}
+
+fn edge_overlaps_rect(
+    a: [f32; 2],
+    b: [f32; 2],
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+) -> bool {
+    if (a[0] >= min_x && a[0] <= max_x && a[1] >= min_y && a[1] <= max_y)
+        || (b[0] >= min_x && b[0] <= max_x && b[1] >= min_y && b[1] <= max_y)
+    {
+        return true;
+    }
+
+    let seg_min_x = a[0].min(b[0]);
+    let seg_max_x = a[0].max(b[0]);
+    let seg_min_y = a[1].min(b[1]);
+    let seg_max_y = a[1].max(b[1]);
+    !(seg_max_x < min_x || seg_min_x > max_x || seg_max_y < min_y || seg_min_y > max_y)
+}
+
+fn convex_edges_in_rect(
+    map: &mut kradiant::map::Map,
+    axis: Ortho,
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+) -> Vec<EdgeSelection> {
+    let mut out = Vec::new();
+    for (entity_idx, entity) in map.entities.iter_mut().enumerate() {
+        for (brush_idx, brush) in entity.brushes.iter_mut().enumerate() {
+            if !matches!(brush.content, BrushContent::Convex(_)) {
+                continue;
+            }
+            let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
+                continue;
+            };
+            for (sel, a, b) in convex_edges_for_brush(entity_idx, brush_idx, polys) {
+                let pa = util::project_to_2d(a, axis);
+                let pb = util::project_to_2d(b, axis);
+                if edge_overlaps_rect(pa, pb, min_x, max_x, min_y, max_y) {
+                    out.push(sel);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn selection_aabb_faces_from_map(
@@ -1817,23 +2267,77 @@ fn selection_aabb_faces_from_map(
 }
 
 fn selection_aabb_faces(
-    map: &mut Option<kradiant::map::Map>,
+    map: &mut kradiant::map::Map,
     selected_faces: &[FaceSelection],
 ) -> Option<Aabb> {
-    let map = map.as_mut()?;
     selection_aabb_faces_from_map(map, selected_faces)
 }
 
-fn selection_aabb_active(
-    map: &mut Option<kradiant::map::Map>,
+fn selection_aabb_edges_from_map(
+    map: &mut kradiant::map::Map,
+    selected_edges: &[EdgeSelection],
+) -> Option<Aabb> {
+    if selected_edges.is_empty() {
+        return None;
+    }
+
+    let mut out = Aabb {
+        min: Vec3::splat(f32::MAX),
+        max: Vec3::splat(f32::MIN),
+    };
+    let mut any = false;
+
+    for sel in selected_edges {
+        let Some(entity) = map.entities.get_mut(sel.entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get_mut(sel.brush_idx) else {
+            continue;
+        };
+        let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
+            continue;
+        };
+        let Some((a, b)) = core_util::shared_edge_points(polys, sel.face_a_idx, sel.face_b_idx) else {
+            continue;
+        };
+        out.min = out.min.min(a).min(b);
+        out.max = out.max.max(a).max(b);
+        any = true;
+    }
+
+    any.then_some(out)
+}
+
+fn selection_aabb_edges(
+    map: &mut kradiant::map::Map,
+    selected_edges: &[EdgeSelection],
+) -> Option<Aabb> {
+    selection_aabb_edges_from_map(map, selected_edges)
+}
+
+pub(crate) fn selection_aabb_active(
+    map: &mut kradiant::map::Map,
     selected_brushes: &[(usize, usize)],
     selected_faces: &[FaceSelection],
+    selected_edges: &[EdgeSelection],
+    selected_entities: &[usize],
     edit_faces: bool,
+    edit_edges: bool,
+    ent_draw_config: &EntityDrawingConfig,
 ) -> Option<Aabb> {
     if edit_faces {
         selection_aabb_faces(map, selected_faces)
+    } else if edit_edges {
+        selection_aabb_edges(map, selected_edges)
     } else {
-        selection_aabb(&*map, selected_brushes)
+        selection_aabb(&*map, selected_brushes, selected_entities, ent_draw_config)
+    }
+}
+
+/// Add an entity to the entity selection without duplicating it.
+fn push_entity_selection(selected_entities: &mut Vec<usize>, entity_idx: usize) {
+    if !selected_entities.contains(&entity_idx) {
+        selected_entities.push(entity_idx);
     }
 }
 
@@ -2513,6 +3017,65 @@ fn translate_selected_faces(
     any
 }
 
+fn translate_selected_edges(
+    map: &mut kradiant::map::Map,
+    selected_edges: &[EdgeSelection],
+    delta: Vec3,
+) -> bool {
+    if selected_edges.is_empty() || delta == Vec3::ZERO {
+        return false;
+    }
+
+    use std::collections::BTreeMap;
+    let mut by_brush: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for sel in selected_edges {
+        by_brush
+            .entry((sel.entity_idx, sel.brush_idx))
+            .or_default()
+            .extend([sel.face_a_idx, sel.face_b_idx]);
+    }
+
+    let mut any = false;
+    for ((entity_idx, brush_idx), mut face_indices) in by_brush {
+        face_indices.sort_unstable();
+        face_indices.dedup();
+
+        let Some(entity) = map.entities.get_mut(entity_idx) else {
+            continue;
+        };
+        let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+            continue;
+        };
+        let BrushContent::Convex(faces) = &brush.content else {
+            continue;
+        };
+        let old_planes: Vec<[Vec3; 3]> = faces.iter().map(|f| f.plane_points).collect();
+
+        let mut tmp = brush.clone();
+        let mut dummy_gen = 0u64;
+        let mut brush_changed = false;
+        for face_idx in face_indices {
+            let Some(plane) = old_planes.get(face_idx).copied() else {
+                continue;
+            };
+            tmp.update_brush_plane(
+                &mut dummy_gen,
+                face_idx,
+                [plane[0] + delta, plane[1] + delta, plane[2] + delta],
+            );
+            brush_changed = true;
+        }
+
+        if brush_changed && tmp.get_polygons_and_aabb().is_some() {
+            *brush = tmp;
+            map.generation = map.generation.wrapping_add(1);
+            any = true;
+        }
+    }
+
+    any
+}
+
 fn apply_affine_scale_to_selected_faces(
     map: &mut kradiant::map::Map,
     selected_faces: &[FaceSelection],
@@ -2627,21 +3190,73 @@ fn apply_affine_rotate_to_selected_faces(
 }
 
 pub fn selection_aabb(
-    map: &Option<kradiant::map::Map>,
+    map: &kradiant::map::Map,
     selected_brushes: &[(usize, usize)],
+    selected_entities: &[usize],
+    ent_draw_config: &EntityDrawingConfig,
 ) -> Option<Aabb> {
-    if selected_brushes.is_empty() {
+    if selected_brushes.is_empty() && selected_entities.is_empty() {
         return None;
     }
-    let map = map.as_ref()?;
-    selection_aabb_from_map(map, selected_brushes)
+    selection_aabb_from_map(map, selected_brushes, selected_entities, ent_draw_config)
+}
+
+pub fn entity_selection_aabb(
+    entity: &kradiant::map::Entity,
+    ent_draw_config: &EntityDrawingConfig,
+) -> Option<Aabb> {
+    let origin = entity
+        .properties
+        .get("origin")
+        .map(|s| core_util::origin_to_vec3(s))
+        .unwrap_or(Vec3::ZERO);
+
+    let style = ent_draw_config.resolve(&entity.classname, entity.model.is_some());
+
+    // Rotate around the model's center whenever a model is loaded, regardless
+    // of the proxy style (CoDRadiant pivots on the model bounds center, not the
+    // entity origin / root bone). Entities without a model keep the style box.
+    if let Some(model) = entity.model.as_ref() {
+        let model_origin = origin + model.origin;
+        let angles = entity.properties.get("angles").and_then(|s| {
+            core_util::vec3_from_whitespace_triplet(s)
+        });
+        let rot = angles.map(core_util::entity_angles_to_quat);
+        let (min, max) =
+            core_util::model_bounds_aabb(model_origin, model.mins, model.maxs, rot);
+        return Some(Aabb { min, max });
+    }
+
+    let size = Vec3::from_array(style.size);
+    let half_size = size * 0.5;
+    // Match the drawn proxy box: Center rotates about origin, Base rotates
+    // about the box center (origin + Z/2). Enclose the rotated corners so the
+    // click/select area tracks the box's orientation.
+    let box_center = match style.anchor {
+        EntityDrawAnchor::Center => origin,
+        EntityDrawAnchor::Base => origin + Vec3::new(0.0, 0.0, half_size.z),
+    };
+    let angles = entity.properties.get("angles").and_then(|s| {
+        core_util::vec3_from_whitespace_triplet(s)
+    });
+    let rot = angles.map(core_util::entity_angles_to_quat);
+    let corners = core_util::oriented_box_corners(box_center, half_size, rot);
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for c in corners {
+        min = min.min(c);
+        max = max.max(c);
+    }
+    Some(Aabb { min, max })
 }
 
 pub fn selection_aabb_from_map(
     map: &kradiant::map::Map,
     selected: &[(usize, usize)],
+    selected_entities: &[usize],
+    ent_draw_config: &EntityDrawingConfig,
 ) -> Option<Aabb> {
-    if selected.is_empty() {
+    if selected.is_empty() && selected_entities.is_empty() {
         return None;
     }
 
@@ -2660,6 +3275,26 @@ pub fn selection_aabb_from_map(
         };
         out.min = out.min.min(brush.aabb.min);
         out.max = out.max.max(brush.aabb.max);
+        any = true;
+    }
+    for &ent_idx in selected_entities {
+        if ent_idx == 0 {
+            continue;
+        }
+        let Some(entity) = map.entities.get(ent_idx) else {
+            continue;
+        };
+        if selected
+            .iter()
+            .any(|(selected_ent_idx, _)| *selected_ent_idx == ent_idx)
+        {
+            continue;
+        }
+        let Some(aabb) = entity_selection_aabb(entity, ent_draw_config) else {
+            continue;
+        };
+        out.min = out.min.min(aabb.min);
+        out.max = out.max.max(aabb.max);
         any = true;
     }
     any.then_some(out)

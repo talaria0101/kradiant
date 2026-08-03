@@ -1,4 +1,4 @@
-use crate::editor::selection::{FaceSelection, PatchVertexSelection};
+use crate::editor::selection::{EdgeSelection, FaceSelection, PatchVertexSelection};
 use crate::map::Map;
 
 #[derive(Debug)]
@@ -6,8 +6,9 @@ struct Snapshot {
     map: Option<Map>,
     selected_brushes: Vec<(usize, usize)>,
     selected_faces: Vec<FaceSelection>,
+    selected_edges: Vec<EdgeSelection>,
     selected_patch_vertices: Vec<PatchVertexSelection>,
-    selected_entity: Option<usize>,
+    selected_entities: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -57,8 +58,9 @@ impl UndoRedo {
         map: &Option<Map>,
         selected_brushes: &[(usize, usize)],
         selected_faces: &[FaceSelection],
+        selected_edges: &[EdgeSelection],
         selected_patch_vertices: &[PatchVertexSelection],
-        selected_entity: &Option<usize>,
+        selected_entities: &[usize],
     ) {
         self.redo.clear();
 
@@ -68,8 +70,9 @@ impl UndoRedo {
                 map: map.clone(),
                 selected_brushes: selected_brushes.to_vec(),
                 selected_faces: selected_faces.to_vec(),
+                selected_edges: selected_edges.to_vec(),
                 selected_patch_vertices: selected_patch_vertices.to_vec(),
-                selected_entity: *selected_entity,
+                selected_entities: selected_entities.to_vec(),
             },
         });
 
@@ -85,8 +88,9 @@ impl UndoRedo {
         map: &Map,
         selected_brushes: &[(usize, usize)],
         selected_faces: &[FaceSelection],
+        selected_edges: &[EdgeSelection],
         selected_patch_vertices: &[PatchVertexSelection],
-        selected_entity: &Option<usize>,
+        selected_entities: &[usize],
     ) {
         self.redo.clear();
         self.undo.push(Entry {
@@ -95,8 +99,9 @@ impl UndoRedo {
                 map: Some(map.clone()),
                 selected_brushes: selected_brushes.to_vec(),
                 selected_faces: selected_faces.to_vec(),
+                selected_edges: selected_edges.to_vec(),
                 selected_patch_vertices: selected_patch_vertices.to_vec(),
-                selected_entity: *selected_entity,
+                selected_entities: selected_entities.to_vec(),
             },
         });
         if self.undo.len() > self.max_entries {
@@ -110,8 +115,9 @@ impl UndoRedo {
         map: &mut Option<Map>,
         selected_brushes: &mut Vec<(usize, usize)>,
         selected_faces: &mut Vec<FaceSelection>,
+        selected_edges: &mut Vec<EdgeSelection>,
         selected_patch_vertices: &mut Vec<PatchVertexSelection>,
-        selected_entity: &mut Option<usize>,
+        selected_entities: &mut Vec<usize>,
         map_revision: &mut u64,
     ) -> Option<String> {
         let entry = self.undo.pop()?;
@@ -121,8 +127,9 @@ impl UndoRedo {
             map: map.take(),
             selected_brushes: std::mem::take(selected_brushes),
             selected_faces: std::mem::take(selected_faces),
+            selected_edges: std::mem::take(selected_edges),
             selected_patch_vertices: std::mem::take(selected_patch_vertices),
-            selected_entity: selected_entity.take(),
+            selected_entities: std::mem::take(selected_entities),
         };
         self.redo.push(Entry {
             label: entry.label.clone(),
@@ -132,8 +139,9 @@ impl UndoRedo {
         *map = entry.snapshot.map;
         *selected_brushes = entry.snapshot.selected_brushes;
         *selected_faces = entry.snapshot.selected_faces;
+        *selected_edges = entry.snapshot.selected_edges;
         *selected_patch_vertices = entry.snapshot.selected_patch_vertices;
-        *selected_entity = entry.snapshot.selected_entity;
+        *selected_entities = entry.snapshot.selected_entities;
         *map_revision = map_revision.wrapping_add(1);
         Some(entry.label)
     }
@@ -143,8 +151,9 @@ impl UndoRedo {
         map: &mut Option<Map>,
         selected_brushes: &mut Vec<(usize, usize)>,
         selected_faces: &mut Vec<FaceSelection>,
+        selected_edges: &mut Vec<EdgeSelection>,
         selected_patch_vertices: &mut Vec<PatchVertexSelection>,
-        selected_entity: &mut Option<usize>,
+        selected_entities: &mut Vec<usize>,
         map_revision: &mut u64,
     ) -> Option<String> {
         let entry = self.redo.pop()?;
@@ -154,8 +163,9 @@ impl UndoRedo {
             map: map.take(),
             selected_brushes: std::mem::take(selected_brushes),
             selected_faces: std::mem::take(selected_faces),
+            selected_edges: std::mem::take(selected_edges),
             selected_patch_vertices: std::mem::take(selected_patch_vertices),
-            selected_entity: selected_entity.take(),
+            selected_entities: std::mem::take(selected_entities),
         };
         self.undo.push(Entry {
             label: entry.label.clone(),
@@ -165,8 +175,9 @@ impl UndoRedo {
         *map = entry.snapshot.map;
         *selected_brushes = entry.snapshot.selected_brushes;
         *selected_faces = entry.snapshot.selected_faces;
+        *selected_edges = entry.snapshot.selected_edges;
         *selected_patch_vertices = entry.snapshot.selected_patch_vertices;
-        *selected_entity = entry.snapshot.selected_entity;
+        *selected_entities = entry.snapshot.selected_entities;
         *map_revision = map_revision.wrapping_add(1);
         Some(entry.label)
     }

@@ -212,7 +212,10 @@ impl AssetDb {
         let mut log: Vec<String> = Vec::new();
         log.push("[AssetDb] Initializing...".into());
         let roots = AssetRoots::new(maindir);
-        log.push(format!("[AssetDb] Main directory: {}", roots.maindir.display()));
+        log.push(format!(
+            "[AssetDb] Main directory: {}",
+            roots.maindir.display()
+        ));
         let mut pk3_paths = find_pk3_files(roots.maindir())?;
         pk3_paths.sort();
         log.push(format!("[AssetDb] Total {} pk3 files", pk3_paths.len()));
@@ -247,19 +250,31 @@ impl AssetDb {
                         },
                     );
                 }
-                log.push(format!("    {:6} files in {}", count, pk3_path.file_name().unwrap().display()));
+                log.push(format!(
+                    "    {:6} files in {}",
+                    count,
+                    pk3_path.file_name().unwrap().display()
+                ));
             }
         }
 
+        // Pre-build the per-archive case-insensitive file list index from the on-disk cache
+        // under `(main)/.kradiant/`, refreshing the cache whenever a pk3 has been added,
+        // removed, or modified. Best-effort: on failure, lookups rebuild the index lazily.
+        let pk3_case_index = build_pk3_case_index(roots.maindir(), &pk3_paths).unwrap_or_default();
+
         log.push("[AssetDb] Initialized".into());
 
-        Ok((Self {
-            roots,
-            pk3_paths,
-            pk3_index,
-            pk3_case_index: HashMap::new(),
-            pk3_open: HashMap::new(),
-        }, log))
+        Ok((
+            Self {
+                roots,
+                pk3_paths,
+                pk3_index,
+                pk3_case_index,
+                pk3_open: HashMap::new(),
+            },
+            log,
+        ))
     }
 
     pub fn file_useful_for_radiant(ext: &str) -> bool {
@@ -518,8 +533,7 @@ impl AssetDb {
                 let mut found: Option<(String, String)> = None; // (key, entry_name)
                 for cand_zip in &mat.candidates {
                     let cand_key = normalize_asset_path(cand_zip);
-                    if let Some(entry_name) = self.pk3_lookup_case_insensitive(pk3_path, cand_zip)
-                    {
+                    if let Some(entry_name) = self.pk3_lookup_case_insensitive(pk3_path, cand_zip) {
                         found = Some((cand_key, entry_name));
                         break;
                     }
@@ -689,11 +703,7 @@ impl AssetDb {
         None
     }
 
-    fn pk3_lookup_case_insensitive(
-        &mut self,
-        pk3_path: &Path,
-        target: &str,
-    ) -> Option<String> {
+    fn pk3_lookup_case_insensitive(&mut self, pk3_path: &Path, target: &str) -> Option<String> {
         let target_key = normalize_asset_path(target);
 
         if let Some(entry) = self.pk3_index.get(&target_key) {
@@ -747,6 +757,160 @@ fn find_pk3_files(maindir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
         }
     }
     Ok(out)
+}
+
+/// Cache location for the per-archive pk3 file lists: `(main)/.kradiant/pk3_file_list.tsv`.
+fn pk3_case_index_cache_path(maindir: &Path) -> PathBuf {
+    maindir.join(".kradiant").join("pk3_file_list.tsv")
+}
+
+/// Fingerprint of the pk3 set. Uses a salt distinct from the shader cache so the two caches
+/// invalidate independently.
+fn pk3_case_index_fingerprint(pk3_paths: &[PathBuf]) -> Result<u64, std::io::Error> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    1u32.hash(&mut hasher); // cache version salt
+    hash_pk3_signatures(&mut hasher, pk3_paths)?;
+    Ok(hasher.finish())
+}
+
+/// Build the per-archive case-insensitive entry index (normalized virtual path -> exact zip
+/// entry name) for every `.pk3` found under `maindir`.
+///
+/// When the on-disk cache at `(main)/.kradiant/pk3_file_list.tsv` is fresh (its fingerprint
+/// matches the current pk3 names/sizes/modification times), it is loaded instead of re-scanning
+/// the archives, which avoids the multi-second stall on the first case-insensitive lookup.
+fn build_pk3_case_index(
+    maindir: &Path,
+    pk3_paths: &[PathBuf],
+) -> Result<HashMap<PathBuf, HashMap<String, String>>, AssetDbError> {
+    let fingerprint = pk3_case_index_fingerprint(pk3_paths)?;
+    let cache_path = pk3_case_index_cache_path(maindir);
+
+    if let Some(index) = load_pk3_case_index(&cache_path, fingerprint, pk3_paths) {
+        return Ok(index);
+    }
+
+    let index = scan_pk3_case_index(pk3_paths)?;
+    let _ = write_pk3_case_index(&cache_path, fingerprint, &index);
+    Ok(index)
+}
+
+fn scan_pk3_case_index(
+    pk3_paths: &[PathBuf],
+) -> Result<HashMap<PathBuf, HashMap<String, String>>, AssetDbError> {
+    let mut index = HashMap::with_capacity(pk3_paths.len());
+    for pk3_path in pk3_paths {
+        let f = File::open(pk3_path)?;
+        let zip = ZipArchive::new(f)?;
+        let mut entries = HashMap::with_capacity(zip.len());
+        for name in zip.file_names() {
+            if name.ends_with('/') {
+                continue;
+            }
+            entries.insert(normalize_asset_path(name), name.to_string());
+        }
+        index.insert(pk3_path.clone(), entries);
+    }
+    Ok(index)
+}
+
+/// Load `(main)/.kradiant/pk3_file_list.tsv` when its header matches `fingerprint`. Returns
+/// `None` when the cache is missing or stale, or when any pk3 in `pk3_paths` has no cached
+/// entry, signaling the caller to rebuild.
+fn load_pk3_case_index(
+    path: &Path,
+    fingerprint: u64,
+    pk3_paths: &[PathBuf],
+) -> Option<HashMap<PathBuf, HashMap<String, String>>> {
+    use std::io::{BufRead, BufReader};
+
+    let f = File::open(path).ok()?;
+    let mut reader = BufReader::new(f);
+    let mut header = String::new();
+    if reader.read_line(&mut header).is_err() {
+        return None;
+    }
+    if !pk3_case_index_header_matches(&header, fingerprint) {
+        return None;
+    }
+
+    // Map pk3 file names back to their absolute paths.
+    let mut pk3_by_name: HashMap<&str, PathBuf> = HashMap::new();
+    for p in pk3_paths {
+        if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            pk3_by_name.insert(name, p.clone());
+        }
+    }
+
+    let mut index: HashMap<PathBuf, HashMap<String, String>> = HashMap::new();
+    let mut line = String::new();
+    while reader
+        .read_line(&mut line)
+        .ok()
+        .filter(|&n| n > 0)
+        .is_some()
+    {
+        let trimmed = line.trim_end();
+        let mut it = trimmed.split('\t');
+        let pk3_name = it.next().unwrap_or("");
+        let norm = it.next().unwrap_or("");
+        let exact = it.next().unwrap_or("");
+        if !pk3_name.is_empty() && !norm.is_empty() && !exact.is_empty() {
+            if let Some(pk3_path) = pk3_by_name.get(pk3_name) {
+                index
+                    .entry(pk3_path.clone())
+                    .or_default()
+                    .insert(norm.to_string(), exact.to_string());
+            }
+        }
+        line.clear();
+    }
+
+    // A fresh cache must cover every pk3 we are indexing; otherwise rebuild.
+    if pk3_paths.iter().any(|p| !index.contains_key(p)) {
+        return None;
+    }
+    Some(index)
+}
+
+fn pk3_case_index_header_matches(line0: &str, fingerprint: u64) -> bool {
+    // kradiant_pk3_index\t1\t<fingerprint>\n
+    let line0 = line0.trim_end();
+    let mut it = line0.split('\t');
+    let tag = it.next().unwrap_or("");
+    let ver = it.next().unwrap_or("");
+    let fp = it.next().unwrap_or("");
+    tag == "kradiant_pk3_index" && ver == "1" && fp.parse::<u64>().ok() == Some(fingerprint)
+}
+
+fn write_pk3_case_index(
+    path: &Path,
+    fingerprint: u64,
+    index: &HashMap<PathBuf, HashMap<String, String>>,
+) -> Result<(), std::io::Error> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Write directly; this is best-effort, not crash-critical.
+    let mut f = File::create(path)?;
+    writeln!(f, "kradiant_pk3_index\t1\t{fingerprint}")?;
+    for (pk3_path, entries) in index {
+        let Some(name) = pk3_path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let mut rows: Vec<(&String, &String)> = entries.iter().collect();
+        rows.sort();
+        for (norm, exact) in rows {
+            writeln!(f, "{name}\t{norm}\t{exact}")?;
+        }
+    }
+    Ok(())
 }
 
 fn is_useful_index_entry_raw(name: &str, opts: &AssetDbOptions) -> bool {
@@ -804,6 +968,33 @@ fn shader_cache_path(maindir: &Path) -> PathBuf {
     maindir.join(".kradiant").join("shader_qer_cache.tsv")
 }
 
+/// Hash each pk3 file's name, length, and modification time into `hasher`.
+///
+/// `pk3_paths` must be sorted so the fingerprint is stable across runs.
+fn hash_pk3_signatures(
+    hasher: &mut std::collections::hash_map::DefaultHasher,
+    pk3_paths: &[PathBuf],
+) -> Result<(), std::io::Error> {
+    use std::hash::Hash;
+
+    for p in pk3_paths {
+        p.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .hash(hasher);
+        let meta = std::fs::metadata(p)?;
+        meta.len().hash(hasher);
+        let m = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        m.hash(hasher);
+    }
+    Ok(())
+}
+
 fn shader_cache_fingerprint(maindir: &Path, pk3_paths: &[PathBuf]) -> Result<u64, std::io::Error> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -811,22 +1002,7 @@ fn shader_cache_fingerprint(maindir: &Path, pk3_paths: &[PathBuf]) -> Result<u64
     let mut hasher = DefaultHasher::new();
     2u32.hash(&mut hasher); // cache version salt
 
-    // pk3 archives (sorted by caller).
-    for p in pk3_paths {
-        p.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .hash(&mut hasher);
-        let meta = std::fs::metadata(p)?;
-        meta.len().hash(&mut hasher);
-        let m = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        m.hash(&mut hasher);
-    }
+    hash_pk3_signatures(&mut hasher, pk3_paths)?;
 
     // loose scripts directory (top-level .shader files).
     let scripts_dir = maindir.join("scripts");
@@ -958,6 +1134,17 @@ mod tests {
         dir
     }
 
+    fn write_test_pk3(path: &Path, entries: &[(&str, &[u8])]) {
+        let f = File::create(path).expect("create pk3");
+        let mut zip = ZipWriter::new(f);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        for (name, data) in entries {
+            zip.start_file(*name, opts).expect("start pk3 file");
+            zip.write_all(data).expect("write pk3 file");
+        }
+        zip.finish().expect("finish pk3");
+    }
+
     #[test]
     fn loose_files_are_case_sensitive() {
         let root = make_temp_dir("loose-case");
@@ -989,5 +1176,77 @@ mod tests {
 
         assert!(db.resolve_texture("foo").is_some());
         assert!(db.resolve_texture("textures/foo").is_some());
+    }
+
+    #[test]
+    fn pk3_case_index_cache_is_written_loaded_and_refreshed() {
+        let root = make_temp_dir("pk3-cache");
+        let pk3_path = root.join("pak0.pk3");
+        write_test_pk3(
+            &pk3_path,
+            &[
+                ("textures/wall/a.tga", b"wall-a"),
+                ("scripts/common.shader", b"common/black"),
+            ],
+        );
+
+        // First run: no cache yet, index built by scanning, cache written.
+        let (mut db, _) =
+            AssetDb::from_maindir_with_options(&root, AssetDbOptions::default()).expect("db");
+        assert!(db.resolve_texture("wall/a").is_some());
+
+        let cache_path = root.join(".kradiant").join("pk3_file_list.tsv");
+        let header = fs::read_to_string(&cache_path).expect("cache exists");
+        assert!(header.contains("textures/wall/a.tga"));
+        let old_fp: u64 = header
+            .lines()
+            .next()
+            .unwrap()
+            .split('\t')
+            .nth(2)
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        // Second run: cache still fresh, loaded without rescanning.
+        let (mut db2, _) =
+            AssetDb::from_maindir_with_options(&root, AssetDbOptions::default()).expect("db");
+        assert!(db2.resolve_texture("wall/a").is_some());
+
+        // Touch the pk3 modification time (same content, same size): cache must refresh.
+        let mtime = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        File::open(&pk3_path)
+            .expect("open pk3")
+            .set_modified(mtime)
+            .expect("set mtime");
+
+        let (mut db3, _) =
+            AssetDb::from_maindir_with_options(&root, AssetDbOptions::default()).expect("db");
+        assert!(db3.resolve_texture("wall/a").is_some());
+
+        let header2 = fs::read_to_string(&cache_path).expect("cache exists");
+        let new_fp: u64 = header2
+            .lines()
+            .next()
+            .unwrap()
+            .split('\t')
+            .nth(2)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_ne!(old_fp, new_fp, "stale cache should have been refreshed");
+
+        // Newly modified pk3 content is discoverable after the refresh.
+        write_test_pk3(
+            &pk3_path,
+            &[
+                ("textures/wall/a.tga", b"wall-a"),
+                ("scripts/common.shader", b"common/black"),
+                ("textures/wall/b.tga", b"wall-b"),
+            ],
+        );
+        let (mut db4, _) =
+            AssetDb::from_maindir_with_options(&root, AssetDbOptions::default()).expect("db");
+        assert!(db4.resolve_texture("wall/b").is_some());
     }
 }
