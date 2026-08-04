@@ -14,6 +14,7 @@ pub struct EditorPalette {
     pub console_error: [f32; 4],
     pub hud_text: [f32; 4],
     pub hud_text_dim: [f32; 4],
+    pub theme_primary: [f32; 4],
 }
 
 impl Default for EditorPalette {
@@ -31,6 +32,7 @@ impl Default for EditorPalette {
             console_error: [0.9, 0.1, 0.1, 1.0],
             hud_text: [1.0, 1.0, 1.0, 1.0],
             hud_text_dim: [0.6, 0.6, 0.6, 1.0],
+            theme_primary: [0.1, 0.2, 0.8, 1.0],
         }
     }
 }

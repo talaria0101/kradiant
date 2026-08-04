@@ -2,6 +2,7 @@
 
 use dear_imgui_rs::{Condition, Key, TextureId, Ui, WindowFlags};
 use glam::{Mat4, Vec2, Vec3};
+use kradiant::editor::config::EntityDrawAnchor;
 use kradiant::editor::viewport::DragMode;
 use kradiant::editor::viewport::state::View3DState;
 use kradiant::editor::{EditorConfig, EditorPalette, FaceSelection, PatchVertexSelection};
@@ -9,8 +10,8 @@ use std::ops::{Deref, DerefMut};
 
 use crate::ui::editing::PickMask;
 use crate::ui::view2d;
-use crate::util::imgui_color_to_u32;
-use kradiant::editing;
+use crate::util::{adjust_color_brightness, imgui_color_to_u32, world_to_screen_3d};
+use kradiant::{core_util, editing};
 use kradiant::editor::selection::EdgeSelection;
 use std::collections::HashSet;
 
@@ -30,8 +31,8 @@ pub struct View3D {
     /// Patch vertices touched during current selection drag
     pub selection_drag_touched_verts: Option<HashSet<usize>>,
     pub selection_drag_touched_entities: Option<HashSet<usize>>,
-    /// Current drag mode for transformations
-    pub drag_mode: DragMode,
+    // Current drag mode for transformations
+    // pub drag_mode: DragMode,
     /// Drag start position in screen space
     pub drag_start: Option<Vec2>,
     /// Drag current position in screen space
@@ -39,8 +40,8 @@ pub struct View3D {
     pub drag_plane_normal: Vec3, // camera forward at drag start
     pub drag_plane_origin: Vec3, // selection center
     pub drag_world_anchor: Vec3, // world point clicked at drag start
-    /// Accumulated drag offset during drag (applied to geometry only on release)
-    pub move_offset: Vec3,
+    // Accumulated drag offset during drag (applied to geometry only on release)
+    // pub move_offset: Vec3,
 }
 
 impl Default for View3D {
@@ -57,13 +58,13 @@ impl Default for View3D {
             selection_drag_touched_edges: None,
             selection_drag_touched_verts: None,
             selection_drag_touched_entities: None,
-            drag_mode: DragMode::NewBrush,
+            // drag_mode: DragMode::NewBrush,
             drag_start: None,
             drag_current: None,
             drag_plane_normal: Vec3::ZERO,
             drag_plane_origin: Vec3::ZERO,
             drag_world_anchor: Vec3::ZERO,
-            move_offset: Vec3::ZERO,
+            // move_offset: Vec3::ZERO,
         }
     }
 }
@@ -116,6 +117,7 @@ impl View3D {
         edit_edges: bool,
         map: &mut Option<kradiant::map::Map>,
         ent_draw_config: &kradiant::editor::config::EntityDrawingConfig,
+        selection_rgba: [f32; 4],
     ) {
         use dear_imgui_rs::MouseButton;
 
@@ -160,6 +162,8 @@ impl View3D {
                     self.last_cursor_pos = None;
                 }
                 self.wants_cursor_grab = self.right_dragging;
+
+                let mut common_vp = Mat4::ZERO;
 
                 if canvas_interacting {
                     if !self.right_dragging {
@@ -272,6 +276,16 @@ impl View3D {
                     if ui.is_key_pressed(dear_imgui_rs::Key::C) {
                         self.cam.pos.z -= self.cam.zoom / 2.0;
                     }
+
+                    let forward = Self::forward_from_angles(self.cam.angles);
+                    let view = Mat4::look_at_rh(self.cam.pos, self.cam.pos + forward, Vec3::Z);
+                    let proj = Mat4::perspective_rh_gl(
+                        config.view.fov.to_radians(),
+                        w / h,
+                        4.0,
+                        100_000.0,
+                    );
+                    common_vp = proj * view;
 
                     if canvas_interacting && ui.is_key_pressed(dear_imgui_rs::Key::Tab) {
                         // TAB key handling - could be used for other purposes if needed
@@ -508,27 +522,11 @@ impl View3D {
                                 Vec3::ZERO
                             };
 
-                            //let forward = Self::forward_from_angles(self.cam.angles);
-                            // let up_vec = Vec3::Z;
-                            // let view = Mat4::look_at_rh(self.cam.pos, self.cam.pos + forward, up_vec);
-                            // Use perspective_rh_gl to match the renderer
-                            // let proj = Mat4::perspective_rh_gl(config.view.fov.to_radians(), w / h, 4.0, 100_000.0);
-                            // let inv_vp = (proj * view).inverse();
-
                             let ray = self.screen_to_ray(Vec2::new(mouse[0], mouse[1]), config);
-                            // let denom = forward.dot(ray);
-                            // if denom.abs() > 1e-6 {
-                            //     let t = forward.dot(selection_center - self.cam.pos) / denom;
-                            //     self.drag_world_anchor = self.cam.pos + ray * t;
-                            //     self.drag_plane_normal = forward;
-                            //     self.drag_plane_origin = selection_center;
-                            // }
-                            //
-                            // crate::log_info!(console, "anchor={:.1?} sel_center={:.1?}", self.drag_world_anchor, selection_center);
                             let brush_hit_t =
                                 selected_brushes
                                     .iter()
-                                    .find_map(|&(entity_idx, brush_idx)| {
+                                    .filter_map(|&(entity_idx, brush_idx)| {
                                         let entity = map.as_mut()?.entities.get_mut(entity_idx)?;
                                         let brush = entity.brushes.get_mut(brush_idx)?;
                                         let (_aabb, polys) = brush.get_polygons_and_aabb()?;
@@ -556,7 +554,8 @@ impl View3D {
                                             }
                                         }
                                         best
-                                    });
+                                    })
+                                    .min_by(|a, b| a.total_cmp(b));
                             let entity_hit_t = map.as_ref().and_then(|map| {
                                 selected_entities
                                     .iter()
@@ -603,35 +602,8 @@ impl View3D {
                         && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
                     {
                         if !selected_brushes.is_empty() || !selected_entities.is_empty() {
-                            //                             let current = Vec2::new(mouse[0], mouse[1]);
-                            //                             let start = self.drag_start.unwrap();
-                            //                             self.drag_current = Some(current);
-                            //
-                            //                             // Calculate total movement from start position
-                            //                             let dx = current.x - start.x;
-                            //                             let dy = current.y - start.y;
-                            //                             let mut total_move = self.drag_x_dir * dx + self.drag_y_dir * dy;
-                            //
-                            //                             // Snap to grid if enabled (snap the total movement, not frame delta)
-                            //                             if config.view.grid_snap {
-                            //                                 let grid = config.view.grid_minor_step.max(1) as f32;
-                            //                                 total_move.x = (total_move.x / grid + 0.5).floor() * grid;
-                            //                                 total_move.y = (total_move.y / grid + 0.5).floor() * grid;
-                            //                                 total_move.z = (total_move.z / grid + 0.5).floor() * grid;
-                            //                             }
-                            //
-                            //                             // Update the move offset (this will be applied on release)
-                            //                             self.move_offset = total_move;
-                            //
-                            //                             crate::log_info!(console, "drag: current={:?} start={:?} dx={} dy={} total_move={:?}", current, start, dx, dy, total_move);
 
                             let current = Vec2::new(mouse[0], mouse[1]);
-
-                            // let forward = Self::forward_from_angles(self.cam.angles);
-                            // let up_vec = Vec3::Z;
-                            // let view = Mat4::look_at_rh(self.cam.pos, self.cam.pos + forward, up_vec);
-                            // let proj = Mat4::perspective_rh_gl(config.view.fov.to_radians(), w / h, 4.0, 100_000.0);
-                            // let inv_vp = (proj * view).inverse();
 
                             let ray = self.screen_to_ray(current, config);
                             let denom = self.drag_plane_normal.dot(ray);
@@ -702,6 +674,15 @@ impl View3D {
                     }
                 }
 
+                if !ui.is_item_hovered() {
+                    // if mouse no longer hovers on 3d view, reset drag and move offset
+                    if self.drag_start.is_some() && self.move_offset != Vec3::ZERO {
+                        self.drag_start = None;
+                        self.drag_current = None;
+                        self.move_offset = Vec3::ZERO;
+                    }
+                }
+
                 if ui.is_window_hovered() {
                     if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
                         if edit_faces {
@@ -717,11 +698,6 @@ impl View3D {
                             selected_patch_vertices.clear();
                         }
                         selected_entities.clear();
-                        // self.stretch = None;
-                        // self.stretch_delta = Vec3::ZERO;
-                        // self.rotate = None;
-                        // self.rotate_angle = 0.0;
-                        // self.move_offset = Vec3::ZERO;
                     }
                 }
 
@@ -753,6 +729,64 @@ impl View3D {
                     hud_col,
                     &format!("Move Speed ({:.0})", self.cam.zoom),
                 );
+
+                // Snapped drag marker
+                if self.drag_start.is_some() && self.move_offset != Vec3::ZERO {
+                    let snapped_world = self.drag_world_anchor + self.move_offset;
+                    if let Some(screen_pos) = world_to_screen_3d(common_vp, self.rect, snapped_world) {
+                        let col = imgui_color_to_u32(palette.theme_primary);
+                        draw.add_circle(screen_pos, 4.0, col).filled(true).build();
+                    }
+                }
+
+                // selected entity labels
+                for ent_id in selected_entities {
+                    if let Some(map) = map && let Some(ent) = map.entities.get(*ent_id) {
+                        // skip entities with brushes, e.g. triggers, worldspawn
+                        if !ent.brushes.is_empty() {
+                            continue;
+                        }
+                        let has_model = ent.model.is_some();
+                        let origin = if let Some(o) = ent.properties.get("origin") {
+                            core_util::origin_to_vec3(o)
+                        }
+                        else { Vec3::ZERO };
+                        let style = ent_draw_config.resolve(&ent.classname, has_model);
+                        let world_pos = match style.anchor {
+                            EntityDrawAnchor::Center => {
+                                if has_model {
+                                    let model_height = if let Some(ref m) = ent.model {
+                                        (m.maxs.z - m.mins.z).abs()
+                                    } else { 0.0 };
+                                    Vec3::new(origin.x, origin.y, origin.z + model_height + 4.0)
+                                }
+                                else {
+                                    Vec3::new(origin.x, origin.y, origin.z + (style.size[2] / 2.0) + 4.0)
+                                }
+                            },
+                            EntityDrawAnchor::Base => {
+                                if has_model {
+                                    let model_height = if let Some(ref m) = ent.model {
+                                        (m.maxs.z - m.mins.z).abs()
+                                    } else { 0.0 };
+                                    Vec3::new(origin.x, origin.y, origin.z + model_height + 4.0)
+                                }
+                                else {
+                                    Vec3::new(origin.x, origin.y, origin.z + style.size[2] + 4.0)
+                                }
+                            }
+                        };
+                        if let Some(screen_pos) = world_to_screen_3d(common_vp, self.rect, world_pos) {
+                            let label = format!("{ent_id}: {} ({}, {}, {})", &ent.classname, origin.x, origin.y, origin.z);
+                            let tw = crate::util::text_width(ui, &label);
+                            draw.add_text(
+                                [screen_pos[0] - tw * 0.5, screen_pos[1]],
+                                adjust_color_brightness(imgui_color_to_u32(selection_rgba), 1.5),
+                                label,
+                            );
+                        }
+                    }
+                }
             });
     }
 

@@ -98,6 +98,7 @@ pub fn palette_from_theme(
     };
     let text = style.color(StyleColor::Text);
     let text_disabled = style.color(StyleColor::TextDisabled);
+    let button = style.color(StyleColor::Button);
 
     let mut palette = EditorPalette {
         // Default to ImGui style colors (so themes that omit `[editor]` still look coherent),
@@ -126,6 +127,7 @@ pub fn palette_from_theme(
         console_error: style.color(StyleColor::DragDropTarget),
         hud_text: text,
         hud_text_dim: text_disabled,
+        theme_primary: button,
     };
 
     // Optional explicit overrides from theme file.

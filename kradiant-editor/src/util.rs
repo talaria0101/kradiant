@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use crate::ui::EditorState;
 use crate::ui::console::ConsoleLogger;
-use glam::{Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 use kradiant::editor::selection::{EdgeSelection, FaceSelection, PatchVertexSelection};
 use kradiant::editor::undo::UndoRedo;
 
@@ -153,6 +153,23 @@ pub fn world_to_screen(
         p[0] + w * 0.5 + pan[0] + v[0] * zoom,
         p[1] + h * 0.5 + pan[1] + v[1] * zoom,
     ]
+}
+
+pub fn world_to_screen_3d(vp: Mat4, rect: [f32; 4], world: Vec3) -> Option<[f32; 2]> {
+    let clip = vp * glam::Vec4::new(world.x, world.y, world.z, 1.0);
+    if clip.w < 0.1 {
+        return None; // behind or too close to camera
+    }
+    let ndc = glam::Vec3::new(clip.x, clip.y, clip.z) / clip.w;
+    // Reject points outside the clip volume (beyond any frustum face).
+    if ndc.x.abs() > 1.0 || ndc.y.abs() > 1.0 || ndc.z.abs() > 1.0 {
+        return None;
+    }
+    let [rx, ry, rw, rh] = rect;
+    Some([
+        rx + (ndc.x * 0.5 + 0.5) * rw,
+        ry + (1.0 - (ndc.y * 0.5 + 0.5)) * rh,
+    ])
 }
 
 pub fn snap(v: f32, step: f32) -> f32 {
