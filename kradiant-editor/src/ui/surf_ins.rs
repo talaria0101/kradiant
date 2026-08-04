@@ -226,6 +226,7 @@ pub fn draw_surf_inspector(ui: &Ui, state: &mut EditorState) {
                         }
                     }
                 }
+                core.map_revision = core.map_revision.wrapping_add(1);
             }
 
             if &old_si != si {
@@ -248,8 +249,7 @@ pub fn draw_surf_inspector(ui: &Ui, state: &mut EditorState) {
                         }
                     }
                 }
+                core.map_revision = core.map_revision.wrapping_add(1);
             }
-
-            core.map_revision = core.map_revision.wrapping_add(1);
         });
 }
