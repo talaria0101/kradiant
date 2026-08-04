@@ -1321,7 +1321,7 @@ impl View2D {
                                         } else if edit_edges {
                                             !selected_edges.is_empty()
                                         } else {
-                                            !selected_brushes.is_empty()
+                                            !selected_brushes.is_empty() || !selected_entities.is_empty()
                                         };
                                         if map.is_some() && has_selection {
                                             let label = if edit_faces { "Rotate faces" } else { "Rotate selection" };
