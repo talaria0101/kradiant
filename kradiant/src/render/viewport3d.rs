@@ -105,6 +105,7 @@ pub struct Viewport3D {
     fbo_size: [u32; 2],
     cache: Option<View3dCache>,
     last_selection_hash: u64,
+    last_preview_hash: u64,
 }
 
 impl Viewport3D {
@@ -136,6 +137,7 @@ impl Viewport3D {
             rbo,
             cache,
             last_selection_hash: 0,
+            last_preview_hash: 0,
         }
     }
     pub fn render(&mut self, backend: &mut RenderBackend<'_>, editor: &mut EditorState) {
@@ -250,7 +252,7 @@ impl Viewport3D {
                         let has_model = ent.model.is_some();
                         let style = editor.entity_drawing.resolve(&ent.classname, has_model);
 
-                        let draw_entity_visual = ent.classname != "worldspawn"
+                        let draw_entity_visual = ent.brushes.is_empty()
                             && !matches!(style.kind, EntityDrawKind::Hidden);
 
                         let mut model_ref: Option<&crate::xmodel::XModel> = None;
@@ -737,7 +739,22 @@ impl Viewport3D {
             };
             //println!("current_selection_hash: {}\nlast_selection_hash: {}", current_selection_hash, self.last_selection_hash);
 
-            if current_selection_hash != self.last_selection_hash {
+            // Drag preview state: the highlight must follow the cursor while
+            // dragging, but the selection hash doesn't change during a drag.
+            // Include the preview transform in the rebuild condition.
+            let preview_hash = {
+                let mut h: u64 = 5381;
+                h = h.wrapping_mul(31).wrapping_add(editor.view3d.drag_mode as u64);
+                let o = editor.view3d.move_offset;
+                for b in [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()] {
+                    h = h.wrapping_mul(31).wrapping_add(b as u64);
+                }
+                h
+            };
+
+            if current_selection_hash != self.last_selection_hash
+                || preview_hash != self.last_preview_hash
+            {
                 self.tri_vertices_selected.clear();
 
                 if let Some(map) = editor.map.as_mut() {
@@ -836,6 +853,11 @@ impl Viewport3D {
                                 editor.selected_brushes.contains(&(entity_idx, brush_idx));
 
                             let mut faces_to_highlight: Vec<usize> = Vec::new();
+                            let preview_drag_mode = editor.view3d.drag_mode;
+                            let preview_move_offset = editor.view3d.move_offset;
+                            let preview_point = |p: Vec3| -> Vec3 {
+                                core_util::preview_point(preview_drag_mode, preview_move_offset, None, None, None, p)
+                            };
 
                             if editor.edit_faces {
                                 // Face edit mode: ONLY highlight selected faces
@@ -885,9 +907,9 @@ impl Viewport3D {
                                         let nf = [n.x, n.y, n.z];
 
                                         for i in 1..positions.len() - 1 {
-                                            let v0 = positions[0];
-                                            let v1 = positions[i];
-                                            let v2 = positions[i + 1];
+                                            let v0 = preview_point(positions[0]);
+                                            let v1 = preview_point(positions[i]);
+                                            let v2 = preview_point(positions[i + 1]);
                                             self.tri_vertices_selected.push(LitVertex {
                                                 pos: v0.into(),
                                                 normal: nf,
@@ -918,9 +940,9 @@ impl Viewport3D {
                                                 continue;
                                             }
 
-                                            let v0 = pos[i0];
-                                            let v1 = pos[i1];
-                                            let v2 = pos[i2];
+                                            let v0 = preview_point(pos[i0]);
+                                            let v1 = preview_point(pos[i1]);
+                                            let v2 = preview_point(pos[i2]);
 
                                             let n = (v1 - v0).cross(v2 - v0).normalize_or_zero();
                                             let nf = [n.x, n.y, n.z];
@@ -946,6 +968,7 @@ impl Viewport3D {
                 }
 
                 self.last_selection_hash = current_selection_hash;
+                self.last_preview_hash = preview_hash;
             }
 
             // Draw into FBO
@@ -1096,10 +1119,14 @@ impl Viewport3D {
                     backend.gl.disable(glow::DEPTH_TEST);
                 }
 
-                let red_tint = [1.0, 0.25, 0.25, 0.65];
+                // let tint = [1.0, 0.25, 0.25, 0.65];
+                let tint = {
+                    let base = editor.selection_rgba;
+                    [base[0], base[1], base[2], base[3] * 0.75]
+                };
                 backend.draw_triangles_lit(
                     &self.tri_vertices_selected,
-                    red_tint,
+                    tint,
                     mvp,
                     ambient * 0.7,
                     light_dir,

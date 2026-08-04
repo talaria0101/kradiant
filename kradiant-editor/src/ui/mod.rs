@@ -286,6 +286,8 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
     draw_properties(ui, state);
     draw_surf_inspector(ui, state);
     //draw_view3d(ui, state);
+
+    state.core.selection_rgba = ui.style_color(StyleColor::ButtonActive);
     {
         let view3d_ref = &mut state.view3d;
         let config = &mut state.core.config;
@@ -297,9 +299,6 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         let selected_edges = &mut state.core.selected_edges;
         let selected_patch_vertices = &mut state.core.selected_patch_vertices;
         let selected_entities = &mut state.core.selected_entities;
-        let edit_faces = state.core.edit_faces;
-        let edit_vertices = state.core.edit_vertices;
-        let edit_edges = state.core.edit_edges;
         let map = &mut state.core.map;
         let ent_draw_config = &state.core.entity_drawing;
 
@@ -314,23 +313,20 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             selected_edges,
             selected_patch_vertices,
             selected_entities,
-            edit_faces,
-            edit_vertices,
-            edit_edges,
+            state.core.edit_faces,
+            state.core.edit_vertices,
+            state.core.edit_edges,
             map,
             ent_draw_config,
+            state.core.selection_rgba,
         );
     }
-
-    state.core.selection_rgba = ui.style_color(StyleColor::ButtonActive);
 
     //  Call view2d draw separately to avoid dual mutable borrow
     {
         let view2d_ref = &mut state.view2d;
         let config = &mut state.core.config;
         let axis_lock = &state.axis_lock;
-        let rotate_mode = state.rotate_mode;
-        let stretch_mode = state.core.stretch_mode;
         let palette = &state.core.palette;
         let console = &mut state.console;
         let undo = &mut state.core.undo;
@@ -339,12 +335,7 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
         let selected_edges = &mut state.core.selected_edges;
         let selected_patch_vertices = &mut state.core.selected_patch_vertices;
         let selected_entities = &mut state.core.selected_entities;
-        let edit_faces = state.core.edit_faces;
-        let edit_edges = state.core.edit_edges;
-        let edit_vertices = state.core.edit_vertices;
         let map = &mut state.core.map;
-        let selection_rgba = state.core.selection_rgba;
-        let selection_rect_rgba = state.selection_rect_rgba;
         let view_config_rev = &mut state.core.view_config_rev;
         let ents_catd = &state.ents_catd;
         let map_revision = &mut state.core.map_revision;
@@ -354,8 +345,8 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             ui,
             config,
             axis_lock,
-            rotate_mode,
-            stretch_mode,
+            state.rotate_mode,
+            state.core.stretch_mode,
             palette,
             console,
             undo,
@@ -364,12 +355,12 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             selected_edges,
             selected_patch_vertices,
             selected_entities,
-            edit_faces,
-            edit_edges,
-            edit_vertices,
+            state.core.edit_faces,
+            state.core.edit_edges,
+            state.core.edit_vertices,
             map,
-            selection_rgba,
-            selection_rect_rgba,
+            state.core.selection_rgba,
+            state.selection_rect_rgba,
             view_config_rev,
             ents_catd,
             map_revision,

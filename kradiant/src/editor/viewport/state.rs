@@ -88,6 +88,7 @@ pub struct View3DState {
     pub rect: [f32; 4],
     pub cam: Camera,
     pub drag_mode: DragMode,
+    pub move_offset: Vec3,
 }
 
 impl Default for View3DState {
@@ -100,6 +101,7 @@ impl Default for View3DState {
                 zoom: 64.0,
             },
             drag_mode: DragMode::RectangularSelection,
+            move_offset: Vec3::ZERO,
         }
     }
 }

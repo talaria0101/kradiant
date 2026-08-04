@@ -1,4 +1,4 @@
-use crate::{Quat, Vec3, editor::viewport::Ortho, map_utils::format_float_trim};
+use crate::{Quat, Vec3, editing::{AffineRotate, AffineScale}, editor::viewport::{DragMode, Ortho, StretchMode}, map_utils::format_float_trim};
 
 pub fn project_to_2d(v: Vec3, axis: Ortho) -> [f32; 2] {
     match axis {
@@ -326,6 +326,28 @@ pub fn resolved_arrow_length(style: &crate::editor::config::EntityDrawStyle, fal
         style.arrow_length
     } else {
         fallback
+    }
+}
+
+pub(crate) fn preview_point(dmode: DragMode, offset: Vec3, stretch_mode: Option<StretchMode>, stretch: Option<AffineScale>, rotate: Option<AffineRotate>, p: Vec3) -> Vec3
+{
+    match dmode {
+        DragMode::MoveSelection | DragMode::MoveVertices => p + offset,
+        DragMode::StretchSelection if stretch_mode.is_some() => {
+            let stretch_mode = stretch_mode.unwrap();
+            if stretch_mode == StretchMode::Scale {
+                stretch
+                .map(|x: AffineScale| x.apply_point(p))
+                .unwrap_or(p)
+            } else {
+                p
+            }
+        }
+        DragMode::NewBrush | DragMode::RectangularSelection => p,
+        DragMode::RotateSelection => {
+            rotate.map(|r| r.apply_point(p)).unwrap_or(p)
+        }
+        _ => p
     }
 }
 
