@@ -972,9 +972,14 @@ pub fn pick_convex_face_by_ray(
             if brush.is_clip() && !sel_clip {
                 continue;
             }
-            let BrushContent::Convex(_) = &mut brush.content else {
+            let BrushContent::Convex(_) = &brush.content else {
                 continue;
             };
+
+            // Skip brushes that contain the camera.
+            if is_point_inside_convex_brush(brush, ray_origin) {
+                continue;
+            }
 
             let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
                 continue;
@@ -1047,6 +1052,13 @@ pub fn pick_brush_by_ray(
             // Skip excluded brushes
             if let Some(exclude_set) = exclude {
                 if exclude_set.contains(&(entity_index, brush_index)) {
+                    continue;
+                }
+            }
+
+            // Skip brushes that contain the camera.
+            if let BrushContent::Convex(_) = &brush.content {
+                if is_point_inside_convex_brush(brush, ray_origin) {
                     continue;
                 }
             }
@@ -1152,6 +1164,13 @@ pub fn pick_edge_by_ray(
             // Skip excluded brushes
             if let Some(exclude_set) = exclude {
                 if exclude_set.contains(&(entity_index, brush_index)) {
+                    continue;
+                }
+            }
+
+            // Skip brushes that contain the camera.
+            if let BrushContent::Convex(_) = &brush.content {
+                if is_point_inside_convex_brush(brush, ray_origin) {
                     continue;
                 }
             }
@@ -1346,6 +1365,15 @@ pub fn pick_brush_or_ent_by_ray(
                 }
             }
 
+            // Skip brushes that contain the camera — they would block
+            // picking of brushes behind them (the ray hits their backfaces
+            // first, making them the closest hit).
+            if let BrushContent::Convex(_) = &brush.content {
+                if is_point_inside_convex_brush(brush, ray_origin) {
+                    continue;
+                }
+            }
+
             match &mut brush.content {
                 BrushContent::Convex(_) => {
                     if !mask.contains(PickMask::CONVEX) {
@@ -1466,18 +1494,6 @@ pub fn pick_brush_or_ent_by_ray(
             }
         }
     }
-
-    // Filter out brushes that contain the camera (ray_origin)
-    let best_brush = best_brush.and_then(|(ei, bi, t)| {
-        if let Some(brush) = map.entities.get(ei).and_then(|e| e.brushes.get(bi)) {
-            if let BrushContent::Convex(_) = &brush.content {
-                if is_point_inside_convex_brush(map, ei, bi, ray_origin) {
-                    return None; // Exclude brushes containing the camera
-                }
-            }
-        }
-        Some((ei, bi, t))
-    });
 
     // Return the closest hit
     match (best_brush, best_entity) {
@@ -1974,14 +1990,7 @@ pub fn find_inside_brushes(
 
 /// Check if a point is inside a convex brush.
 /// Returns true if the point is on the inside side of all face planes.
-pub fn is_point_inside_convex_brush(
-    map: &Map,
-    entity_idx: usize,
-    brush_idx: usize,
-    point: Vec3,
-) -> bool {
-    let brush = &map.entities[entity_idx].brushes[brush_idx];
-
+pub fn is_point_inside_convex_brush(brush: &Brush, point: Vec3) -> bool {
     let planes: Vec<(Vec3, f32)> = match &brush.content {
         BrushContent::Convex(faces) => faces
             .iter()
@@ -1991,10 +2000,9 @@ pub fn is_point_inside_convex_brush(
                 (n, d)
             })
             .collect(),
-        BrushContent::Patch(_) => return false, // Not a convex brush
+        BrushContent::Patch(_) => return false,
     };
 
-    // Check if point is on the inside side of all planes
     planes.iter().all(|(n, d)| {
         n.dot(point) + d >= -0.001 // epsilon for floating point
     })
