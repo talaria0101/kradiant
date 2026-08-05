@@ -7,7 +7,7 @@
 use crate::core_util::vec3_to_origin;
 use crate::editing::{Aabb, aabb_from_polys, aabb_from_positions};
 use crate::editor::SurfInspector;
-use crate::texmap::{face_plane_normal, q3_texture_axes_from_normal, rotate_texture_axes};
+use crate::texmap::{face_plane_normal, q3_texture_axes_from_normal, rotate_texture_axes, translation_offset_shift};
 use crate::xmodel::XModel;
 use crate::{IVec2, Vec2, Vec3, core_util};
 use std::collections::{HashMap, HashSet};
@@ -280,10 +280,14 @@ impl Brush {
         let dv = delta;
         match &mut self.content {
             BrushContent::Convex(faces) => {
-                for face in faces {
+                for face in faces.iter_mut() {
                     for p in &mut face.plane_points {
                         *p += dv;
                     }
+                    // Texture Lock: adjust shift so the texture stays visually
+                    // glued when the brush moves (matching CoDRadiant/GTKRadiant).
+                    let shift_delta = translation_offset_shift(face, dv);
+                    face.params.shift += shift_delta;
                 }
                 self.cached_geometry = None;
             }
@@ -536,8 +540,18 @@ mod tests {
         let mut face = face;
         face.fit_texture(&poly, 64.0, 64.0, 1);
 
-        // s_extent=20, scale.x=20/64 -> shift.x=wrap(-(-10)/(20/64))=wrap(32,64)=32
-        // u(x) = x/(64*scale.x) + shift.x/64, so u(-10)=0 and u(10)=1.
+        // World-relative fit (matching CoDRadiant): s_min=-10, extent=20,
+        // scale.x=20/64, shift.x=wrap(-(-10)/(20/64),64)=32.
+        assert!(
+            (face.params.scale.x - 20.0 / 64.0).abs() < 1.0e-3,
+            "expected scale.x ~= {}, got {}",
+            20.0 / 64.0,
+            face.params.scale.x
+        );
+        assert_eq!(face.params.shift.x, 32, "shift.x must match CoDRadiant fit");
+        assert_eq!(face.params.shift.y, 32, "shift.y must match CoDRadiant fit");
+
+        // World-relative UV mapper: u(x) = x/(64*scale.x) + shift.x/64
         let mapper = FaceUvMapper::new(&face, 64.0, 64.0);
         let u_min = mapper.uv(Vec3::new(-10.0, 0.0, 0.0)).x;
         let u_max = mapper.uv(Vec3::new(10.0, 0.0, 0.0)).x;
@@ -548,6 +562,46 @@ mod tests {
         assert!(
             (u_max - 1.0).abs() < 1.0e-3,
             "expected u(10) ~= 1, got {u_max}"
+        );
+    }
+
+    #[test]
+    fn translate_adjusts_shift_to_glue_texture() {
+        let mut brush = Brush {
+            id: BrushId(0),
+            content: BrushContent::Convex(vec![Face {
+                plane_points: [
+                    Vec3::new(-10.0, -10.0, 0.0),
+                    Vec3::new(10.0, -10.0, 0.0),
+                    Vec3::new(-10.0, 10.0, 0.0),
+                ],
+                texture: "test".into(),
+                params: default_texture_params(),
+            }]),
+            aabb: Aabb::default(),
+            cached_geometry: None,
+        };
+
+        let mut gen_id = 0u64;
+        let before_shift = brush.get_face(0).unwrap().params.shift;
+        // A point on the face before the move.
+        let p = Vec3::new(0.0, 0.0, 0.0);
+        let before = FaceUvMapper::new(&brush.get_face(0).unwrap(), 64.0, 64.0).uv(p);
+
+        // Move the brush; texture lock adjusts shift so the UV at the moved
+        // face location stays identical (texture stays glued to the face).
+        let dv = Vec3::new(128.0, -64.0, 0.0);
+        brush.translate(&mut gen_id, dv);
+        let after = FaceUvMapper::new(&brush.get_face(0).unwrap(), 64.0, 64.0).uv(p + dv);
+        let after_shift = brush.get_face(0).unwrap().params.shift;
+
+        assert_ne!(
+            before_shift, after_shift,
+            "texture lock must modify shift on translate"
+        );
+        assert!(
+            (before.x - after.x).abs() < 1.0e-3 && (before.y - after.y).abs() < 1.0e-3,
+            "expected UVs glued across translation, got {before:?} -> {after:?}"
         );
     }
 }
