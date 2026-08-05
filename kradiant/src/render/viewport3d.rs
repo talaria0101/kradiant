@@ -39,7 +39,7 @@ pub struct TexVertex {
     pub uv: [f32; 2],
 }
 
-fn solid_box_lit_vertices_from_base(base: Vec3, size: Vec3, rot: Option<Quat>) -> Vec<LitVertex> {
+fn solid_box_lit_vertices_from_base<F: Fn(Vec3) -> Vec3>(base: Vec3, size: Vec3, rot: Option<Quat>, preview_fn: F) -> Vec<LitVertex> {
     let min = base;
     let max = base + size;
     let center = base + size * 0.5;
@@ -75,7 +75,7 @@ fn solid_box_lit_vertices_from_base(base: Vec3, size: Vec3, rot: Option<Quat>) -
         let normal = rot.map(|r| r * normal).unwrap_or(normal);
         for i in idxs {
             out.push(LitVertex {
-                pos: corners[i].into(),
+                pos: preview_fn(corners[i]).into(),
                 normal: normal.into(),
             });
         }
@@ -360,10 +360,12 @@ impl Viewport3D {
                                         }
                                     } else {
                                         let size = Vec3::from_array(style.size);
+                                        let dumb_fn = |p: Vec3| -> Vec3 {p};
                                         let tris = solid_box_lit_vertices_from_base(
                                             entity_solid_box_base(pivot, size, style.anchor),
                                             size,
                                             model_rot,
+                                            dumb_fn
                                         );
                                         self.entity_solid_batches.push((style.color, tris));
                                         if style.show_arrow {
@@ -756,6 +758,11 @@ impl Viewport3D {
                 || preview_hash != self.last_preview_hash
             {
                 self.tri_vertices_selected.clear();
+                let preview_drag_mode = editor.view3d.drag_mode;
+                let preview_move_offset = editor.view3d.move_offset;
+                let preview_point = |p: Vec3| -> Vec3 {
+                    core_util::preview_point(preview_drag_mode, preview_move_offset, None, None, None, p)
+                };
 
                 if let Some(map) = editor.map.as_mut() {
                     let _selected_face_set: HashSet<(usize, usize, usize)> = editor
@@ -766,7 +773,7 @@ impl Viewport3D {
 
                     for (entity_idx, ent) in map.entities.iter_mut().enumerate() {
                         if editor.selected_entities.contains(&entity_idx)
-                            && ent.classname != "worldspawn"
+                            && ent.brushes.is_empty()
                         {
                             let style = editor
                                 .entity_drawing
@@ -822,15 +829,15 @@ impl Viewport3D {
                                             model_rot.map(|r| r * v2.normal).unwrap_or(v2.normal);
 
                                         self.tri_vertices_selected.push(LitVertex {
-                                            pos: p0.into(),
+                                            pos: preview_point(p0).into(),
                                             normal: n0.into(),
                                         });
                                         self.tri_vertices_selected.push(LitVertex {
-                                            pos: p1.into(),
+                                            pos: preview_point(p1).into(),
                                             normal: n1.into(),
                                         });
                                         self.tri_vertices_selected.push(LitVertex {
-                                            pos: p2.into(),
+                                            pos: preview_point(p2).into(),
                                             normal: n2.into(),
                                         });
                                     }
@@ -844,7 +851,7 @@ impl Viewport3D {
                                     .get("angles")
                                     .and_then(|s| core_util::vec3_from_whitespace_triplet(s));
                                 let rot = angles.map(core_util::entity_angles_to_quat);
-                                let tris = solid_box_lit_vertices_from_base(base, size, rot);
+                                let tris = solid_box_lit_vertices_from_base(base, size, rot, preview_point);
                                 self.tri_vertices_selected.extend(tris);
                             }
                         }
@@ -853,11 +860,6 @@ impl Viewport3D {
                                 editor.selected_brushes.contains(&(entity_idx, brush_idx));
 
                             let mut faces_to_highlight: Vec<usize> = Vec::new();
-                            let preview_drag_mode = editor.view3d.drag_mode;
-                            let preview_move_offset = editor.view3d.move_offset;
-                            let preview_point = |p: Vec3| -> Vec3 {
-                                core_util::preview_point(preview_drag_mode, preview_move_offset, None, None, None, p)
-                            };
 
                             if editor.edit_faces {
                                 // Face edit mode: ONLY highlight selected faces
