@@ -839,11 +839,15 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             if let Some(aabb) = state.view2d.last_aabb.clone() {
                 view2d::update_last_work_from_aabb(&mut state.view2d, &aabb);
             }
+            if let Some(aabb) = state.view3d.last_aabb.clone() {
+                state.view3d.update_work_from_aabb(aabb);
+            }
         }
 
         if key_combo_pressed(ui, dear_imgui_rs::Key::C, SHIFT) {
             if !state.core.selected_brushes.is_empty() {
                 state.view2d.center_to_work();
+                state.view3d.center_to_work();
                 log_info!(state.console, "Goto Selection");
             }
         }

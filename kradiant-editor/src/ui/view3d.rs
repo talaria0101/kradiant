@@ -1,16 +1,18 @@
 //! 3D View
 
-use dear_imgui_rs::{Condition, Key, TextureId, Ui, WindowFlags};
+use dear_imgui_rs::{Condition, Key, StyleColor, TextureId, Ui, WindowFlags};
+use kradiant::editing::Aabb;
 use glam::{Mat4, Vec2, Vec3};
 use kradiant::editor::config::EntityDrawAnchor;
 use kradiant::editor::viewport::DragMode;
 use kradiant::editor::viewport::state::View3DState;
 use kradiant::editor::{EditorConfig, EditorPalette, FaceSelection, PatchVertexSelection};
+use kradiant::map_utils::format_vec3;
 use std::ops::{Deref, DerefMut};
 
 use crate::ui::editing::PickMask;
-use crate::ui::view2d;
-use crate::util::{adjust_color_brightness, imgui_color_to_u32, world_to_screen_3d};
+use crate::ui::view2d::{self, selection_aabb_active};
+use crate::util::{self, adjust_color_brightness, imgui_color_to_u32, text_height, text_width, world_to_screen_3d};
 use kradiant::{core_util, editing};
 use kradiant::editor::selection::EdgeSelection;
 use std::collections::HashSet;
@@ -42,6 +44,8 @@ pub struct View3D {
     pub drag_world_anchor: Vec3, // world point clicked at drag start
     // Accumulated drag offset during drag (applied to geometry only on release)
     // pub move_offset: Vec3,
+    work_pos: Vec3,
+    pub last_aabb: Option<Aabb>,
 }
 
 impl Default for View3D {
@@ -65,6 +69,8 @@ impl Default for View3D {
             drag_plane_origin: Vec3::ZERO,
             drag_world_anchor: Vec3::ZERO,
             // move_offset: Vec3::ZERO,
+            work_pos: Vec3::ZERO,
+            last_aabb: None,
         }
     }
 }
@@ -98,6 +104,15 @@ impl View3D {
     fn right_from_angles(angles: Vec3) -> Vec3 {
         let yaw = angles.x;
         Vec3::new(yaw.sin(), -yaw.cos(), 0.0).normalize()
+    }
+
+    pub fn update_work_from_aabb(&mut self, aabb: Aabb) {
+        self.work_pos = (aabb.min + aabb.max) / 2.0;
+    }
+
+    pub fn center_to_work(&mut self) {
+        let forward = Self::forward_from_angles(self.cam.angles);
+        self.cam.pos = self.work_pos - forward * self.cam.zoom;
     }
 
     pub fn draw_impl(
@@ -367,6 +382,10 @@ impl View3D {
                                         selected_faces,
                                         selected_brushes,
                                     );
+                                    if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                        self.last_aabb = Some(aabb.clone());
+                                        self.update_work_from_aabb(aabb);
+                                    }
                                 }
                             }
                         } else if edit_edges {
@@ -397,6 +416,10 @@ impl View3D {
                                         selected_edges,
                                         selected_brushes,
                                     );
+                                    if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                        self.last_aabb = Some(aabb.clone());
+                                        self.update_work_from_aabb(aabb);
+                                    }
                                 }
                             }
                         } else if edit_vertices {
@@ -430,6 +453,10 @@ impl View3D {
                                         }
                                     } else if !selected_patch_vertices.contains(&vsel) {
                                         selected_patch_vertices.push(vsel);
+                                    }
+                                    if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                        self.last_aabb = Some(aabb.clone());
+                                        self.update_work_from_aabb(aabb);
                                     }
                                 }
                             }
@@ -465,6 +492,9 @@ impl View3D {
                                             }
                                         }
                                         selected_faces.clear();
+                                        if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                            self.update_work_from_aabb(aabb);
+                                        }
                                     }
                                     Err(ent_idx) => {
                                         // Entity hit
@@ -481,6 +511,9 @@ impl View3D {
                                                 selected_entities.remove(i);
                                             }
                                         }
+                                        if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                            self.update_work_from_aabb(aabb);
+                                        }
                                     }
                                 }
                             }
@@ -488,10 +521,9 @@ impl View3D {
                     } // end if shift_selecting
                     if ui.is_mouse_clicked(MouseButton::Left)
                         && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
+                        && ui.is_key_down(dear_imgui_rs::Key::LeftAlt)
                     {
-                        if ui.is_key_down(dear_imgui_rs::Key::LeftAlt) {
-                            self.drag_mode = DragMode::RectangularSelection;
-                        }
+                        self.drag_mode = DragMode::RectangularSelection;
                     }
 
                     // Handle left-click drag for transformations
@@ -530,7 +562,6 @@ impl View3D {
                                         let entity = map.as_mut()?.entities.get_mut(entity_idx)?;
                                         let brush = entity.brushes.get_mut(brush_idx)?;
                                         let (_aabb, polys) = brush.get_polygons_and_aabb()?;
-                                        // ray_polys_first_hit is private to editing.rs, replicate inline:
                                         let mut best: Option<f32> = None;
                                         for (positions, indices) in polys {
                                             for tri in indices.chunks_exact(3) {
@@ -547,8 +578,9 @@ impl View3D {
                                                     positions[i2],
                                                 ) {
                                                     if t > 0.0 {
-                                                        best =
-                                                            Some(best.map_or(t, |b: f32| b.min(t)));
+                                                        best = Some(
+                                                            best.map_or(t, |b: f32| b.min(t)),
+                                                        );
                                                     }
                                                 }
                                             }
@@ -736,6 +768,42 @@ impl View3D {
                     if let Some(screen_pos) = world_to_screen_3d(common_vp, self.rect, snapped_world) {
                         let col = imgui_color_to_u32(palette.theme_primary);
                         draw.add_circle(screen_pos, 4.0, col).filled(true).build();
+                    }
+                }
+
+                // Drag info
+                if let (Some(start), Some(end)) = (self.drag_start, self.drag_current) {
+                    let col = ui.style_color(StyleColor::TabSelectedOverline);
+                    let delta_info_col = util::imgui_color_to_u32(col);
+
+                    match self.drag_mode {
+                        DragMode::MoveSelection => {
+                            let draw_coords = if let Some(sel) = selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                let center = Vec3::new(
+                                    (sel.min.x + sel.max.x) * 0.5,
+                                    (sel.min.y + sel.max.y) * 0.5,
+                                    (sel.min.z + sel.max.z) * 0.5,
+                                );
+                                let a = world_to_screen_3d(common_vp, self.rect, center);
+                                let b = world_to_screen_3d(common_vp, self.rect, center + self.move_offset);
+                                (a, b)
+                            }
+                            else {
+                                (Some(start.into()), Some(end.into()))
+                            };
+                            if let (Some(a), Some(b)) = draw_coords {
+                                let delta_info = format_vec3(self.move_offset, 2);
+                                let tw = text_width(ui, &delta_info);
+                                let text_h = text_height(ui, "1") + 2.0;
+                                let text_pos = [b[0] - tw / 2.0, b[1] - text_h];
+
+                                draw.add_line(a, b, util::adjust_color_brightness(delta_info_col, 1.5))
+                                    .thickness(2.0)
+                                    .build();
+                                draw.add_text(text_pos, util::adjust_color_brightness(delta_info_col, 2.0), delta_info);
+                            }
+                        }
+                        _ => {}
                     }
                 }
 
