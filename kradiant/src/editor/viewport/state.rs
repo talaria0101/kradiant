@@ -2,10 +2,19 @@ use super::types::{DragMode, Ortho};
 use crate::editing::{self, Aabb, AffineRotate, AffineScale};
 use glam::Vec3;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 pub struct StretchDrag {
     pub selection_aabb: Aabb,
     pub faces: [Option<editing::StretchFace>; 2],
+}
+
+/// 3D view camera side-stretch (q3radiant Brush_SideSelect): the faces
+/// grabbed per brush are plane indices, selected by the mouse ray.
+#[derive(Clone, Debug)]
+pub struct SideStretchDrag {
+    pub selection_aabb: Aabb,
+    /// (entity_idx, brush_idx, face indices) per selected brush.
+    pub side_faces: Vec<(usize, usize, Vec<usize>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -83,12 +92,14 @@ pub struct Camera {
     pub zoom: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct View3DState {
     pub rect: [f32; 4],
     pub cam: Camera,
     pub drag_mode: DragMode,
     pub move_offset: Vec3,
+    pub stretch: Option<SideStretchDrag>,
+    pub stretch_delta: Vec3,
 }
 
 impl Default for View3DState {
@@ -102,6 +113,8 @@ impl Default for View3DState {
             },
             drag_mode: DragMode::RectangularSelection,
             move_offset: Vec3::ZERO,
+            stretch: None,
+            stretch_delta: Vec3::ZERO,
         }
     }
 }

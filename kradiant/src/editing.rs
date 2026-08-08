@@ -653,7 +653,195 @@ pub fn stretch_convex_brush_faces(
     }
 }
 
-#[derive(Debug, Clone)]
+/// q3radiant `Brush_SideSelect` (ported from CoD1Radiant core/brush_edit.py):
+/// the mouse ray MISSED the brush — grab every face on whose OUTER side
+/// the ray passes while it stays inside all the other planes (clicking
+/// beside an edge grabs both adjacent faces). Returns face indices into
+/// `BrushContent::Convex`.
+///
+/// Face planes use INWARD normals (`n·p >= dist` is the inside half-space),
+/// matching `is_point_inside_convex_brush`.
+pub fn side_select_faces(brush: &Brush, origin: Vec3, direction: Vec3) -> Vec<usize> {
+    const RAY_LEN: f32 = 16384.0;
+
+    let BrushContent::Convex(faces) = &brush.content else {
+        return Vec::new();
+    };
+    let planes: Vec<(Vec3, f32)> = faces
+        .iter()
+        .map(|f| {
+            let n = face_plane_normal(f);
+            (n, n.dot(f.plane_points[0]))
+        })
+        .collect();
+
+    let start = origin;
+    let end = origin + direction * RAY_LEN;
+
+    let mut selected = Vec::new();
+    for (index, (normal, dist)) in planes.iter().enumerate() {
+        let (mut p1, mut p2) = (start, end);
+        let mut gone = false;
+        for (other_index, (other_normal, other_dist)) in planes.iter().enumerate() {
+            if other_index == index {
+                continue;
+            }
+            match clip_segment_inside(p1, p2, *other_normal, *other_dist) {
+                ClipResult::Inside(a, b) => {
+                    p1 = a;
+                    p2 = b;
+                }
+                ClipResult::Outside => {
+                    gone = true;
+                    break;
+                }
+            }
+        }
+        if gone {
+            continue;
+        }
+        // q3: the ray start never entered the other planes
+        if (p1 - start).length_squared() < 1e-12 {
+            continue;
+        }
+        if matches!(
+            clip_segment_inside(p1, p2, *normal, *dist),
+            ClipResult::Outside
+        ) {
+            selected.push(index);
+        }
+    }
+    selected
+}
+
+enum ClipResult {
+    Inside(Vec3, Vec3),
+    Outside,
+}
+
+/// Port of CoD1Radiant `brush_is_valid` (core/csg.py): a convex brush is
+/// valid when its vertices — the 3-plane intersection points that lie
+/// inside every half-space — number at least 4 and give it real extent
+/// along all three axes. Face planes use INWARD normals
+/// (`n·p >= dist` is inside).
+pub fn is_convex_brush_valid(brush: &Brush) -> bool {
+    let BrushContent::Convex(faces) = &brush.content else {
+        return false;
+    };
+    if faces.len() < 4 {
+        return false;
+    }
+    let planes: Vec<(Vec3, f32)> = faces
+        .iter()
+        .map(|f| {
+            let n = face_plane_normal(f);
+            (n, n.dot(f.plane_points[0]))
+        })
+        .collect();
+
+    let mut verts: Vec<Vec3> = Vec::new();
+    for i in 0..planes.len() {
+        for j in (i + 1)..planes.len() {
+            for k in (j + 1)..planes.len() {
+                let (a, da) = planes[i];
+                let (b, db) = planes[j];
+                let (c, dc) = planes[k];
+                let det = a.dot(b.cross(c));
+                if det.abs() < 1e-9 {
+                    continue;
+                }
+                let p = (da * b.cross(c) + db * c.cross(a) + dc * a.cross(b)) / det;
+                if planes.iter().all(|(n, d)| n.dot(p) - d >= -0.05) {
+                    verts.push(p);
+                }
+            }
+        }
+    }
+    if verts.len() < 4 {
+        return false;
+    }
+    for axis in 0..3 {
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for v in &verts {
+            min = min.min(v[axis]);
+            max = max.max(v[axis]);
+        }
+        if max - min < 1.0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// q3radiant `ClipLineToFace` ported to INWARD normals: trims the segment
+/// to the plane's INNER half-space. `Outside` means the segment is fully
+/// on the outside (gone).
+fn clip_segment_inside(p1: Vec3, p2: Vec3, normal: Vec3, dist: f32) -> ClipResult {
+    let d1 = normal.dot(p1) - dist;
+    let d2 = normal.dot(p2) - dist;
+    if d1 <= 0.0 && d2 <= 0.0 {
+        ClipResult::Outside
+    } else if d1 >= 0.0 && d2 >= 0.0 {
+        ClipResult::Inside(p1, p2)
+    } else {
+        let fraction = d1 / (d1 - d2);
+        let clipped = p1 + (p2 - p1) * fraction;
+        if d1 < 0.0 {
+            ClipResult::Inside(clipped, p2)
+        } else {
+            ClipResult::Inside(p1, clipped)
+        }
+    }
+}
+
+/// Move the given face planes of a convex brush by `move_v` (q3radiant
+/// camera side stretch: the FULL drag vector, not just the normal
+/// component). The result is validated first — false when the brush
+/// would degenerate, so the caller can refuse the whole drag.
+pub fn stretch_brush_side_faces(
+    brush: &mut Brush,
+    generation: &mut u64,
+    indices: &[usize],
+    move_v: Vec3,
+) -> bool {
+    let face_count = match &brush.content {
+        BrushContent::Convex(faces) => faces.len(),
+        _ => return false,
+    };
+    if indices.iter().any(|i| *i >= face_count) || move_v == Vec3::ZERO {
+        return false;
+    }
+
+    let mut probe = brush.clone();
+    let BrushContent::Convex(probe_faces) = &mut probe.content else {
+        return false;
+    };
+    for idx in indices {
+        for p in &mut probe_faces[*idx].plane_points {
+            *p += move_v;
+        }
+    }
+    if !is_convex_brush_valid(&probe) {
+        return false;
+    }
+
+    for idx in indices {
+        let old = {
+            let BrushContent::Convex(faces) = &brush.content else {
+                return false;
+            };
+            faces[*idx].plane_points
+        };
+        let new_plane = [old[0] + move_v, old[1] + move_v, old[2] + move_v];
+        brush.update_brush_plane(generation, *idx, new_plane);
+    }
+    // Recompute the AABB from the new geometry.
+    let _ = brush.get_polygons_and_aabb();
+    true
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Aabb {
     pub min: Vec3,
     pub max: Vec3,
@@ -2055,6 +2243,96 @@ mod tests {
             &mut brush,
             &mut generation
         ));
+    }
+
+    fn box_brush() -> Brush {
+        convex_brush_from_aabb(
+            BrushId(0),
+            Aabb::from_points(Vec3::splat(-16.0), Vec3::splat(16.0)),
+            "common/caulk",
+        )
+    }
+
+    /// Find the face index whose inward normal is `normal`.
+    fn face_index_with_normal(brush: &Brush, normal: Vec3) -> usize {
+        let BrushContent::Convex(faces) = &brush.content else {
+            panic!("expected convex brush");
+        };
+        faces
+            .iter()
+            .position(|f| {
+                let n = face_plane_normal(f);
+                (n - normal).length_squared() < 1.0e-4
+            })
+            .unwrap_or_else(|| panic!("no face with normal {normal:?}"))
+    }
+
+    #[test]
+    fn side_select_faces_grabs_facing_plane_only() {
+        let brush = box_brush();
+        // Ray passes ABOVE the box (z=20, well past the z=16 top): the ray
+        // runs through the outer half-space of the top face while staying
+        // inside every other plane -> only the top face is grabbed.
+        // Face normals point INWARD, so the top face has normal -Z.
+        let faces = side_select_faces(&brush, Vec3::new(500.0, 0.0, 20.0), Vec3::NEG_X);
+        assert_eq!(faces, vec![face_index_with_normal(&brush, Vec3::NEG_Z)]);
+    }
+
+    #[test]
+    fn side_select_faces_grabs_both_faces_beside_an_edge() {
+        let brush = box_brush();
+        // Ray passing BESIDE the top-right corner (y=20, z=20) stays outside
+        // BOTH the top and right inner half-spaces — faithful to q3radiant
+        // Brush_SideSelect (verified against CoD1Radiant): no face is grabbed.
+        let faces = side_select_faces(&brush, Vec3::new(500.0, 20.0, 20.0), Vec3::NEG_X);
+        assert!(faces.is_empty());
+    }
+
+    #[test]
+    fn side_select_faces_grabs_the_side_the_ray_misses_toward() {
+        let brush = box_brush();
+        // Ray passing to the right (y=20) grabs the +Y face (inward normal -Y).
+        let faces = side_select_faces(&brush, Vec3::new(500.0, 20.0, 0.0), Vec3::NEG_X);
+        assert_eq!(faces, vec![face_index_with_normal(&brush, Vec3::NEG_Y)]);
+    }
+
+    #[test]
+    fn side_select_faces_misses_never_grab_the_far_side() {
+        let brush = box_brush();
+        // Ray passing BELOW the box (z=-20) must NOT grab the top face
+        // (its outer half-space is z > 16) — the bottom face is grabbed
+        // instead (inward normal +Z).
+        let faces = side_select_faces(&brush, Vec3::new(500.0, 0.0, -20.0), Vec3::NEG_X);
+        assert_eq!(faces, vec![face_index_with_normal(&brush, Vec3::Z)]);
+    }
+
+    #[test]
+    fn stretch_brush_side_faces_moves_only_the_grabbed_planes() {
+        let mut brush = box_brush();
+        let top = face_index_with_normal(&brush, Vec3::NEG_Z);
+        let mut generation = 0u64;
+
+        let before = brush.aabb.clone();
+        assert!(stretch_brush_side_faces(
+            &mut brush,
+            &mut generation,
+            &[top],
+            Vec3::new(0.0, 0.0, 8.0),
+        ));
+        assert_eq!(brush.aabb.max.z, before.max.z + 8.0);
+        assert_eq!(brush.aabb.min.z, before.min.z);
+        assert_eq!(brush.aabb.min.x, before.min.x);
+
+        // A delta that would push the top face THROUGH the bottom must be
+        // refused (brush would degenerate).
+        assert!(!stretch_brush_side_faces(
+            &mut brush,
+            &mut generation,
+            &[top],
+            Vec3::new(0.0, 0.0, -1000.0),
+        ));
+        // And the brush is left untouched after a refusal.
+        assert_eq!(brush.aabb.max.z, before.max.z + 8.0);
     }
 
     #[test]

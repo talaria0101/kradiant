@@ -272,7 +272,7 @@ impl Default for EditorState {
 impl EditorState {
     pub fn sync_viewports_to_core(&mut self) {
         self.core.view2d = self.view2d.core.clone();
-        self.core.view3d = self.view3d.core;
+        self.core.view3d = self.view3d.core.clone();
     }
 }
 

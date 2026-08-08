@@ -5,7 +5,7 @@ use kradiant::editing::Aabb;
 use glam::{Mat4, Vec2, Vec3};
 use kradiant::editor::config::EntityDrawAnchor;
 use kradiant::editor::viewport::DragMode;
-use kradiant::editor::viewport::state::View3DState;
+use kradiant::editor::viewport::state::{SideStretchDrag, View3DState};
 use kradiant::editor::{EditorConfig, EditorPalette, FaceSelection, PatchVertexSelection};
 use kradiant::map_utils::format_vec3;
 use std::ops::{Deref, DerefMut};
@@ -535,26 +535,25 @@ impl View3D {
                             self.drag_start = Some(Vec2::new(mouse[0], mouse[1]));
                             self.drag_current = Some(Vec2::new(mouse[0], mouse[1]));
                             self.move_offset = Vec3::ZERO;
-                            self.drag_mode = DragMode::MoveSelection;
+                            self.stretch = None;
+                            self.stretch_delta = Vec3::ZERO;
 
-                            // Calculate drag sensitivity vectors based on camera and selection depth
                             let forward = Self::forward_from_angles(self.cam.angles);
+                            let ray = self.screen_to_ray(Vec2::new(mouse[0], mouse[1]), config);
 
-                            let selection_center = if let Some(map) = map {
+                            let selection_aabb = if let Some(map) = map {
                                 view2d::selection_aabb(
                                     map,
                                     selected_brushes,
                                     selected_entities,
                                     ent_draw_config,
                                 )
-                                .map(|aabb| (aabb.min + aabb.max) * 0.5)
-                                .unwrap_or(Vec3::ZERO)
-                            }
-                            else {
-                                Vec3::ZERO
+                            } else {
+                                None
                             };
 
-                            let ray = self.screen_to_ray(Vec2::new(mouse[0], mouse[1]), config);
+                            // Does the click ray hit any selected brush/entity?
+                            // Hit -> drag the whole selection (q3 Drag_Setup).
                             let brush_hit_t =
                                 selected_brushes
                                     .iter()
@@ -609,17 +608,66 @@ impl View3D {
                                     })
                                     .min_by(|a, b| a.total_cmp(b))
                             });
-                            let hit_t = match (brush_hit_t, entity_hit_t) {
-                                (Some(a), Some(b)) => a.min(b),
-                                (Some(t), None) | (None, Some(t)) => t,
-                                (None, None) => {
-                                    // Fallback: distance to selection center
-                                    let denom = forward.dot(ray);
-                                    if denom.abs() > 1e-6 {
-                                        forward.dot(selection_center - self.cam.pos) / denom
-                                    } else {
-                                        1.0
+
+                            let hit_t = if brush_hit_t.is_some() || entity_hit_t.is_some() {
+                                self.drag_mode = DragMode::MoveSelection;
+                                match (brush_hit_t, entity_hit_t) {
+                                    (Some(a), Some(b)) => a.min(b),
+                                    (Some(t), None) | (None, Some(t)) => t,
+                                    (None, None) => 1.0,
+                                }
+                            } else {
+                                // q3radiant Brush_SideSelect: the ray missed
+                                // the selection — grab every face of every
+                                // selected brush whose OUTER side the ray
+                                // passes while staying inside all the other
+                                // planes.
+                                let mut side_faces: Vec<(usize, usize, Vec<usize>)> = Vec::new();
+                                if let Some(map) = map.as_ref() {
+                                    for &(entity_idx, brush_idx) in selected_brushes.iter() {
+                                        let Some(entity) = map.entities.get(entity_idx) else {
+                                            continue;
+                                        };
+                                        let Some(brush) = entity.brushes.get(brush_idx) else {
+                                            continue;
+                                        };
+                                        if !matches!(
+                                            brush.content,
+                                            kradiant::map::BrushContent::Convex(_)
+                                        ) {
+                                            continue;
+                                        }
+                                        let faces =
+                                            editing::side_select_faces(brush, self.cam.pos, ray);
+                                        if !faces.is_empty() {
+                                            side_faces.push((entity_idx, brush_idx, faces));
+                                        }
                                     }
+                                }
+                                if !side_faces.is_empty() {
+                                    let aabb = selection_aabb.unwrap_or_else(|| Aabb {
+                                        min: Vec3::ZERO,
+                                        max: Vec3::ZERO,
+                                    });
+                                    self.stretch = Some(SideStretchDrag {
+                                        selection_aabb: aabb,
+                                        side_faces,
+                                    });
+                                    self.stretch_delta = Vec3::ZERO;
+                                    self.drag_mode = DragMode::StretchSelection;
+                                } else {
+                                    // No facing plane grabbed: drag the whole
+                                    // selection like a normal move.
+                                    self.drag_mode = DragMode::MoveSelection;
+                                }
+                                let center = selection_aabb
+                                    .map(|aabb| (aabb.min + aabb.max) * 0.5)
+                                    .unwrap_or(Vec3::ZERO);
+                                let denom = forward.dot(ray);
+                                if denom.abs() > 1e-6 {
+                                    forward.dot(center - self.cam.pos) / denom
+                                } else {
+                                    1.0
                                 }
                             };
 
@@ -645,78 +693,233 @@ impl View3D {
                                     .dot(self.drag_plane_origin - self.cam.pos)
                                     / denom;
                                 let world_current = self.cam.pos + ray * t;
-                                let mut offset = world_current - self.drag_world_anchor;
+                                let raw_offset = world_current - self.drag_world_anchor;
 
-                                if config.view.grid_snap {
-                                    let grid = config.view.grid_minor_step.max(1) as f32;
-                                    offset.x = (offset.x / grid).round() * grid;
-                                    offset.y = (offset.y / grid).round() * grid;
-                                    offset.z = (offset.z / grid).round() * grid;
+                                match self.drag_mode {
+                                    DragMode::MoveSelection => {
+                                        let mut offset = raw_offset;
+                                        if config.view.grid_snap {
+                                            let grid =
+                                                config.view.grid_minor_step.max(1) as f32;
+                                            offset.x = (offset.x / grid).round() * grid;
+                                            offset.y = (offset.y / grid).round() * grid;
+                                            offset.z = (offset.z / grid).round() * grid;
+                                        }
+                                        self.move_offset = offset;
+                                    }
+                                    DragMode::StretchSelection => {
+                                        let mut delta = raw_offset;
+                                        if config.view.grid_snap {
+                                            let grid =
+                                                config.view.grid_minor_step.max(1) as f32;
+                                            delta.x = (delta.x / grid).round() * grid;
+                                            delta.y = (delta.y / grid).round() * grid;
+                                            delta.z = (delta.z / grid).round() * grid;
+                                        }
+                                        self.stretch_delta = delta;
+                                    }
+                                    _ => {}
                                 }
-                                self.move_offset = offset;
                             }
                         }
                     } else {
-                        // Mouse released or not dragging - apply accumulated movement to geometry and push to undo
-                        if self.drag_start.is_some() && self.move_offset != Vec3::ZERO {
-                            if map.is_some() {
-                                undo.push(
-                                    "Move selection",
-                                    map,
-                                    selected_brushes,
-                                    selected_faces,
-                                    selected_edges,
-                                    selected_patch_vertices,
-                                    selected_entities,
-                                );
+                        // Mouse released or not dragging - apply accumulated changes
+                        if self.drag_start.is_some() {
+                            match self.drag_mode {
+                                DragMode::MoveSelection => {
+                                    if self.move_offset != Vec3::ZERO {
+                                        if map.is_some() {
+                                            undo.push(
+                                                "Move selection",
+                                                map,
+                                                selected_brushes,
+                                                selected_faces,
+                                                selected_edges,
+                                                selected_patch_vertices,
+                                                selected_entities,
+                                            );
 
-                                // Apply the accumulated movement to the selected brushes and entities.
-                                if let Some(map) = map.as_mut() {
-                                    let delta = self.move_offset;
-                                    let generation = &mut map.generation;
-                                    for (entity_idx, brush_idx) in selected_brushes.clone() {
-                                        if let Some(entity) = map.entities.get_mut(entity_idx) {
-                                            if let Some(brush) = entity.brushes.get_mut(brush_idx) {
-                                                brush.translate(generation, delta);
+                                            if let Some(map) = map.as_mut() {
+                                                let delta = self.move_offset;
+                                                let generation = &mut map.generation;
+                                                for (entity_idx, brush_idx) in
+                                                    selected_brushes.clone()
+                                                {
+                                                    if let Some(entity) =
+                                                        map.entities.get_mut(entity_idx)
+                                                    {
+                                                        if let Some(brush) =
+                                                            entity.brushes.get_mut(brush_idx)
+                                                        {
+                                                            brush.translate(generation, delta);
+                                                        }
+                                                    }
+                                                }
+                                                for ent_idx in selected_entities.iter().copied() {
+                                                    if ent_idx == 0 {
+                                                        continue;
+                                                    }
+                                                    if selected_brushes
+                                                        .iter()
+                                                        .any(|(entity_idx, _)| {
+                                                            *entity_idx == ent_idx
+                                                        })
+                                                    {
+                                                        continue;
+                                                    }
+                                                    if let Some(entity) =
+                                                        map.entities.get_mut(ent_idx)
+                                                    {
+                                                        entity.translate(generation, delta);
+                                                    }
+                                                }
+                                            }
+
+                                            crate::log_info!(console, "Dragged selection in 3D View");
+                                            if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                                self.update_work_from_aabb(aabb);
                                             }
                                         }
                                     }
-                                    for ent_idx in selected_entities.iter().copied() {
-                                        if ent_idx == 0 {
-                                            continue; // Never drag worldspawn
-                                        }
-                                        if selected_brushes
-                                            .iter()
-                                            .any(|(entity_idx, _)| *entity_idx == ent_idx)
-                                        {
-                                            continue;
-                                        }
-                                        if let Some(entity) = map.entities.get_mut(ent_idx) {
-                                            entity.translate(generation, delta);
+                                }
+                                DragMode::StretchSelection => {
+                                    if let Some(stretch) = self.stretch.take() {
+                                        let delta = self.stretch_delta;
+                                        if delta != Vec3::ZERO && map.is_some() {
+                                            // Validate EVERY brush first: q3 refuses
+                                            // the whole drag if any would degenerate
+                                            // ("Brush dragged backwards, move canceled").
+                                            let mut valid = true;
+                                            if let Some(map_ref) = map.as_ref() {
+                                                for (entity_idx, brush_idx, indices) in
+                                                    &stretch.side_faces
+                                                {
+                                                    let Some(entity) =
+                                                        map_ref.entities.get(*entity_idx)
+                                                    else {
+                                                        valid = false;
+                                                        break;
+                                                    };
+                                                    let Some(brush) =
+                                                        entity.brushes.get(*brush_idx)
+                                                    else {
+                                                        valid = false;
+                                                        break;
+                                                    };
+                                                    let mut probe = brush.clone();
+                                                    let kradiant::map::BrushContent::Convex(
+                                                        probe_faces,
+                                                    ) = &mut probe.content
+                                                    else {
+                                                        valid = false;
+                                                        break;
+                                                    };
+                                                    for idx in indices {
+                                                        let Some(face) =
+                                                            probe_faces.get_mut(*idx)
+                                                        else {
+                                                            valid = false;
+                                                            break;
+                                                        };
+                                                        for p in &mut face.plane_points {
+                                                            *p += delta;
+                                                        }
+                                                    }
+                                                    if valid
+                                                        && !editing::is_convex_brush_valid(&probe)
+                                                    {
+                                                        valid = false;
+                                                    }
+                                                    if !valid {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if !valid {
+                                                crate::log_info!(
+                                                    console,
+                                                    "Side stretch refused — a brush would degenerate"
+                                                );
+                                            } else {
+                                                undo.push(
+                                                    "Side stretch",
+                                                    map,
+                                                    selected_brushes,
+                                                    selected_faces,
+                                                    selected_edges,
+                                                    selected_patch_vertices,
+                                                    selected_entities,
+                                                );
+
+                                                if let Some(map_ref) = map.as_mut() {
+                                                    let mut any = false;
+                                                    for (entity_idx, brush_idx, indices) in
+                                                        &stretch.side_faces
+                                                    {
+                                                        let Some(entity) =
+                                                            map_ref.entities.get_mut(*entity_idx)
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        let Some(brush) =
+                                                            entity.brushes.get_mut(*brush_idx)
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        if editing::stretch_brush_side_faces(
+                                                            brush,
+                                                            &mut map_ref.generation,
+                                                            indices,
+                                                            delta,
+                                                        ) {
+                                                            any = true;
+                                                        }
+                                                    }
+
+                                                    if any {
+                                                        crate::log_info!(console, "Side stretch in 3D View");
+                                                        if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                                            self.update_work_from_aabb(aabb);
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
+                                    self.stretch_delta = Vec3::ZERO;
                                 }
-
-                                crate::log_info!(console, "Dragged selection in 3D View");
+                                _ => {}
                             }
                         }
                         self.drag_start = None;
                         self.drag_current = None;
                         self.move_offset = Vec3::ZERO;
                     }
+                    if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                        self.update_work_from_aabb(aabb);
+                    }
                 }
 
                 if !ui.is_item_hovered() {
-                    // if mouse no longer hovers on 3d view, reset drag and move offset
-                    if self.drag_start.is_some() && self.move_offset != Vec3::ZERO {
+                    // if mouse no longer hovers on 3d view, reset drag state
+                    if self.drag_start.is_some() {
                         self.drag_start = None;
                         self.drag_current = None;
                         self.move_offset = Vec3::ZERO;
+                        self.stretch = None;
+                        self.stretch_delta = Vec3::ZERO;
                     }
                 }
 
                 if ui.is_window_hovered() {
                     if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
+                        if self.drag_start.is_some() {
+                            self.drag_start = None;
+                            self.drag_current = None;
+                            self.move_offset = Vec3::ZERO;
+                            self.stretch = None;
+                            self.stretch_delta = Vec3::ZERO;
+                        }
                         if edit_faces {
                             selected_faces.clear();
                             view2d::sync_selected_brushes_from_faces(
@@ -873,7 +1076,7 @@ impl View3D {
         (target - self.cam.pos).normalize()
     }
 
-    fn ray_triangle_t(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option<f32> {
+    pub fn ray_triangle_t(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option<f32> {
         let eps = 1e-7;
         let e1 = v1 - v0;
         let e2 = v2 - v0;
