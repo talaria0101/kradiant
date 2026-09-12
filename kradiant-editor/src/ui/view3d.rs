@@ -416,7 +416,7 @@ impl View3D {
                                     ray_dir,
                                     mouse,
                                     self.rect,
-                                    8.0,
+                                    4.0,
                                 )
                             });
 
@@ -425,7 +425,16 @@ impl View3D {
                                     .selection_drag_touched_edges
                                     .get_or_insert_with(HashSet::new);
                                 if touched.insert(sel) {
-                                    if !selected_edges.contains(&sel) {
+                                    let z_held = ui.is_key_down(dear_imgui_rs::Key::Z);
+                                    if z_held {
+                                        // Z: subtract only (like brush
+                                        // rect-select in the 2D view).
+                                        if let Some(i) =
+                                            selected_edges.iter().position(|e| *e == sel)
+                                        {
+                                            selected_edges.remove(i);
+                                        }
+                                    } else if !selected_edges.contains(&sel) {
                                         selected_edges.push(sel);
                                     } else if let Some(i) =
                                         selected_edges.iter().position(|e| *e == sel)
@@ -554,85 +563,51 @@ impl View3D {
                         && !ui.is_key_down(dear_imgui_rs::Key::LeftAlt)
                     {
                         if edit_edges {
-                            // Edge edit mode: plain click on an edge selects it
-                            // (Blender-style) and starts an edge drag.
-                            if let Some(map_ref) = map.as_mut() {
-                                let [_, _, rw, rh] = self.rect;
-                                let aspect = rw / rh;
-                                let proj = Mat4::perspective_rh(
-                                    config.view.fov.to_radians(),
-                                    aspect,
-                                    1.0,
-                                    1.0e6,
-                                );
+                            // Edge edit mode, brush-like: the selection itself
+                            // is shift+click (Z subtracts); a plain drag moves
+                            // the current edge selection from wherever the
+                            // user grabs it.
+                            if !selected_edges.is_empty() {
                                 let forward = Self::forward_from_angles(self.cam.angles);
-                                let view = Mat4::look_at_rh(
-                                    self.cam.pos,
-                                    self.cam.pos + forward,
-                                    Vec3::Z,
-                                );
-                                let vp = proj * view;
-
-                                let prefer: Vec<(usize, usize)> = {
-                                    let mut set = std::collections::BTreeSet::new();
-                                    for sel in selected_edges.iter() {
-                                        set.insert((sel.entity_idx, sel.brush_idx));
-                                    }
-                                    set.into_iter().collect()
-                                };
                                 let ray =
                                     self.screen_to_ray(Vec2::new(mouse[0], mouse[1]), config);
-                                let picked = pick_convex_edge_by_screen_3d(
-                                    map_ref,
-                                    (!prefer.is_empty()).then_some(&prefer[..]),
-                                    mask,
-                                    vp,
-                                    self.cam.pos,
-                                    ray,
-                                    mouse,
-                                    self.rect,
-                                    8.0,
-                                );
-
-                                if let Some(sel) = picked {
-                                    if !selected_edges.contains(&sel) {
-                                        // Plain click on an unselected edge makes
-                                        // it the whole edge selection.
-                                        selected_edges.clear();
-                                        selected_edges.push(sel);
-                                        view2d::sync_selected_brushes_from_edges(
-                                            selected_edges,
+                                // Anchor at the frontmost brush surface under
+                                // the cursor (or through the selection center
+                                // when pointing at the sky).
+                                let anchor = map
+                                    .as_mut()
+                                    .and_then(|m| {
+                                        ray_front_brush_hit_point(m, self.cam.pos, ray, mask)
+                                    })
+                                    .unwrap_or_else(|| {
+                                        let t = view2d::selection_aabb_active(
+                                            map,
                                             selected_brushes,
-                                        );
-                                        if !selected_entities.contains(&sel.entity_idx) {
-                                            selected_entities.push(sel.entity_idx);
-                                        }
-                                    }
-
-                                    // Anchor the drag at the edge point closest
-                                    // to the click ray; drag on the camera-facing
-                                    // plane through that point.
-                                    if let Some((a, b)) = edge_endpoints(map_ref, &sel) {
-                                        let anchor = ray_closest_point_on_segment(
-                                            self.cam.pos,
-                                            ray,
-                                            a,
-                                            b,
+                                            selected_faces,
+                                            selected_edges,
+                                            selected_entities,
+                                            edit_faces,
+                                            edit_edges,
+                                            ent_draw_config,
                                         )
-                                        .unwrap_or((a + b) * 0.5);
-                                        self.drag_mode = DragMode::MoveEdges;
-                                        self.drag_start = Some(Vec2::new(mouse[0], mouse[1]));
-                                        self.drag_current = Some(Vec2::new(mouse[0], mouse[1]));
-                                        self.move_offset = Vec3::ZERO;
-                                        self.stretch = None;
-                                        self.stretch_delta = Vec3::ZERO;
-                                        self.rotate = None;
-                                        self.rotate_angle = 0.0;
-                                        self.drag_world_anchor = anchor;
-                                        self.drag_plane_normal = forward;
-                                        self.drag_plane_origin = anchor;
-                                    }
-                                }
+                                        .map(|aabb| {
+                                            ray.dot((aabb.min + aabb.max) * 0.5 - self.cam.pos)
+                                                .max(64.0)
+                                        })
+                                        .unwrap_or(256.0);
+                                        self.cam.pos + ray * t
+                                    });
+                                self.drag_mode = DragMode::MoveEdges;
+                                self.drag_start = Some(Vec2::new(mouse[0], mouse[1]));
+                                self.drag_current = Some(Vec2::new(mouse[0], mouse[1]));
+                                self.move_offset = Vec3::ZERO;
+                                self.stretch = None;
+                                self.stretch_delta = Vec3::ZERO;
+                                self.rotate = None;
+                                self.rotate_angle = 0.0;
+                                self.drag_world_anchor = anchor;
+                                self.drag_plane_normal = forward;
+                                self.drag_plane_origin = anchor;
                             }
                         } else if !selected_brushes.is_empty() || !selected_entities.is_empty() {
                             self.drag_start = Some(Vec2::new(mouse[0], mouse[1]));
@@ -1243,35 +1218,19 @@ impl View3D {
                                 DragMode::MoveEdges => {
                                     let delta = self.move_offset;
                                     if delta != Vec3::ZERO && !selected_edges.is_empty() {
-                                        // Validate every affected brush first:
-                                        // refuse the whole drag if any would
-                                        // degenerate (edge dragged backwards).
-                                        let mut valid = map.is_some();
-                                        if let Some(map_ref) = map.as_ref() {
-                                            for ((entity_idx, brush_idx), pairs) in
-                                                grouped_edge_pairs(selected_edges)
-                                            {
-                                                let brush = map_ref
-                                                    .entities
-                                                    .get(entity_idx)
-                                                    .and_then(|e| e.brushes.get(brush_idx));
-                                                let Some(brush) = brush else {
-                                                    valid = false;
-                                                    break;
-                                                };
-                                                if editing::preview_edge_moved_polys(
-                                                    brush,
-                                                    &pairs,
-                                                    delta,
-                                                )
-                                                .is_none()
-                                                {
-                                                    valid = false;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if !valid {
+                                        // The move gets clamped to the largest
+                                        // fraction every affected brush
+                                        // tolerates; refuse only when nothing
+                                        // can move at all.
+                                        let factor = map
+                                            .as_ref()
+                                            .map(|m| editing::edge_move_clamp_factor(
+                                                m,
+                                                selected_edges,
+                                                delta,
+                                            ))
+                                            .unwrap_or(0.0);
+                                        if factor <= 1.0e-4 {
                                             crate::log_info!(
                                                 console,
                                                 "Edge move refused — a brush would degenerate"
@@ -1851,22 +1810,30 @@ fn pick_convex_edge_by_screen_3d(
     best.map(|(sel, _, _)| sel)
 }
 
-/// World-space endpoints of a selected edge (normalized face pair indices).
-fn edge_endpoints(
+/// World-space hit point on the frontmost brush surface along the ray.
+fn ray_front_brush_hit_point(
     map: &mut kradiant::map::Map,
-    sel: &EdgeSelection,
-) -> Option<(Vec3, Vec3)> {
-    let entity = map.entities.get_mut(sel.entity_idx)?;
-    let brush = entity.brushes.get_mut(sel.brush_idx)?;
-    if !matches!(brush.content, kradiant::map::BrushContent::Convex(_)) {
-        return None;
-    }
+    origin: Vec3,
+    dir: Vec3,
+    mask: PickMask,
+) -> Option<Vec3> {
+    let (entity_idx, brush_idx) = editing::pick_brush_by_ray(map, origin, dir, mask, None)?;
+    let entity = map.entities.get_mut(entity_idx)?;
+    let brush = entity.brushes.get_mut(brush_idx)?;
     let polys = brush.get_polygons()?;
-    let (fa, fb) = (
-        sel.face_a_idx.min(sel.face_b_idx),
-        sel.face_a_idx.max(sel.face_b_idx),
-    );
-    core_util::shared_edge_points(polys, fa, fb)
+    let mut best: Option<f32> = None;
+    for (positions, indices) in polys {
+        for tri in indices.chunks_exact(3) {
+            let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+                continue;
+            }
+            if let Some(t) = View3D::ray_triangle_t(origin, dir, positions[i0], positions[i1], positions[i2]) {
+                best = Some(best.map_or(t, |b: f32| b.min(t)));
+            }
+        }
+    }
+    best.map(|t| origin + dir * t)
 }
 
 /// Closest point on segment `a..b` to the ray `origin + t * dir` (t >= 0).
@@ -1894,24 +1861,4 @@ fn ray_closest_point_on_segment(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3) -> Op
     _t = _t.max(0.0);
     s = s.clamp(0.0, len);
     Some(a + edge_dir * s)
-}
-
-/// Group edge selections per brush: (entity, brush) -> deduped, normalized
-/// face pairs. Used to validate a whole edge drag before applying it.
-fn grouped_edge_pairs(
-    selected_edges: &[EdgeSelection],
-) -> std::collections::BTreeMap<(usize, usize), Vec<(usize, usize)>> {
-    let mut out: std::collections::BTreeMap<(usize, usize), Vec<(usize, usize)>> =
-        std::collections::BTreeMap::new();
-    for sel in selected_edges {
-        let pair = (
-            sel.face_a_idx.min(sel.face_b_idx),
-            sel.face_a_idx.max(sel.face_b_idx),
-        );
-        let pairs = out.entry((sel.entity_idx, sel.brush_idx)).or_default();
-        if !pairs.contains(&pair) {
-            pairs.push(pair);
-        }
-    }
-    out
 }

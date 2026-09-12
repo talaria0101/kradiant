@@ -1854,13 +1854,86 @@ pub fn preview_edge_moved_polys(
     Some(new_polys)
 }
 
+/// Largest fraction `s` (0..=1) of `delta` with which every affected brush
+/// can be edge-moved while staying valid AND non-explosive: no resulting
+/// vertex may escape the brush's original AABB dilated by the move distance
+/// plus a small margin. Without this, dragging an edge until an adjacent
+/// face tilts through near-parallelism with another plane shoots the brush
+/// vertices off towards infinity.
+///
+/// Uses bisection, assuming validity degrades monotonically along the drag
+/// (true for the practical degeneration modes).
+pub fn edge_move_clamp_factor(
+    map: &Map,
+    selected_edges: &[EdgeSelection],
+    delta: Vec3,
+) -> f32 {
+    if selected_edges.is_empty() || delta == Vec3::ZERO {
+        return 1.0;
+    }
+
+    fn brush_can_move(brush: &Brush, pairs: &[(usize, usize)], delta: Vec3) -> bool {
+        if delta == Vec3::ZERO {
+            return true;
+        }
+        let Some(polys) = preview_edge_moved_polys(brush, pairs, delta) else {
+            return false;
+        };
+        // Explosion guard: moving an edge by `delta` may never push geometry
+        // further than `|delta|` (+ margin) outside the original AABB.
+        let min = brush.aabb.min - delta.abs() - Vec3::splat(1.0);
+        let max = brush.aabb.max + delta.abs() + Vec3::splat(1.0);
+        polys.iter().all(|(verts, _)| {
+            verts.iter().all(|v| {
+                v.x >= min.x
+                    && v.y >= min.y
+                    && v.z >= min.z
+                    && v.x <= max.x
+                    && v.y <= max.y
+                    && v.z <= max.z
+            })
+        })
+    }
+
+    let grouped = group_edges_by_brush(selected_edges);
+    let mut factor = 1.0f32;
+    for ((entity_idx, brush_idx), pairs) in &grouped {
+        let Some(entity) = map.entities.get(*entity_idx) else {
+            return 0.0;
+        };
+        let Some(brush) = entity.brushes.get(*brush_idx) else {
+            return 0.0;
+        };
+        if !brush_can_move(brush, pairs, delta) {
+            // Bisect the largest valid fraction in [0, 1).
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            for _ in 0..12 {
+                let mid = (lo + hi) * 0.5;
+                if brush_can_move(brush, pairs, delta * mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            factor = factor.min(lo);
+            if factor <= 1.0e-4 {
+                return 0.0;
+            }
+        }
+    }
+    factor
+}
+
 /// Move the selected edges (Blender-style edge drag) by `delta`.
 ///
 /// Only the faces adjacent to a moved edge change: their planes are re-fit
 /// through the moved edge and one stationary vertex, tilting to follow the
 /// edge. All other faces keep their exact planes. The whole move is atomic —
-/// if any affected brush would degenerate, nothing is modified and `false`
-/// is returned.
+/// if any affected brush cannot move at all without degenerating, nothing is
+/// modified and `false` is returned. Otherwise the move is clamped to the
+/// largest fraction of `delta` every affected brush tolerates (see
+/// [`edge_move_clamp_factor`]), so a drag can squash a brush but never
+/// stretch it out towards infinity.
 pub fn translate_selected_edges(
     map: &mut Map,
     selected_edges: &[EdgeSelection],
@@ -1870,24 +1943,13 @@ pub fn translate_selected_edges(
         return false;
     }
 
-    let grouped = group_edges_by_brush(selected_edges);
-    if grouped.is_empty() {
+    let factor = edge_move_clamp_factor(map, selected_edges, delta);
+    if factor <= 1.0e-4 {
         return false;
     }
+    let delta = delta * factor;
 
-    // Validate every affected brush first: refuse the whole move if any
-    // would degenerate (same policy as the 3D side stretch).
-    for ((entity_idx, brush_idx), pairs) in &grouped {
-        let Some(entity) = map.entities.get(*entity_idx) else {
-            return false;
-        };
-        let Some(brush) = entity.brushes.get(*brush_idx) else {
-            return false;
-        };
-        if preview_edge_moved_polys(brush, pairs, delta).is_none() {
-            return false;
-        }
-    }
+    let grouped = group_edges_by_brush(selected_edges);
 
     let mut any = false;
     for ((entity_idx, brush_idx), pairs) in grouped {
@@ -1899,7 +1961,7 @@ pub fn translate_selected_edges(
         };
 
         // Plane updates come from the PRE-move polygons (the delta is added
-        // internally); validation above already proved this converges, but
+        // internally); the clamp factor already proved this converges, but
         // apply to a clone so a failure cannot leave the brush half-updated.
         let updates = {
             let BrushContent::Convex(faces) = &brush.content else {
@@ -2796,9 +2858,11 @@ mod tests {
     }
 
     #[test]
-    fn edge_move_refuses_when_brush_degenerates() {
+    fn edge_move_refuses_when_faces_share_no_edge() {
         let (mut map, e, b) = cube_map();
-        let (fa, fb, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        // Top (inward -Z) and bottom (inward +Z) faces share no edge.
+        let fa = face_idx_with_normal(&map.entities[0].brushes[0], Vec3::NEG_Z);
+        let fb = face_idx_with_normal(&map.entities[0].brushes[0], Vec3::Z);
         let sel = EdgeSelection {
             entity_idx: e,
             brush_idx: b,
@@ -2806,21 +2870,44 @@ mod tests {
             face_b_idx: fb,
         };
 
-        let mut before = map.entities[0].brushes[0].clone();
-        // Drag the edge down through the floor: the brush would invert.
-        assert!(!translate_selected_edges(
-            &mut map,
-            &[sel],
-            Vec3::new(0.0, 0.0, -1000.0)
-        ));
+        let before = map.entities[0].brushes[0].clone();
+        assert!(!translate_selected_edges(&mut map, &[sel], Vec3::new(0.0, 0.0, -8.0)));
         // Nothing was modified.
+        let mut before = before;
+        before.invalidate_geometry();
         assert_eq!(
-            before
-                .get_polygons()
-                .map(|p| p.to_vec())
-                .unwrap_or_default(),
+            before.get_polygons().map(|p| p.to_vec()).unwrap_or_default(),
             crate::geometry::brush_to_polygons(&map.entities[0].brushes[0]).unwrap()
         );
+    }
+
+    #[test]
+    fn edge_move_clamps_instead_of_stretching_to_infinity() {
+        let (mut map, e, b) = cube_map();
+        let (fa, fb, a, bpt) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        let sel = EdgeSelection {
+            entity_idx: e,
+            brush_idx: b,
+            face_a_idx: fa,
+            face_b_idx: fb,
+        };
+        // Drag the edge down 1000 units — far past collapse.
+        let delta = Vec3::new(0.0, 0.0, -1000.0);
+        let factor = edge_move_clamp_factor(&map, &[sel], delta);
+        assert!(factor > 1.0e-4 && factor < 0.1, "factor = {factor}");
+
+        assert!(translate_selected_edges(&mut map, &[sel], delta));
+        let brush = &map.entities[0].brushes[0];
+        assert!(is_convex_brush_valid(brush), "clamped move must stay valid");
+        // The brush got squashed, not stretched towards infinity: the whole
+        // brush is within the original AABB dilated by the FULL drag.
+        assert!(brush.aabb.min.z > -1000.0 - 1.0);
+        assert!((brush.aabb.max.z - 64.0).abs() < 0.01);
+        // The applied move matches the clamped delta (preview parity).
+        let polys = crate::geometry::brush_to_polygons(brush).unwrap();
+        let (na, _nb) = crate::core_util::shared_edge_points(&polys, fa, fb).unwrap();
+        let expected_z = a.z + delta.z * factor;
+        assert!((na.z - expected_z).abs() < 1.0, "moved to {} want {expected_z}", na.z);
     }
 
     #[test]

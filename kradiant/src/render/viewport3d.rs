@@ -1140,13 +1140,25 @@ impl Viewport3D {
 
             // Edge edit mode: draw every convex brush edge, highlight the
             // selected ones (always on top), and preview the drag by re-fitting
-            // the adjacent face planes exactly like the final apply will.
+            // the adjacent face planes exactly like the final apply will
+            // (including the move clamp, so the preview never shows the brush
+            // stretching out towards infinity).
             if editor.edit_edges {
-                let drag_delta = if editor.view3d.drag_mode == DragMode::MoveEdges {
+                let raw_delta = if editor.view3d.drag_mode == DragMode::MoveEdges {
                     editor.view3d.move_offset
                 } else {
                     Vec3::ZERO
                 };
+                let clamp_factor = if raw_delta != Vec3::ZERO && !editor.selected_edges.is_empty() {
+                    editor
+                        .map
+                        .as_ref()
+                        .map(|m| editing::edge_move_clamp_factor(m, &editor.selected_edges, raw_delta))
+                        .unwrap_or(0.0)
+                } else {
+                    1.0
+                };
+                let drag_delta = raw_delta * clamp_factor;
                 let previewing = drag_delta != Vec3::ZERO && !editor.selected_edges.is_empty();
 
                 // Selected edges grouped per brush: normalized face pairs.
