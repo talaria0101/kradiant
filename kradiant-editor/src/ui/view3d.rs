@@ -410,6 +410,7 @@ impl View3D {
                                 pick_convex_edge_by_screen_3d(
                                     m,
                                     (!prefer.is_empty()).then_some(&prefer[..]),
+                                    mask,
                                     vp,
                                     ray_origin,
                                     ray_dir,
@@ -584,6 +585,7 @@ impl View3D {
                                 let picked = pick_convex_edge_by_screen_3d(
                                     map_ref,
                                     (!prefer.is_empty()).then_some(&prefer[..]),
+                                    mask,
                                     vp,
                                     self.cam.pos,
                                     ray,
@@ -1722,14 +1724,19 @@ fn pick_patch_control_vertex_by_screen_3d(
     best.map(|(sel, _, _)| sel)
 }
 
-/// Screen-space edge picking for the 3D view: among the edges projecting
-/// within `radius_px` of the cursor, the one CLOSEST TO THE CAMERA wins
-/// (depth-buffer semantics), so edges seen through other brushes are never
-/// picked over the edge in front. Ties within a small depth band prefer
-/// brushes that already have selected edges, then the smaller pixel distance.
+/// Screen-space edge picking for the 3D view. Occlusion rules:
+/// - When the mouse ray hits a brush surface, ONLY that brush's edges are
+///   pickable — if none of its edges project within `radius_px` of the
+///   cursor, nothing is selected (no edges grabbed through other brushes).
+/// - With no brush under the ray, all edges within `radius_px` compete.
+/// Among candidates the CLOSEST TO THE CAMERA wins (depth-buffer semantics);
+/// ties within a small depth band prefer brushes that already have selected
+/// edges, then the smaller pixel distance. Visibility mask applies to both
+/// the blocking test and the candidate edges.
 fn pick_convex_edge_by_screen_3d(
     map: &mut kradiant::map::Map,
     prefer: Option<&[(usize, usize)]>,
+    mask: PickMask,
     vp: Mat4,
     ray_origin: Vec3,
     ray_dir: Vec3,
@@ -1740,13 +1747,20 @@ fn pick_convex_edge_by_screen_3d(
     let r2 = radius_px.max(1.0) * radius_px.max(1.0);
     // (selection, pixel distance², camera-space depth of the closest approach
     // of the mouse ray to the edge)
-    let mut best: Option<(EdgeSelection, f32, f32)> = None;
+    let mut candidates: Vec<(EdgeSelection, f32, f32)> = Vec::new();
 
     let visit_brush = |entity_idx: usize,
                            brush_idx: usize,
                            brush: &mut kradiant::map::Brush,
-                           best: &mut Option<(EdgeSelection, f32, f32)>| {
+                           out: &mut Vec<(EdgeSelection, f32, f32)>| {
         if !matches!(brush.content, kradiant::map::BrushContent::Convex(_)) {
+            return;
+        }
+        // Same visibility rules as brush picking.
+        if !mask.contains(PickMask::CONVEX) {
+            return;
+        }
+        if brush.is_clip() && !mask.contains(PickMask::CLIP) {
             return;
         }
         let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
@@ -1781,43 +1795,56 @@ fn pick_convex_edge_by_screen_3d(
                 .map(|p| ray_dir.dot(p - ray_origin).max(0.0))
                 .unwrap_or_else(|| (a - ray_origin).dot(ray_dir).max(0.0));
 
-            match *best {
-                None => *best = Some((sel, d2, depth)),
-                Some((best_sel, best_d2, best_depth)) => {
-                    // Depth band: flush/coincident edges count as tied so
-                    // pixel distance can still decide between them.
-                    let band = (best_depth * 1.0e-3).max(0.5);
-                    let take = if depth < best_depth - band {
-                        // Strictly in front of the current best: always wins.
-                        true
-                    } else if depth > best_depth + band {
-                        false
-                    } else {
-                        let best_preferred = prefer
-                            .map(|p| {
-                                p.contains(&(best_sel.entity_idx, best_sel.brush_idx))
-                            })
-                            .unwrap_or(false);
-                        let this_preferred = prefer
-                            .map(|p| p.contains(&(sel.entity_idx, sel.brush_idx)))
-                            .unwrap_or(false);
-                        if this_preferred != best_preferred {
-                            this_preferred
-                        } else {
-                            d2 < best_d2
-                        }
-                    };
-                    if take {
-                        *best = Some((sel, d2, depth));
-                    }
-                }
-            }
+            out.push((sel, d2, depth));
         }
     };
 
     for (entity_idx, entity) in map.entities.iter_mut().enumerate() {
         for (brush_idx, brush) in entity.brushes.iter_mut().enumerate() {
-            visit_brush(entity_idx, brush_idx, brush, &mut best);
+            visit_brush(entity_idx, brush_idx, brush, &mut candidates);
+        }
+    }
+
+    // The frontmost brush surface along the ray blocks everything behind it:
+    // restrict candidates to that brush (None means the ray misses all
+    // brushes and any candidate edge may be picked).
+    let front = editing::pick_brush_by_ray(map, ray_origin, ray_dir, mask, None);
+
+    let mut best: Option<(EdgeSelection, f32, f32)> = None;
+    for (sel, d2, depth) in candidates {
+        if let Some(front) = front {
+            if (sel.entity_idx, sel.brush_idx) != front {
+                continue;
+            }
+        }
+        match best {
+            None => best = Some((sel, d2, depth)),
+            Some((best_sel, best_d2, best_depth)) => {
+                // Depth band: flush/coincident edges count as tied so
+                // pixel distance can still decide between them.
+                let band = (best_depth * 1.0e-3).max(0.5);
+                let take = if depth < best_depth - band {
+                    // Strictly in front of the current best: always wins.
+                    true
+                } else if depth > best_depth + band {
+                    false
+                } else {
+                    let best_preferred = prefer
+                        .map(|p| p.contains(&(best_sel.entity_idx, best_sel.brush_idx)))
+                        .unwrap_or(false);
+                    let this_preferred = prefer
+                        .map(|p| p.contains(&(sel.entity_idx, sel.brush_idx)))
+                        .unwrap_or(false);
+                    if this_preferred != best_preferred {
+                        this_preferred
+                    } else {
+                        d2 < best_d2
+                    }
+                };
+                if take {
+                    best = Some((sel, d2, depth));
+                }
+            }
         }
     }
 
