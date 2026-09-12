@@ -764,7 +764,7 @@ impl View2D {
 
                                         self.move_offset = Vec3::ZERO;
                                     }
-                                    DragMode::MoveSelection => {
+                                    DragMode::MoveSelection | DragMode::MoveEdges => {
                                         let d = end - start;
                                         if d != Vec2::ZERO {
                                             let delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
@@ -1726,7 +1726,7 @@ impl View2D {
                         };
 
                         match self.drag_mode {
-                                DragMode::MoveSelection | DragMode::MoveVertices => {
+                                DragMode::MoveSelection | DragMode::MoveVertices | DragMode::MoveEdges => {
                                     let (a, b) = if let Some(sel) =
                                         selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                                     {
@@ -2160,7 +2160,7 @@ fn normalize_edge_selection(
     }
 }
 
-fn convex_edges_for_brush(
+pub(crate) fn convex_edges_for_brush(
     entity_idx: usize,
     brush_idx: usize,
     polys: &[(Vec<Vec3>, Vec<u32>)],

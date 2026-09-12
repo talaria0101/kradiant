@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::editor::EditorState;
+use crate::editing;
 use crate::editor::config::{EntityDrawAnchor, EntityDrawKind, RenderMode};
 use crate::editor::viewport::DragMode;
 use crate::render::RenderBackend;
@@ -884,6 +885,9 @@ impl Viewport3D {
                                         faces_to_highlight.push(face_sel.face_idx);
                                     }
                                 }
+                            } else if editor.edit_edges {
+                                // Edge edit mode: edges are drawn separately;
+                                // no whole-brush face tint.
                             } else if !editor.edit_vertices {
                                 // Brush edit mode: highlight all faces of selected brushes
                                 if is_brush_selected {
@@ -1132,6 +1136,139 @@ impl Viewport3D {
             }
             if editor.config.view.wireframe && !self.line_vertices.is_empty() {
                 backend.draw_lines(&self.line_vertices, geom_col, mvp);
+            }
+
+            // Edge edit mode: draw every convex brush edge, highlight the
+            // selected ones (always on top), and preview the drag by re-fitting
+            // the adjacent face planes exactly like the final apply will.
+            if editor.edit_edges {
+                let drag_delta = if editor.view3d.drag_mode == DragMode::MoveEdges {
+                    editor.view3d.move_offset
+                } else {
+                    Vec3::ZERO
+                };
+                let previewing = drag_delta != Vec3::ZERO && !editor.selected_edges.is_empty();
+
+                // Selected edges grouped per brush: normalized face pairs.
+                let mut sel_by_brush: HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
+                for sel in &editor.selected_edges {
+                    let pair = (
+                        sel.face_a_idx.min(sel.face_b_idx),
+                        sel.face_a_idx.max(sel.face_b_idx),
+                    );
+                    let pairs = sel_by_brush
+                        .entry((sel.entity_idx, sel.brush_idx))
+                        .or_default();
+                    if !pairs.contains(&pair) {
+                        pairs.push(pair);
+                    }
+                }
+                let is_selected_edge = |entity_idx: usize, brush_idx: usize, a: usize, b: usize| {
+                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                    sel_by_brush
+                        .get(&(entity_idx, brush_idx))
+                        .map(|pairs| pairs.contains(&(lo, hi)))
+                        .unwrap_or(false)
+                };
+
+                let mut dim_edges: Vec<Vec3> = Vec::new();
+                let mut sel_edges: Vec<Vec3> = Vec::new();
+                let mut sel_handles: Vec<Vec3> = Vec::new();
+
+                if let Some(map) = editor.map.as_mut() {
+                    for (entity_idx, entity) in map.entities.iter_mut().enumerate() {
+                        for (brush_idx, brush) in entity.brushes.iter_mut().enumerate() {
+                            if !matches!(&brush.content, BrushContent::Convex(_)) {
+                                continue;
+                            }
+
+                            let owned_polys: Option<Vec<(Vec<Vec3>, Vec<u32>)>>;
+                            let polys: &[(Vec<Vec3>, Vec<u32>)] = if previewing {
+                                match sel_by_brush.get(&(entity_idx, brush_idx)) {
+                                    Some(pairs) => {
+                                        match editing::preview_edge_moved_polys(brush, pairs, drag_delta)
+                                        {
+                                            Some(p) => {
+                                                owned_polys = Some(p);
+                                                owned_polys.as_deref().unwrap_or(&[])
+                                            }
+                                            // Degenerate preview: show the current
+                                            // geometry (the release will refuse).
+                                            None => brush.get_polygons().unwrap_or(&[]),
+                                        }
+                                    }
+                                    None => brush.get_polygons().unwrap_or(&[]),
+                                }
+                            } else {
+                                brush.get_polygons().unwrap_or(&[])
+                            };
+
+                            for fa in 0..polys.len() {
+                                for fb in (fa + 1)..polys.len() {
+                                    let Some((a, b)) = core_util::shared_edge_points(polys, fa, fb)
+                                    else {
+                                        continue;
+                                    };
+                                    if is_selected_edge(entity_idx, brush_idx, fa, fb) {
+                                        sel_edges.push(a);
+                                        sel_edges.push(b);
+                                    } else {
+                                        dim_edges.push(a);
+                                        dim_edges.push(b);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Small cube handles at the selected edge endpoints.
+                for chunk in sel_edges.chunks_exact(2) {
+                    let push_cube = |out: &mut Vec<Vec3>, center: Vec3, size: f32| {
+                        let corners = [
+                            Vec3::new(-size, -size, -size),
+                            Vec3::new(size, -size, -size),
+                            Vec3::new(size, size, -size),
+                            Vec3::new(-size, size, -size),
+                            Vec3::new(-size, -size, size),
+                            Vec3::new(size, -size, size),
+                            Vec3::new(size, size, size),
+                            Vec3::new(-size, size, size),
+                        ];
+                        let edge_ids = [
+                            0, 1, 1, 2, 2, 3, 3, 0, // bottom
+                            4, 5, 5, 6, 6, 7, 7, 4, // top
+                            0, 4, 1, 5, 2, 6, 3, 7, // pillars
+                        ];
+                        for &idx in &edge_ids {
+                            out.push(center + corners[idx]);
+                        }
+                    };
+                    push_cube(&mut sel_handles, chunk[0], 1.5);
+                    push_cube(&mut sel_handles, chunk[1], 1.5);
+                }
+
+                let dim_col = [
+                    geom_col[0] * 0.65,
+                    geom_col[1] * 0.65,
+                    geom_col[2] * 0.65,
+                    1.0,
+                ];
+
+                if !dim_edges.is_empty() {
+                    backend.gl.enable(glow::DEPTH_TEST);
+                    backend.draw_lines(&dim_edges, dim_col, mvp);
+                }
+                if !sel_edges.is_empty() {
+                    // Selected edges render on top (depth test off), like a
+                    // Blender edit-mode selection.
+                    backend.gl.disable(glow::DEPTH_TEST);
+                    backend.draw_lines(&sel_edges, editor.selection_rgba, mvp);
+                    if !sel_handles.is_empty() {
+                        backend.draw_lines(&sel_handles, editor.selection_rgba, mvp);
+                    }
+                    backend.gl.enable(glow::DEPTH_TEST);
+                }
             }
 
             if !self.entity_solid_batches.is_empty() {

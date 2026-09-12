@@ -398,15 +398,23 @@ impl View3D {
                                 }
                             }
                         } else if edit_edges {
+                            let vp = proj * view;
+                            let prefer: Vec<(usize, usize)> = {
+                                let mut set = std::collections::BTreeSet::new();
+                                for sel in selected_edges.iter() {
+                                    set.insert((sel.entity_idx, sel.brush_idx));
+                                }
+                                set.into_iter().collect()
+                            };
                             let selected_edge = map.as_mut().and_then(|m| {
-                                let (entity_idx, brush_idx, face_a_idx, face_b_idx) =
-                                    editing::pick_edge_by_ray(m, ray_origin, ray_dir, mask, None)?;
-                                Some(EdgeSelection {
-                                    entity_idx,
-                                    brush_idx,
-                                    face_a_idx,
-                                    face_b_idx,
-                                })
+                                pick_convex_edge_by_screen_3d(
+                                    m,
+                                    (!prefer.is_empty()).then_some(&prefer[..]),
+                                    vp,
+                                    mouse,
+                                    self.rect,
+                                    8.0,
+                                )
                             });
 
                             if let Some(sel) = selected_edge {
@@ -542,7 +550,85 @@ impl View3D {
                         && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
                         && !ui.is_key_down(dear_imgui_rs::Key::LeftAlt)
                     {
-                        if !selected_brushes.is_empty() || !selected_entities.is_empty() {
+                        if edit_edges {
+                            // Edge edit mode: plain click on an edge selects it
+                            // (Blender-style) and starts an edge drag.
+                            if let Some(map_ref) = map.as_mut() {
+                                let [_, _, rw, rh] = self.rect;
+                                let aspect = rw / rh;
+                                let proj = Mat4::perspective_rh(
+                                    config.view.fov.to_radians(),
+                                    aspect,
+                                    1.0,
+                                    1.0e6,
+                                );
+                                let forward = Self::forward_from_angles(self.cam.angles);
+                                let view = Mat4::look_at_rh(
+                                    self.cam.pos,
+                                    self.cam.pos + forward,
+                                    Vec3::Z,
+                                );
+                                let vp = proj * view;
+
+                                let prefer: Vec<(usize, usize)> = {
+                                    let mut set = std::collections::BTreeSet::new();
+                                    for sel in selected_edges.iter() {
+                                        set.insert((sel.entity_idx, sel.brush_idx));
+                                    }
+                                    set.into_iter().collect()
+                                };
+                                let picked = pick_convex_edge_by_screen_3d(
+                                    map_ref,
+                                    (!prefer.is_empty()).then_some(&prefer[..]),
+                                    vp,
+                                    mouse,
+                                    self.rect,
+                                    8.0,
+                                );
+
+                                if let Some(sel) = picked {
+                                    if !selected_edges.contains(&sel) {
+                                        // Plain click on an unselected edge makes
+                                        // it the whole edge selection.
+                                        selected_edges.clear();
+                                        selected_edges.push(sel);
+                                        view2d::sync_selected_brushes_from_edges(
+                                            selected_edges,
+                                            selected_brushes,
+                                        );
+                                        if !selected_entities.contains(&sel.entity_idx) {
+                                            selected_entities.push(sel.entity_idx);
+                                        }
+                                    }
+
+                                    // Anchor the drag at the edge point closest
+                                    // to the click ray; drag on the camera-facing
+                                    // plane through that point.
+                                    let ray =
+                                        self.screen_to_ray(Vec2::new(mouse[0], mouse[1]), config);
+                                    if let Some((a, b)) = edge_endpoints(map_ref, &sel) {
+                                        let anchor = ray_closest_point_on_segment(
+                                            self.cam.pos,
+                                            ray,
+                                            a,
+                                            b,
+                                        )
+                                        .unwrap_or((a + b) * 0.5);
+                                        self.drag_mode = DragMode::MoveEdges;
+                                        self.drag_start = Some(Vec2::new(mouse[0], mouse[1]));
+                                        self.drag_current = Some(Vec2::new(mouse[0], mouse[1]));
+                                        self.move_offset = Vec3::ZERO;
+                                        self.stretch = None;
+                                        self.stretch_delta = Vec3::ZERO;
+                                        self.rotate = None;
+                                        self.rotate_angle = 0.0;
+                                        self.drag_world_anchor = anchor;
+                                        self.drag_plane_normal = forward;
+                                        self.drag_plane_origin = anchor;
+                                    }
+                                }
+                            }
+                        } else if !selected_brushes.is_empty() || !selected_entities.is_empty() {
                             self.drag_start = Some(Vec2::new(mouse[0], mouse[1]));
                             self.drag_current = Some(Vec2::new(mouse[0], mouse[1]));
                             self.move_offset = Vec3::ZERO;
@@ -804,7 +890,10 @@ impl View3D {
                         && ui.is_mouse_down(MouseButton::Left)
                         && !ui.is_key_down(dear_imgui_rs::Key::LeftShift)
                     {
-                        if !selected_brushes.is_empty() || !selected_entities.is_empty() {
+                        if self.drag_mode == DragMode::MoveEdges
+                            || !selected_brushes.is_empty()
+                            || !selected_entities.is_empty()
+                        {
 
                             let current = Vec2::new(mouse[0], mouse[1]);
 
@@ -825,7 +914,7 @@ impl View3D {
                                     config.view.grid_snap
                                 };
                                 match self.drag_mode {
-                                    DragMode::MoveSelection => {
+                                    DragMode::MoveSelection | DragMode::MoveEdges => {
                                         let mut offset = raw_offset;
                                         if my_snapping {
                                             let grid =
@@ -1145,6 +1234,83 @@ impl View3D {
                                     }
                                     self.rotate_angle = 0.0;
                                 }
+                                DragMode::MoveEdges => {
+                                    let delta = self.move_offset;
+                                    if delta != Vec3::ZERO && !selected_edges.is_empty() {
+                                        // Validate every affected brush first:
+                                        // refuse the whole drag if any would
+                                        // degenerate (edge dragged backwards).
+                                        let mut valid = map.is_some();
+                                        if let Some(map_ref) = map.as_ref() {
+                                            for ((entity_idx, brush_idx), pairs) in
+                                                grouped_edge_pairs(selected_edges)
+                                            {
+                                                let brush = map_ref
+                                                    .entities
+                                                    .get(entity_idx)
+                                                    .and_then(|e| e.brushes.get(brush_idx));
+                                                let Some(brush) = brush else {
+                                                    valid = false;
+                                                    break;
+                                                };
+                                                if editing::preview_edge_moved_polys(
+                                                    brush,
+                                                    &pairs,
+                                                    delta,
+                                                )
+                                                .is_none()
+                                                {
+                                                    valid = false;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if !valid {
+                                            crate::log_info!(
+                                                console,
+                                                "Edge move refused — a brush would degenerate"
+                                            );
+                                        } else {
+                                            undo.push(
+                                                "Move edges",
+                                                map,
+                                                selected_brushes,
+                                                selected_faces,
+                                                selected_edges,
+                                                selected_patch_vertices,
+                                                selected_entities,
+                                            );
+
+                                            if let Some(map_ref) = map.as_mut() {
+                                                if editing::translate_selected_edges(
+                                                    map_ref,
+                                                    selected_edges,
+                                                    delta,
+                                                ) {
+                                                    crate::log_info!(
+                                                        console,
+                                                        "Moved selected edges in 3D View"
+                                                    );
+                                                }
+                                            }
+
+                                            if let Some(aabb) = view2d::selection_aabb_active(
+                                                map,
+                                                selected_brushes,
+                                                selected_faces,
+                                                selected_edges,
+                                                selected_entities,
+                                                edit_faces,
+                                                edit_edges,
+                                                ent_draw_config,
+                                            ) {
+                                                self.last_aabb = Some(aabb.clone());
+                                                self.update_work_from_aabb(aabb);
+                                            }
+                                        }
+                                    }
+                                    self.move_offset = Vec3::ZERO;
+                                }
                                 _ => {}
                             }
                         }
@@ -1187,6 +1353,9 @@ impl View3D {
                                 selected_faces,
                                 selected_brushes,
                             );
+                        } else if edit_edges {
+                            selected_edges.clear();
+                            selected_brushes.clear();
                         } else {
                             selected_brushes.clear();
                         }
@@ -1241,6 +1410,36 @@ impl View3D {
                     let delta_info_col = util::imgui_color_to_u32(col);
 
                     match self.drag_mode {
+                        DragMode::MoveEdges => {
+                            if self.move_offset != Vec3::ZERO {
+                                let a =
+                                    world_to_screen_3d(common_vp, self.rect, self.drag_world_anchor);
+                                let b = world_to_screen_3d(
+                                    common_vp,
+                                    self.rect,
+                                    self.drag_world_anchor + self.move_offset,
+                                );
+                                if let (Some(a), Some(b)) = (a, b) {
+                                    let delta_info = format_vec3(self.move_offset, 2);
+                                    let tw = text_width(ui, &delta_info);
+                                    let text_h = text_height(ui, "1") + 2.0;
+                                    let text_pos = [b[0] - tw / 2.0, b[1] - text_h];
+
+                                    draw.add_line(
+                                        a,
+                                        b,
+                                        util::adjust_color_brightness(delta_info_col, 1.5),
+                                    )
+                                    .thickness(2.0)
+                                    .build();
+                                    draw.add_text(
+                                        text_pos,
+                                        util::adjust_color_brightness(delta_info_col, 2.0),
+                                        delta_info,
+                                    );
+                                }
+                            }
+                        }
                         DragMode::MoveSelection => {
                             let draw_coords = if let Some(sel) = selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
                                 let center = Vec3::new(
@@ -1517,4 +1716,145 @@ fn pick_patch_control_vertex_by_screen_3d(
     }
 
     best.map(|(sel, _, _)| sel)
+}
+
+/// Screen-space edge picking for the 3D view: project both edge endpoints and
+/// pick the closest edge within `radius_px` of the cursor (zoom-independent,
+/// matching the 2D view's picker). Edges of `prefer`red brushes win overlaps.
+fn pick_convex_edge_by_screen_3d(
+    map: &mut kradiant::map::Map,
+    prefer: Option<&[(usize, usize)]>,
+    vp: Mat4,
+    mouse_screen: [f32; 2],
+    rect: [f32; 4],
+    radius_px: f32,
+) -> Option<EdgeSelection> {
+    let r2 = radius_px.max(1.0) * radius_px.max(1.0);
+    let mut best: Option<(EdgeSelection, f32)> = None;
+
+    let visit_brush = |entity_idx: usize,
+                           brush_idx: usize,
+                           brush: &mut kradiant::map::Brush,
+                           best: &mut Option<(EdgeSelection, f32)>| {
+        if !matches!(brush.content, kradiant::map::BrushContent::Convex(_)) {
+            return;
+        }
+        let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
+            return;
+        };
+        for (sel, a, b) in view2d::convex_edges_for_brush(entity_idx, brush_idx, polys) {
+            let Some(sa) = world_to_screen_3d(vp, rect, a) else {
+                continue;
+            };
+            let Some(sb) = world_to_screen_3d(vp, rect, b) else {
+                continue;
+            };
+            let ab = [sb[0] - sa[0], sb[1] - sa[1]];
+            let ap = [mouse_screen[0] - sa[0], mouse_screen[1] - sa[1]];
+            let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+            let d2 = if len2 <= 1.0e-6 {
+                ap[0] * ap[0] + ap[1] * ap[1]
+            } else {
+                let t = ((ap[0] * ab[0] + ap[1] * ab[1]) / len2).clamp(0.0, 1.0);
+                let q = [sa[0] + ab[0] * t, sa[1] + ab[1] * t];
+                let dx = mouse_screen[0] - q[0];
+                let dy = mouse_screen[1] - q[1];
+                dx * dx + dy * dy
+            };
+            if d2 > r2 {
+                continue;
+            }
+            match best {
+                None => *best = Some((sel, d2)),
+                Some((_, best_d2)) if d2 < *best_d2 => *best = Some((sel, d2)),
+                _ => {}
+            }
+        }
+    };
+
+    if let Some(prefer) = prefer {
+        for &(entity_idx, brush_idx) in prefer {
+            let Some(entity) = map.entities.get_mut(entity_idx) else {
+                continue;
+            };
+            let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+                continue;
+            };
+            visit_brush(entity_idx, brush_idx, brush, &mut best);
+        }
+    }
+    if best.is_none() {
+        for (entity_idx, entity) in map.entities.iter_mut().enumerate() {
+            for (brush_idx, brush) in entity.brushes.iter_mut().enumerate() {
+                visit_brush(entity_idx, brush_idx, brush, &mut best);
+            }
+        }
+    }
+
+    best.map(|(sel, _)| sel)
+}
+
+/// World-space endpoints of a selected edge (normalized face pair indices).
+fn edge_endpoints(
+    map: &mut kradiant::map::Map,
+    sel: &EdgeSelection,
+) -> Option<(Vec3, Vec3)> {
+    let entity = map.entities.get_mut(sel.entity_idx)?;
+    let brush = entity.brushes.get_mut(sel.brush_idx)?;
+    if !matches!(brush.content, kradiant::map::BrushContent::Convex(_)) {
+        return None;
+    }
+    let polys = brush.get_polygons()?;
+    let (fa, fb) = (
+        sel.face_a_idx.min(sel.face_b_idx),
+        sel.face_a_idx.max(sel.face_b_idx),
+    );
+    core_util::shared_edge_points(polys, fa, fb)
+}
+
+/// Closest point on segment `a..b` to the ray `origin + t * dir` (t >= 0).
+fn ray_closest_point_on_segment(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3) -> Option<Vec3> {
+    let edge = b - a;
+    let len = edge.length();
+    if len < 1.0e-6 {
+        return None;
+    }
+    let edge_dir = edge / len;
+
+    let w0 = a - origin;
+    let bb = dir.dot(edge_dir);
+    let dd = dir.dot(w0);
+    let ee = edge_dir.dot(w0);
+    let denom = 1.0 - bb * bb;
+
+    let (mut _t, mut s) = if denom > 1.0e-12 {
+        ((bb * ee - dd) / denom, (ee - bb * dd) / denom)
+    } else {
+        let s = (-ee).clamp(0.0, len);
+        let closest = a + edge_dir * s;
+        (dir.dot(closest - origin), s)
+    };
+    _t = _t.max(0.0);
+    s = s.clamp(0.0, len);
+    Some(a + edge_dir * s)
+}
+
+/// Group edge selections per brush: (entity, brush) -> deduped, normalized
+/// face pairs. Used to validate a whole edge drag before applying it.
+fn grouped_edge_pairs(
+    selected_edges: &[EdgeSelection],
+) -> std::collections::BTreeMap<(usize, usize), Vec<(usize, usize)>> {
+    let mut out: std::collections::BTreeMap<(usize, usize), Vec<(usize, usize)>> =
+        std::collections::BTreeMap::new();
+    for sel in selected_edges {
+        let pair = (
+            sel.face_a_idx.min(sel.face_b_idx),
+            sel.face_a_idx.max(sel.face_b_idx),
+        );
+        let pairs = out.entry((sel.entity_idx, sel.brush_idx)).or_default();
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
+    out
 }

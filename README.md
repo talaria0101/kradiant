@@ -18,7 +18,6 @@ CoD 1/UO level editing library and tool written in Rust.
 - **Vertex deletion with welding**: Implement algorithm to delete selected patch vertices and weld the remaining vertices together
 - **Face deletion with joining**: Implement algorithm to delete selected faces and join the remaining faces at the center of the deleted face
 - **Context menu in 2D view**
-- **Edge edit mode**
 - Improve **Surface Inspector**
 - Improve **entity drawing**
 - Implement **editing in 3D view**
