@@ -502,6 +502,7 @@ impl View3D {
                                         }
                                         selected_faces.clear();
                                         if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                            self.last_aabb = Some(aabb.clone());
                                             self.update_work_from_aabb(aabb);
                                         }
                                     }
@@ -521,6 +522,7 @@ impl View3D {
                                             }
                                         }
                                         if let Some(aabb) = view2d::selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config) {
+                                            self.last_aabb = Some(aabb.clone());
                                             self.update_work_from_aabb(aabb);
                                         }
                                     }
@@ -719,9 +721,60 @@ impl View3D {
                                         min: Vec3::ZERO,
                                         max: Vec3::ZERO,
                                     });
+                                    // Compute cached avg_normal and face_center from side_faces
+                                    let (avg_normal, face_center) = if let Some(map_mut) = map.as_mut() {
+                                        let mut normal_sum = Vec3::ZERO;
+                                        let mut normal_count = 0u32;
+                                        let mut center_sum = Vec3::ZERO;
+                                        let mut center_count = 0u32;
+                                        for (ent_idx, br_idx, face_indices) in &side_faces {
+                                            if let Some(entity) = map_mut.entities.get_mut(*ent_idx) {
+                                                if let Some(brush) = entity.brushes.get_mut(*br_idx) {
+                                                    if let Some(polys) = brush.get_polygons() {
+                                                        for &face_idx in face_indices {
+                                                            if face_idx < polys.len() {
+                                                                let (positions, _) = &polys[face_idx];
+                                                                // Compute normal
+                                                                if positions.len() >= 3 {
+                                                                    let e1 = positions[1] - positions[0];
+                                                                    let e2 = positions[2] - positions[0];
+                                                                    let n = e1.cross(e2).normalize_or_zero();
+                                                                    normal_sum += n;
+                                                                    normal_count += 1;
+                                                                }
+                                                                // Compute center
+                                                                if !positions.is_empty() {
+                                                                    for pos in positions {
+                                                                        center_sum += *pos;
+                                                                        center_count += 1;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        (
+                                            if normal_count > 0 {
+                                                normal_sum.normalize_or_zero()
+                                            } else {
+                                                Vec3::ZERO
+                                            },
+                                            if center_count > 0 {
+                                                center_sum / center_count as f32
+                                            } else {
+                                                Vec3::ZERO
+                                            },
+                                        )
+                                    } else {
+                                        (Vec3::ZERO, Vec3::ZERO)
+                                    };
                                     self.stretch = Some(SideStretchDrag {
                                         selection_aabb: aabb,
                                         side_faces,
+                                        avg_normal,
+                                        face_center,
                                     });
                                     self.stretch_delta = Vec3::ZERO;
                                     self.drag_mode = DragMode::StretchSelection;
@@ -780,41 +833,22 @@ impl View3D {
                                     }
                                     DragMode::StretchSelection => {
                                         let mut delta = raw_offset;
-                                        if config.view.grid_snap {
+                                        let my_snapping = if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) {
+                                            !config.view.grid_snap
+                                        } else {
+                                            config.view.grid_snap
+                                        };
+                                        if my_snapping {
                                             let grid =
                                                 config.view.grid_minor_step.max(1) as f32;
                                             delta.x = (delta.x / grid).round() * grid;
                                             delta.y = (delta.y / grid).round() * grid;
                                             delta.z = (delta.z / grid).round() * grid;
                                         }
-                                        // Constrain delta to face normals
+                                        // Constrain delta to face normals using cached avg_normal
                                         if let Some(stretch) = self.stretch.as_ref() {
-                                            let mut normal_sum = Vec3::ZERO;
-                                            let mut count = 0u32;
-                                            if let Some(map_ref) = map.as_ref() {
-                                                for (ent_idx, br_idx, face_indices) in &stretch.side_faces {
-                                                    if let Some(entity) = map_ref.entities.get(*ent_idx) {
-                                                        if let Some(brush) = entity.brushes.get(*br_idx) {
-                                                            if let Some(polys) = brush.clone().get_polygons() {
-                                                                for &face_idx in face_indices {
-                                                                    if face_idx < polys.len() {
-                                                                        let (positions, _) = &polys[face_idx];
-                                                                        if positions.len() >= 3 {
-                                                                            let e1 = positions[1] - positions[0];
-                                                                            let e2 = positions[2] - positions[0];
-                                                                            let n = e1.cross(e2).normalize_or_zero();
-                                                                            normal_sum += n;
-                                                                            count += 1;
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            if count > 0 {
-                                                let avg_normal = normal_sum.normalize_or_zero();
+                                            let avg_normal = stretch.avg_normal;
+                                            if avg_normal != Vec3::ZERO {
                                                 // Project delta onto average normal
                                                 let projected = avg_normal * delta.dot(avg_normal);
                                                 delta = projected;
@@ -832,7 +866,11 @@ impl View3D {
                                             let dx = current.x - start.x;
                                             // Convert pixels to radians (similar to 2D view)
                                             let angle = -dx * 0.01;
-                                            let my_snapping = config.view.grid_snap;
+                                            let my_snapping = if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) {
+                                                !config.view.grid_snap
+                                            } else {
+                                                config.view.grid_snap
+                                            };
                                             let mut angle = angle;
                                             if my_snapping {
                                                 angle = angle.to_degrees().round().to_radians();
@@ -1235,36 +1273,9 @@ impl View3D {
                         }
                         DragMode::StretchSelection => {
                             if self.stretch_delta != Vec3::ZERO {
-                                // Compute center of the faces being stretched
+                                // Use cached face_center from SideStretchDrag
                                 let face_center = if let Some(stretch) = self.stretch.as_ref() {
-                                    let mut center_sum = Vec3::ZERO;
-                                    let mut count = 0u32;
-                                    if let Some(map_ref) = map.as_ref() {
-                                        for (ent_idx, br_idx, face_indices) in &stretch.side_faces {
-                                            if let Some(entity) = map_ref.entities.get(*ent_idx) {
-                                                if let Some(brush) = entity.brushes.get(*br_idx) {
-                                                    if let Some(polys) = brush.clone().get_polygons() {
-                                                        for &face_idx in face_indices {
-                                                            if face_idx < polys.len() {
-                                                                let (positions, _) = &polys[face_idx];
-                                                                if !positions.is_empty() {
-                                                                    for pos in positions {
-                                                                        center_sum += *pos;
-                                                                        count += 1;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if count > 0 {
-                                        Some(center_sum / count as f32)
-                                    } else {
-                                        None
-                                    }
+                                    Some(stretch.face_center)
                                 } else {
                                     None
                                 };

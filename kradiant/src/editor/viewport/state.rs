@@ -15,6 +15,10 @@ pub struct SideStretchDrag {
     pub selection_aabb: Aabb,
     /// (entity_idx, brush_idx, face indices) per selected brush.
     pub side_faces: Vec<(usize, usize, Vec<usize>)>,
+    /// Cached average normal of the stretched faces, computed once at drag start.
+    pub avg_normal: Vec3,
+    /// Cached center of the stretched faces, computed once at drag start.
+    pub face_center: Vec3,
 }
 
 #[derive(Clone, Debug)]

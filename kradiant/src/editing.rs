@@ -1226,7 +1226,7 @@ impl PickMask {
     pub const CLIP: PickMask = PickMask(1 << 2);
     pub const PORTAL: PickMask = PickMask(1 << 3);
     pub const HINT: PickMask = PickMask(1 << 4);
-    pub const ALL: PickMask = PickMask(Self::CONVEX.0 | Self::PATCH.0 | Self::CLIP.0 | Self::PATCH.0 | Self::HINT.0);
+    pub const ALL: PickMask = PickMask(Self::CONVEX.0 | Self::PATCH.0 | Self::CLIP.0 | Self::PORTAL.0 | Self::HINT.0);
 
     pub fn contains(self, other: PickMask) -> bool {
         (self.0 & other.0) != 0
