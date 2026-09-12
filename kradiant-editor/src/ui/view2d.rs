@@ -1538,7 +1538,7 @@ impl View2D {
                 }
 
                 if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
-                    if let Some(map) = map && let Some(aabb) =
+                    if let Some(aabb) =
                         selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                     {
                         self.last_aabb = Some(aabb.clone());
