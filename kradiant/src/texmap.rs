@@ -144,8 +144,16 @@ pub fn translation_offset_shift(face: &Face, delta: Vec3) -> IVec2 {
     let (s_axis, t_axis) = q3_texture_axes_from_normal(n);
     let (s_axis, t_axis) =
         rotate_texture_axes(s_axis, t_axis, (face.params.rotate as f32).to_radians());
-    let scale_u = face.params.scale.x;
-    let scale_v = face.params.scale.y;
+    let scale_u = if face.params.scale.x.abs() < 1e-6 {
+        1.0
+    } else {
+        face.params.scale.x
+    };
+    let scale_v = if face.params.scale.y.abs() < 1e-6 {
+        1.0
+    } else {
+        face.params.scale.y
+    };
     let raw_u = delta.dot(s_axis);
     let raw_v = delta.dot(t_axis);
     IVec2::new(
