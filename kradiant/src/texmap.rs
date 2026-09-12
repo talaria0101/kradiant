@@ -132,3 +132,32 @@ pub fn rotate_texture_axes(s: Vec3, t: Vec3, angle_rad: f32) -> (Vec3, Vec3) {
 pub fn face_uv(face: &Face, point: Vec3, tex_w: f32, tex_h: f32) -> Vec2 {
     FaceUvMapper::new(face, tex_w, tex_h).uv(point)
 }
+
+/// Texture Lock: the shift delta (in texels) that keeps a face's texture
+/// visually attached under a translation by `delta`.
+///
+/// The world-projected UV term shifts by `delta.dot(s_axis) / (tex_w * scale)`.
+/// To cancel this, the shift (stored in texels) must change by
+/// `-delta.dot(axis) / scale` (the texture size drops out).
+pub fn translation_offset_shift(face: &Face, delta: Vec3) -> IVec2 {
+    let n = face_plane_normal(face);
+    let (s_axis, t_axis) = q3_texture_axes_from_normal(n);
+    let (s_axis, t_axis) =
+        rotate_texture_axes(s_axis, t_axis, (face.params.rotate as f32).to_radians());
+    let scale_u = if face.params.scale.x.abs() < 1e-6 {
+        1.0
+    } else {
+        face.params.scale.x
+    };
+    let scale_v = if face.params.scale.y.abs() < 1e-6 {
+        1.0
+    } else {
+        face.params.scale.y
+    };
+    let raw_u = delta.dot(s_axis);
+    let raw_v = delta.dot(t_axis);
+    IVec2::new(
+        (-raw_u / scale_u).round() as i32,
+        (-raw_v / scale_v).round() as i32,
+    )
+}

@@ -73,6 +73,21 @@ pub fn format_float_trim<T: Float + Display>(value: T, points: u8) -> String {
     if trimmed.is_empty() { "0" } else { trimmed }.to_string()
 }
 
+pub fn format_vec2<T: From<[f32; 2]> + Into<[f32; 2]>>(value: T, points: u8) -> String {
+    let v: [f32; 2] = value.into();
+    let x_r = round_float(v[0], points);
+    let y_r = round_float(v[1], points);
+    format!("({x_r}, {y_r})")
+}
+
+pub fn format_vec3<T: From<[f32; 3]> + Into<[f32; 3]>>(value: T, points: u8) -> String {
+    let v: [f32; 3] = value.into();
+    let x_r = round_float(v[0], points);
+    let y_r = round_float(v[1], points);
+    let z_r = round_float(v[2], points);
+    format!("({x_r}, {y_r}, {z_r})")
+}
+
 pub fn rotate_vector(v: Vec3, axis: Vec3, degree: f32) -> Vec3 {
     let radians = degree.to_radians();
     let sin = radians.sin();

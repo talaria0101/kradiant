@@ -272,7 +272,7 @@ impl Default for EditorState {
 impl EditorState {
     pub fn sync_viewports_to_core(&mut self) {
         self.core.view2d = self.view2d.core.clone();
-        self.core.view3d = self.view3d.core;
+        self.core.view3d = self.view3d.core.clone();
     }
 }
 
@@ -319,6 +319,8 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             map,
             ent_draw_config,
             state.core.selection_rgba,
+            state.rotate_mode,
+            state.view2d.ortho_axis,
         );
     }
 
@@ -628,6 +630,28 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                         &mut state.core.view_config_rev,
                     );
                 }
+                let mut toggled = state.core.config.view.show.portal_brushes;
+                if ui.menu_item_toggle_no_shortcut("Portal Brushes", &mut toggled, true) {
+                    let next_value = !state.core.config.view.show.portal_brushes as u8;
+                    update_config(
+                        &mut state.core.config,
+                        "show_portal",
+                        next_value,
+                        &mut state.console,
+                        &mut state.core.view_config_rev,
+                    );
+                }
+                let mut toggled = state.core.config.view.show.hint_brushes;
+                if ui.menu_item_toggle_no_shortcut("Hint Brushes", &mut toggled, true) {
+                    let next_value = !state.core.config.view.show.hint_brushes as u8;
+                    update_config(
+                        &mut state.core.config,
+                        "show_hint",
+                        next_value,
+                        &mut state.console,
+                        &mut state.core.view_config_rev,
+                    );
+                }
                 let mut toggled = state.core.config.view.show.patches;
                 if ui.menu_item_toggle_no_shortcut("Patches", &mut toggled, true) {
                     let next_value = !state.core.config.view.show.patches as u8;
@@ -839,11 +863,15 @@ fn draw_toolbar(ui: &Ui, state: &mut EditorState) {
             if let Some(aabb) = state.view2d.last_aabb.clone() {
                 view2d::update_last_work_from_aabb(&mut state.view2d, &aabb);
             }
+            if let Some(aabb) = state.view3d.last_aabb.clone() {
+                state.view3d.update_work_from_aabb(aabb);
+            }
         }
 
         if key_combo_pressed(ui, dear_imgui_rs::Key::C, SHIFT) {
             if !state.core.selected_brushes.is_empty() {
                 state.view2d.center_to_work();
+                state.view3d.center_to_work();
                 log_info!(state.console, "Goto Selection");
             }
         }

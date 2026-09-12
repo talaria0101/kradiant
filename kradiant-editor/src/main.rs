@@ -69,6 +69,17 @@ struct AppState {
     program: glow::Program,
     mvp_loc: glow::UniformLocation,
     color_loc: glow::UniformLocation,
+    lit_program: glow::Program,
+    lit_mvp_loc: glow::UniformLocation,
+    lit_color_loc: glow::UniformLocation,
+    lit_ldir_loc: glow::UniformLocation,
+    lit_amb_loc: glow::UniformLocation,
+    tex_program: glow::Program,
+    tex_mvp_loc: glow::UniformLocation,
+    tex_color_loc: glow::UniformLocation,
+    tex_ldir_loc: glow::UniformLocation,
+    tex_amb_loc: glow::UniformLocation,
+    tex_sampler_loc: glow::UniformLocation,
     vbo: glow::Buffer,
     //ebo: glow::Buffer,
     vao: glow::NativeVertexArray,
@@ -257,6 +268,109 @@ fn compile_wire_shader(
     }
 }
 
+/// Compile the 3D lit shader program (GL 2.1 compatible).
+/// Returns (program, mvp, color, light_dir, ambient locations).
+fn compile_lit_shader(
+    gl: &glow::Context,
+) -> (
+    glow::Program,
+    glow::UniformLocation,
+    glow::UniformLocation,
+    glow::UniformLocation,
+    glow::UniformLocation,
+) {
+    unsafe {
+        let vert = gl.create_shader(glow::VERTEX_SHADER).unwrap();
+        gl.shader_source(vert, include_str!("glsl/lit_vert.glsl"));
+        gl.compile_shader(vert);
+
+        if !gl.get_shader_compile_status(vert) {
+            panic!(
+                "vertex shader compilation failed: {}",
+                gl.get_shader_info_log(vert)
+            );
+        }
+
+        let frag = gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
+        gl.shader_source(frag, include_str!("glsl/lit_frag.glsl"));
+        gl.compile_shader(frag);
+
+        if !gl.get_shader_compile_status(frag) {
+            panic!(
+                "fragment shader compilation failed: {}",
+                gl.get_shader_info_log(frag)
+            );
+        }
+
+        let program = gl.create_program().unwrap();
+        gl.attach_shader(program, vert);
+        gl.attach_shader(program, frag);
+        gl.bind_attrib_location(program, 0, "a_pos");
+        gl.bind_attrib_location(program, 1, "a_normal");
+        gl.link_program(program);
+
+        let mvp_loc = gl.get_uniform_location(program, "u_mvp").unwrap();
+        let color_loc = gl.get_uniform_location(program, "u_color").unwrap();
+        let ldir_loc = gl.get_uniform_location(program, "u_light_dir").unwrap();
+        let amb_loc = gl.get_uniform_location(program, "u_ambient").unwrap();
+
+        (program, mvp_loc, color_loc, ldir_loc, amb_loc)
+    }
+}
+
+/// Compile the 3D textured shader program (GL 2.1 compatible).
+/// Returns (program, mvp, color, light_dir, ambient, tex locations).
+fn compile_tex_shader(
+    gl: &glow::Context,
+) -> (
+    glow::Program,
+    glow::UniformLocation,
+    glow::UniformLocation,
+    glow::UniformLocation,
+    glow::UniformLocation,
+    glow::UniformLocation,
+) {
+    unsafe {
+        let vert = gl.create_shader(glow::VERTEX_SHADER).unwrap();
+        gl.shader_source(vert, include_str!("glsl/tex_vert.glsl"));
+        gl.compile_shader(vert);
+
+        if !gl.get_shader_compile_status(vert) {
+            panic!(
+                "vertex shader compilation failed: {}",
+                gl.get_shader_info_log(vert)
+            );
+        }
+
+        let frag = gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
+        gl.shader_source(frag, include_str!("glsl/tex_frag.glsl"));
+        gl.compile_shader(frag);
+
+        if !gl.get_shader_compile_status(frag) {
+            panic!(
+                "fragment shader compilation failed: {}",
+                gl.get_shader_info_log(frag)
+            );
+        }
+
+        let program = gl.create_program().unwrap();
+        gl.attach_shader(program, vert);
+        gl.attach_shader(program, frag);
+        gl.bind_attrib_location(program, 0, "a_pos");
+        gl.bind_attrib_location(program, 1, "a_normal");
+        gl.bind_attrib_location(program, 2, "a_uv");
+        gl.link_program(program);
+
+        let mvp_loc = gl.get_uniform_location(program, "u_mvp").unwrap();
+        let color_loc = gl.get_uniform_location(program, "u_color").unwrap();
+        let ldir_loc = gl.get_uniform_location(program, "u_light_dir").unwrap();
+        let amb_loc = gl.get_uniform_location(program, "u_ambient").unwrap();
+        let tex_loc = gl.get_uniform_location(program, "u_tex").unwrap();
+
+        (program, mvp_loc, color_loc, ldir_loc, amb_loc, tex_loc)
+    }
+}
+
 impl AppState {
     fn new(event_loop: &ActiveEventLoop) -> Self {
         // window + GL config ─
@@ -410,6 +524,14 @@ impl AppState {
 
         // Compile the 2D wire shader program
         let (program, mvp_loc, color_loc) = compile_wire_shader(&gl_for_renderer);
+
+        // Compile the 3D lit and textured shader programs once at startup.
+        // These were previously compiled inside render() every single frame,
+        // which dominated the frame time on big maps.
+        let (lit_program, lit_mvp_loc, lit_color_loc, lit_ldir_loc, lit_amb_loc) =
+            compile_lit_shader(&gl_for_renderer);
+        let (tex_program, tex_mvp_loc, tex_color_loc, tex_ldir_loc, tex_amb_loc, tex_sampler_loc) =
+            compile_tex_shader(&gl_for_renderer);
 
         let vbo = unsafe { gl_for_renderer.create_buffer().unwrap() };
         //let ebo = unsafe { gl_for_renderer.create_buffer().unwrap() };
@@ -654,6 +776,17 @@ impl AppState {
             program,
             mvp_loc,
             color_loc,
+            lit_program,
+            lit_mvp_loc,
+            lit_color_loc,
+            lit_ldir_loc,
+            lit_amb_loc,
+            tex_program,
+            tex_mvp_loc,
+            tex_color_loc,
+            tex_ldir_loc,
+            tex_amb_loc,
+            tex_sampler_loc,
             vbo,
             //ebo,
             vao,
@@ -757,82 +890,18 @@ impl AppState {
             self.editor.core.view_config_rev = self.editor.core.view_config_rev.wrapping_add(1);
         }
 
-        let lit_program = unsafe {
-            let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
-            self.gl
-                .shader_source(vert, include_str!("glsl/lit_vert.glsl"));
-            self.gl.compile_shader(vert);
+        let lit_program = self.lit_program;
+        let lit_mvp_loc = self.lit_mvp_loc.clone();
+        let lit_color_loc = self.lit_color_loc.clone();
+        let lit_ldir_loc = self.lit_ldir_loc.clone();
+        let lit_amb_loc = self.lit_amb_loc.clone();
 
-            let frag = self.gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
-            self.gl
-                .shader_source(frag, include_str!("glsl/lit_frag.glsl"));
-            self.gl.compile_shader(frag);
-
-            let prog = self.gl.create_program().unwrap();
-            self.gl.attach_shader(prog, vert);
-            self.gl.attach_shader(prog, frag);
-            self.gl.bind_attrib_location(prog, 0, "a_pos");
-            self.gl.bind_attrib_location(prog, 1, "a_normal");
-            self.gl.link_program(prog);
-            prog
-        };
-
-        let lit_mvp_loc = unsafe { self.gl.get_uniform_location(lit_program, "u_mvp").unwrap() };
-        let lit_color_loc = unsafe {
-            self.gl
-                .get_uniform_location(lit_program, "u_color")
-                .unwrap()
-        };
-        let lit_ldir_loc = unsafe {
-            self.gl
-                .get_uniform_location(lit_program, "u_light_dir")
-                .unwrap()
-        };
-        let lit_amb_loc = unsafe {
-            self.gl
-                .get_uniform_location(lit_program, "u_ambient")
-                .unwrap()
-        };
-
-        let tex_program = unsafe {
-            let vert = self.gl.create_shader(glow::VERTEX_SHADER).unwrap();
-            self.gl
-                .shader_source(vert, include_str!("glsl/tex_vert.glsl"));
-            self.gl.compile_shader(vert);
-
-            let frag = self.gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
-            self.gl
-                .shader_source(frag, include_str!("glsl/tex_frag.glsl"));
-            self.gl.compile_shader(frag);
-
-            let prog = self.gl.create_program().unwrap();
-            self.gl.attach_shader(prog, vert);
-            self.gl.attach_shader(prog, frag);
-            self.gl.bind_attrib_location(prog, 0, "a_pos");
-            self.gl.bind_attrib_location(prog, 1, "a_normal");
-            self.gl.bind_attrib_location(prog, 2, "a_uv");
-            self.gl.link_program(prog);
-            prog
-        };
-
-        let tex_mvp_loc = unsafe { self.gl.get_uniform_location(tex_program, "u_mvp").unwrap() };
-        let tex_color_loc = unsafe {
-            self.gl
-                .get_uniform_location(tex_program, "u_color")
-                .unwrap()
-        };
-        let tex_ldir_loc = unsafe {
-            self.gl
-                .get_uniform_location(tex_program, "u_light_dir")
-                .unwrap()
-        };
-        let tex_amb_loc = unsafe {
-            self.gl
-                .get_uniform_location(tex_program, "u_ambient")
-                .unwrap()
-        };
-        let tex_sampler_loc =
-            unsafe { self.gl.get_uniform_location(tex_program, "u_tex").unwrap() };
+        let tex_program = self.tex_program;
+        let tex_mvp_loc = self.tex_mvp_loc.clone();
+        let tex_color_loc = self.tex_color_loc.clone();
+        let tex_ldir_loc = self.tex_ldir_loc.clone();
+        let tex_amb_loc = self.tex_amb_loc.clone();
+        let tex_sampler_loc = self.tex_sampler_loc.clone();
 
         self.platform.prepare_frame(&self.window, &mut self.imgui);
         let ui = self.imgui.frame();
@@ -1015,7 +1084,6 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { .. } => {
                 state.needs_redraw = true;
                 state.render();
-                state.render(); // TODO: find a better approach maybe later
                 state.needs_redraw = false;
             }
             WindowEvent::Focused(_)

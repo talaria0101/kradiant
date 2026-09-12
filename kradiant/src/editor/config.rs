@@ -37,12 +37,21 @@ impl RenderMode {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Default, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
 pub struct Show {
     pub models: bool,
     pub clip_brushes: bool,
+    pub portal_brushes: bool,
+    pub hint_brushes: bool,
     pub patches: bool,
     pub convex: bool,
+}
+
+impl Default for Show {
+    fn default() -> Self {
+        Self { models: true, clip_brushes: true, portal_brushes: true, hint_brushes: true, patches: true, convex: true }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
