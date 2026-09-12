@@ -819,10 +819,15 @@ impl View3D {
                                 let raw_offset = world_current - self.drag_world_anchor;
                                 self.drag_current = Some(current);
 
+                                let my_snapping = if ctrl {
+                                    !config.view.grid_snap
+                                } else {
+                                    config.view.grid_snap
+                                };
                                 match self.drag_mode {
                                     DragMode::MoveSelection => {
                                         let mut offset = raw_offset;
-                                        if config.view.grid_snap {
+                                        if my_snapping {
                                             let grid =
                                                 config.view.grid_minor_step.max(1) as f32;
                                             offset.x = (offset.x / grid).round() * grid;
@@ -833,11 +838,7 @@ impl View3D {
                                     }
                                     DragMode::StretchSelection => {
                                         let mut delta = raw_offset;
-                                        let my_snapping = if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) {
-                                            !config.view.grid_snap
-                                        } else {
-                                            config.view.grid_snap
-                                        };
+
                                         if my_snapping {
                                             let grid =
                                                 config.view.grid_minor_step.max(1) as f32;
@@ -866,11 +867,6 @@ impl View3D {
                                             let dx = current.x - start.x;
                                             // Convert pixels to radians (similar to 2D view)
                                             let angle = -dx * 0.01;
-                                            let my_snapping = if ui.is_key_down(dear_imgui_rs::Key::LeftCtrl) {
-                                                !config.view.grid_snap
-                                            } else {
-                                                config.view.grid_snap
-                                            };
                                             let mut angle = angle;
                                             if my_snapping {
                                                 angle = angle.to_degrees().round().to_radians();
