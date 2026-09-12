@@ -548,17 +548,57 @@ impl View2D {
                             if click_in_aabb_2d(&aabb, snapped_i, self.ortho_axis) {
                                 if rotate_mode && !edit_edges {
                                     let center = (aabb.min + aabb.max) * 0.5;
-                                    let pivot_uv = project_to_2d(center, self.ortho_axis);
                                     let axis = match self.ortho_axis {
                                         Ortho::XY => Vec3::Z,
                                         Ortho::XZ => Vec3::Y,
                                         Ortho::YZ => Vec3::X,
                                     };
+                                    // For entities with models, rotate around
+                                    // the entity origin (root bone) instead of
+                                    // the AABB center.
+                                    let pivot = if selected_brushes.is_empty()
+                                        && !selected_entities.is_empty()
+                                    {
+                                        let mut origin_sum = Vec3::ZERO;
+                                        let mut count = 0u32;
+                                        if let Some(map) = map.as_ref() {
+                                            for &ent_idx in selected_entities.iter() {
+                                                if ent_idx == 0 {
+                                                    continue;
+                                                }
+                                                if let Some(entity) =
+                                                    map.entities.get(ent_idx)
+                                                {
+                                                    if entity.model.is_some() {
+                                                        let origin = entity
+                                                            .properties
+                                                            .get("origin")
+                                                            .map(|s| {
+                                                                core_util::origin_to_vec3(s)
+                                                            })
+                                                            .unwrap_or(Vec3::ZERO);
+                                                        origin_sum += origin;
+                                                        count += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if count > 0 {
+                                            Some(origin_sum / count as f32)
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    let pivot_uv =
+                                        project_to_2d(pivot.unwrap_or(center), self.ortho_axis);
                                     self.rotate = Some(RotateDrag {
                                         selection_aabb: aabb,
                                         pivot_uv,
                                         start_uv: world,
                                         axis,
+                                        pivot,
                                     });
                                     DragMode::RotateSelection
                                 } else {
@@ -1355,6 +1395,7 @@ impl View2D {
                                                     &rot.selection_aabb,
                                                     axis,
                                                     angle,
+                                                    rot.pivot,
                                                 )
                                             {
                                                 let mut any = false;
@@ -1819,26 +1860,93 @@ impl View2D {
                         if let Some(mut selection_aabb) =
                             selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                         {
-                        if self.drag_mode == DragMode::StretchSelection {
-                            if let Some(stretch) = self.stretch.as_ref() {
-                                selection_aabb = editing::preview_stretched_aabb(
-                                    &stretch.selection_aabb,
-                                    stretch.faces,
-                                    self.stretch_delta,
-                                );
-                            }
+                            if self.drag_mode == DragMode::StretchSelection {
+                                if let Some(stretch) = self.stretch.as_ref() {
+                                    selection_aabb = editing::preview_stretched_aabb(
+                                        &stretch.selection_aabb,
+                                        stretch.faces,
+                                        self.stretch_delta,
+                                    );
+                                }
                             } else if self.drag_mode == DragMode::RotateSelection {
                                 if let Some(rot) = self.rotate.as_ref() {
                                     let axis = rot.axis;
-                                    if let Some((_xform, preview)) = editing::rotate_selection_transform(
-                                        &rot.selection_aabb,
-                                        axis,
-                                        self.rotate_angle,
-                                ) {
-                                    selection_aabb = preview;
+                                    // For entities with models, compute the
+                                    // preview AABB by rotating the model around
+                                    // the entity origin and recomputing bounds.
+                                    if rot.pivot.is_some()
+                                        && selected_brushes.is_empty()
+                                        && !selected_entities.is_empty()
+                                    {
+                                        if let Some(map_ref) = map.as_ref() {
+                                            let mut preview_min =
+                                                Vec3::splat(f32::MAX);
+                                            let mut preview_max =
+                                                Vec3::splat(f32::MIN);
+                                            let mut any = false;
+                                            for &ent_idx in selected_entities.iter() {
+                                                if ent_idx == 0 {
+                                                    continue;
+                                                }
+                                                if let Some(entity) =
+                                                    map_ref.entities.get(ent_idx)
+                                                {
+                                                    if let Some(model) =
+                                                        entity.model.as_ref()
+                                                    {
+                                                        let origin = entity
+                                                            .properties
+                                                            .get("origin")
+                                                            .map(|s| {
+                                                                core_util::origin_to_vec3(s)
+                                                            })
+                                                            .unwrap_or(Vec3::ZERO);
+                                                        let model_origin =
+                                                            origin + model.origin;
+                                                        let angles = entity
+                                                            .properties
+                                                            .get("angles")
+                                                            .and_then(|s| {
+                                                                core_util::vec3_from_whitespace_triplet(s)
+                                                            })
+                                                            .unwrap_or(Vec3::ZERO);
+                                                        let cur_rot =
+                                                            core_util::entity_angles_to_quat(angles);
+                                                        let delta_rot =
+                                                            Quat::from_axis_angle(axis, self.rotate_angle);
+                                                        let new_rot = delta_rot * cur_rot;
+                                                        let (bmin, bmax) =
+                                                            core_util::model_bounds_aabb(
+                                                                model_origin,
+                                                                model.mins,
+                                                                model.maxs,
+                                                                Some(new_rot),
+                                                            );
+                                                        preview_min = preview_min.min(bmin);
+                                                        preview_max = preview_max.max(bmax);
+                                                        any = true;
+                                                    }
+                                                }
+                                            }
+                                            if any {
+                                                selection_aabb = Aabb {
+                                                    min: preview_min,
+                                                    max: preview_max,
+                                                };
+                                            }
+                                        }
+                                    } else if let Some((_xform, preview)) =
+                                        editing::rotate_selection_transform(
+                                            &rot.selection_aabb,
+                                            axis,
+                                            self.rotate_angle,
+                                            rot.pivot,
+                                        )
+                                    {
+                                        selection_aabb = preview;
+                                    }
                                 }
                             }
-                        }
 
                         let off = if self.drag_mode == DragMode::MoveSelection {
                             project_to_2d(self.move_offset, self.ortho_axis)
