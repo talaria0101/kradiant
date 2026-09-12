@@ -41,6 +41,8 @@ impl RenderMode {
 pub struct Show {
     pub models: bool,
     pub clip_brushes: bool,
+    pub portal_brushes: bool,
+    pub hint_brushes: bool,
     pub patches: bool,
     pub convex: bool,
 }

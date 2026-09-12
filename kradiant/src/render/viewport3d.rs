@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::editor::EditorState;
 use crate::editor::config::{EntityDrawAnchor, EntityDrawKind, RenderMode};
+use crate::editor::viewport::DragMode;
 use crate::render::RenderBackend;
 //use crate::ui;
 use crate::assets::normalize_material_name;
@@ -479,6 +480,12 @@ impl Viewport3D {
                             if brush.is_clip() && !editor.config.view.show.clip_brushes {
                                 continue;
                             }
+                            if brush.is_portal() && !editor.config.view.show.portal_brushes {
+                                continue;
+                            }
+                            if brush.is_hint() && !editor.config.view.show.hint_brushes {
+                                continue;
+                            }
                             if let BrushContent::Convex(faces_src) = &brush.content {
                                 if !editor.config.view.show.convex {
                                     continue;
@@ -751,6 +758,12 @@ impl Viewport3D {
                 for b in [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()] {
                     h = h.wrapping_mul(31).wrapping_add(b as u64);
                 }
+                let r = editor.view3d.rotate_angle;
+                h = h.wrapping_mul(31).wrapping_add(r.to_bits() as u64);
+                let s = editor.view3d.stretch_delta;
+                for b in [s.x.to_bits(), s.y.to_bits(), s.z.to_bits()] {
+                    h = h.wrapping_mul(31).wrapping_add(b as u64);
+                }
                 h
             };
 
@@ -760,8 +773,9 @@ impl Viewport3D {
                 self.tri_vertices_selected.clear();
                 let preview_drag_mode = editor.view3d.drag_mode;
                 let preview_move_offset = editor.view3d.move_offset;
+                let preview_rotate = editor.view3d.rotate_preview_xform();
                 let preview_point = |p: Vec3| -> Vec3 {
-                    core_util::preview_point(preview_drag_mode, preview_move_offset, None, None, None, p)
+                    core_util::preview_point(preview_drag_mode, preview_move_offset, None, None, preview_rotate, p)
                 };
 
                 if let Some(map) = editor.map.as_mut() {
@@ -890,7 +904,33 @@ impl Viewport3D {
 
                             match &mut brush.content {
                                 BrushContent::Convex(_) => {
-                                    let Some(polys) = brush.get_polygons() else {
+                                    // For stretch preview, compute polygons from a hypothetical stretched brush
+                                    let stretched_polys;
+                                    let polys = if editor.view3d.drag_mode == DragMode::StretchSelection {
+                                        let mut probe = brush.clone();
+                                        if let BrushContent::Convex(probe_faces) = &mut probe.content {
+                                            if let Some(stretch) = editor.view3d.stretch.as_ref() {
+                                                for (ent_idx, br_idx, face_indices) in &stretch.side_faces {
+                                                    if *ent_idx == entity_idx && *br_idx == brush_idx {
+                                                        for &face_idx in face_indices {
+                                                            if let Some(face) = probe_faces.get_mut(face_idx) {
+                                                                for p in &mut face.plane_points {
+                                                                    *p += editor.view3d.stretch_delta;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Clear cached geometry so get_polygons recomputes from modified planes
+                                        probe.invalidate_geometry();
+                                        stretched_polys = probe.get_polygons().map(|p| p.to_vec());
+                                        stretched_polys.as_deref()
+                                    } else {
+                                        brush.get_polygons()
+                                    };
+                                    let Some(polys) = polys else {
                                         continue;
                                     };
 

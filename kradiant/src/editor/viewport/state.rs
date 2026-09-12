@@ -23,6 +23,9 @@ pub struct RotateDrag {
     pub pivot_uv: [f32; 2],
     pub start_uv: [f32; 2],
     pub axis: Vec3,
+    /// Override pivot for entities with models: rotate around the entity's
+    /// origin (root bone) instead of the AABB center.
+    pub pivot: Option<Vec3>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,8 +81,14 @@ impl View2DState {
 
     pub fn rotate_preview_xform(&self) -> Option<AffineRotate> {
         let rotate = self.rotate.as_ref()?;
-        editing::rotate_selection_transform(&rotate.selection_aabb, rotate.axis, self.rotate_angle)
-            .map(|(xform, _)| xform)
+        let pivot_override = rotate.pivot;
+        editing::rotate_selection_transform(
+            &rotate.selection_aabb,
+            rotate.axis,
+            self.rotate_angle,
+            pivot_override,
+        )
+        .map(|(xform, _)| xform)
     }
 }
 
@@ -100,6 +109,8 @@ pub struct View3DState {
     pub move_offset: Vec3,
     pub stretch: Option<SideStretchDrag>,
     pub stretch_delta: Vec3,
+    pub rotate: Option<RotateDrag>,
+    pub rotate_angle: f32,
 }
 
 impl Default for View3DState {
@@ -115,6 +126,38 @@ impl Default for View3DState {
             move_offset: Vec3::ZERO,
             stretch: None,
             stretch_delta: Vec3::ZERO,
+            rotate: None,
+            rotate_angle: 0.0,
         }
+    }
+}
+
+impl View3DState {
+    pub fn rotate_preview_xform(&self) -> Option<AffineRotate> {
+        let rotate = self.rotate.as_ref()?;
+        let pivot_override = rotate.pivot;
+        editing::rotate_selection_transform(
+            &rotate.selection_aabb,
+            rotate.axis,
+            self.rotate_angle,
+            pivot_override,
+        )
+        .map(|(xform, _)| xform)
+    }
+
+    /// Check if a specific face is being stretched and return the delta to apply
+    pub fn stretch_face_delta(&self, entity_idx: usize, brush_idx: usize, face_idx: usize) -> Option<Vec3> {
+        let stretch = self.stretch.as_ref()?;
+        if self.drag_mode != DragMode::StretchSelection {
+            return None;
+        }
+        for (ent_idx, br_idx, face_indices) in &stretch.side_faces {
+            if *ent_idx == entity_idx && *br_idx == brush_idx {
+                if face_indices.contains(&face_idx) {
+                    return Some(self.stretch_delta);
+                }
+            }
+        }
+        None
     }
 }

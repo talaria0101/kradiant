@@ -1,17 +1,18 @@
 //! 3D View
 
 use dear_imgui_rs::{Condition, Key, StyleColor, TextureId, Ui, WindowFlags};
-use kradiant::editing::Aabb;
 use glam::{Mat4, Vec2, Vec3};
+use kradiant::editing::Aabb;
 use kradiant::editor::config::EntityDrawAnchor;
+use kradiant::editor::viewport::types::Ortho;
 use kradiant::editor::viewport::DragMode;
-use kradiant::editor::viewport::state::{SideStretchDrag, View3DState};
+use kradiant::editor::viewport::state::{RotateDrag, SideStretchDrag, View3DState};
 use kradiant::editor::{EditorConfig, EditorPalette, FaceSelection, PatchVertexSelection};
 use kradiant::map_utils::format_vec3;
 use std::ops::{Deref, DerefMut};
 
 use crate::ui::editing::PickMask;
-use crate::ui::view2d::{self, selection_aabb_active};
+use crate::ui::view2d::{self, apply_affine_rotate_to_selected_faces, selection_aabb_active, selection_aabb_faces_from_map, selection_aabb_from_map};
 use crate::util::{self, adjust_color_brightness, imgui_color_to_u32, text_height, text_width, world_to_screen_3d};
 use kradiant::{core_util, editing};
 use kradiant::editor::selection::EdgeSelection;
@@ -133,6 +134,8 @@ impl View3D {
         map: &mut Option<kradiant::map::Map>,
         ent_draw_config: &kradiant::editor::config::EntityDrawingConfig,
         selection_rgba: [f32; 4],
+        rotate_mode: bool,
+        ortho_axis: Ortho,
     ) {
         use dear_imgui_rs::MouseButton;
 
@@ -316,6 +319,12 @@ impl View3D {
                     }
                     if config.view.show.clip_brushes {
                         mask.add(PickMask::CLIP);
+                    }
+                    if config.view.show.portal_brushes {
+                        mask.add(PickMask::PORTAL);
+                    }
+                    if config.view.show.hint_brushes {
+                        mask.add(PickMask::HINT);
                     }
 
                     let shift_selecting = canvas_interacting
@@ -610,11 +619,72 @@ impl View3D {
                             });
 
                             let hit_t = if brush_hit_t.is_some() || entity_hit_t.is_some() {
-                                self.drag_mode = DragMode::MoveSelection;
-                                match (brush_hit_t, entity_hit_t) {
-                                    (Some(a), Some(b)) => a.min(b),
-                                    (Some(t), None) | (None, Some(t)) => t,
-                                    (None, None) => 1.0,
+                                if rotate_mode && !edit_edges {
+                                    // Rotation: use the same axis as the 2D view
+                                    let axis = match ortho_axis {
+                                        Ortho::XY => Vec3::Z,
+                                        Ortho::XZ => Vec3::Y,
+                                        Ortho::YZ => Vec3::X,
+                                    };
+                                    // For entities with models, rotate around entity origin
+                                    let pivot = if selected_brushes.is_empty()
+                                        && !selected_entities.is_empty()
+                                    {
+                                        let mut origin_sum = Vec3::ZERO;
+                                        let mut count = 0u32;
+                                        if let Some(map) = map.as_ref() {
+                                            for &ent_idx in selected_entities.iter() {
+                                                if ent_idx == 0 {
+                                                    continue;
+                                                }
+                                                if let Some(entity) =
+                                                    map.entities.get(ent_idx)
+                                                {
+                                                    if entity.model.is_some() {
+                                                        let origin = entity
+                                                            .properties
+                                                            .get("origin")
+                                                            .map(|s| {
+                                                                core_util::origin_to_vec3(s)
+                                                            })
+                                                            .unwrap_or(Vec3::ZERO);
+                                                        origin_sum += origin;
+                                                        count += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if count > 0 {
+                                            Some(origin_sum / count as f32)
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    self.rotate = Some(RotateDrag {
+                                        selection_aabb: selection_aabb.unwrap_or(Aabb {
+                                            min: Vec3::ZERO,
+                                            max: Vec3::ZERO,
+                                        }),
+                                        pivot_uv: [0.0, 0.0], // Not used in 3D
+                                        start_uv: [0.0, 0.0], // Not used in 3D
+                                        axis,
+                                        pivot,
+                                    });
+                                    self.drag_mode = DragMode::RotateSelection;
+                                    match (brush_hit_t, entity_hit_t) {
+                                        (Some(a), Some(b)) => a.min(b),
+                                        (Some(t), None) | (None, Some(t)) => t,
+                                        (None, None) => 1.0,
+                                    }
+                                } else {
+                                    self.drag_mode = DragMode::MoveSelection;
+                                    match (brush_hit_t, entity_hit_t) {
+                                        (Some(a), Some(b)) => a.min(b),
+                                        (Some(t), None) | (None, Some(t)) => t,
+                                        (None, None) => 1.0,
+                                    }
                                 }
                             } else {
                                 // q3radiant Brush_SideSelect: the ray missed
@@ -716,7 +786,58 @@ impl View3D {
                                             delta.y = (delta.y / grid).round() * grid;
                                             delta.z = (delta.z / grid).round() * grid;
                                         }
+                                        // Constrain delta to face normals
+                                        if let Some(stretch) = self.stretch.as_ref() {
+                                            let mut normal_sum = Vec3::ZERO;
+                                            let mut count = 0u32;
+                                            if let Some(map_ref) = map.as_ref() {
+                                                for (ent_idx, br_idx, face_indices) in &stretch.side_faces {
+                                                    if let Some(entity) = map_ref.entities.get(*ent_idx) {
+                                                        if let Some(brush) = entity.brushes.get(*br_idx) {
+                                                            if let Some(polys) = brush.clone().get_polygons() {
+                                                                for &face_idx in face_indices {
+                                                                    if face_idx < polys.len() {
+                                                                        let (positions, _) = &polys[face_idx];
+                                                                        if positions.len() >= 3 {
+                                                                            let e1 = positions[1] - positions[0];
+                                                                            let e2 = positions[2] - positions[0];
+                                                                            let n = e1.cross(e2).normalize_or_zero();
+                                                                            normal_sum += n;
+                                                                            count += 1;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if count > 0 {
+                                                let avg_normal = normal_sum.normalize_or_zero();
+                                                // Project delta onto average normal
+                                                let projected = avg_normal * delta.dot(avg_normal);
+                                                delta = projected;
+                                            }
+                                        }
                                         self.stretch_delta = delta;
+                                    }
+                                    DragMode::RotateSelection => {
+                                        if let Some(_rot) = self.rotate.as_ref() {
+                                            // Calculate rotation angle from mouse drag
+                                            // Use horizontal mouse movement as the rotation input
+                                            let [rx, _ry, rw, _rh] = self.rect;
+                                            let _center_x = rx + rw * 0.5;
+                                            let start = self.drag_start.unwrap_or(current);
+                                            let dx = current.x - start.x;
+                                            // Convert pixels to radians (similar to 2D view)
+                                            let angle = -dx * 0.01;
+                                            let my_snapping = config.view.grid_snap;
+                                            let mut angle = angle;
+                                            if my_snapping {
+                                                angle = angle.to_degrees().round().to_radians();
+                                            }
+                                            self.rotate_angle = angle;
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -888,6 +1009,107 @@ impl View3D {
                                     }
                                     self.stretch_delta = Vec3::ZERO;
                                 }
+                                DragMode::RotateSelection => {
+                                    if let Some(rot) = self.rotate.take() {
+                                        let angle = self.rotate_angle;
+                                        if angle.abs() > 1.0e-6 {
+                                            let has_selection = if edit_faces {
+                                                !selected_faces.is_empty()
+                                            } else if edit_edges {
+                                                !selected_edges.is_empty()
+                                            } else {
+                                                !selected_brushes.is_empty() || !selected_entities.is_empty()
+                                            };
+                                            if map.is_some() && has_selection {
+                                                let label = if edit_faces { "Rotate faces" } else { "Rotate selection" };
+                                                undo.push(
+                                                    label,
+                                                    map,
+                                                    selected_brushes,
+                                                    selected_faces,
+                                                    selected_edges,
+                                                    selected_patch_vertices,
+                                                    selected_entities,
+                                                );
+                                            }
+                                            let axis = rot.axis;
+                                            let mut new_sel_aabb: Option<Aabb> = None;
+                                            if let Some(map) = map.as_mut() {
+                                                if edit_faces {
+                                                    let any = apply_affine_rotate_to_selected_faces(
+                                                        map,
+                                                        selected_faces.as_mut_slice(),
+                                                        axis,
+                                                        angle,
+                                                    );
+                                                    if any {
+                                                        new_sel_aabb =
+                                                            selection_aabb_faces_from_map(map, selected_faces);
+                                                        crate::log_info!(console, "Rotated selected faces");
+                                                    }
+                                                } else if let Some((xform, _preview)) =
+                                                    editing::rotate_selection_transform(
+                                                        &rot.selection_aabb,
+                                                        axis,
+                                                        angle,
+                                                        rot.pivot,
+                                                    )
+                                                {
+                                                    let mut any = false;
+                                                    for (entity_idx, brush_idx) in selected_brushes.iter() {
+                                                        let Some(entity) = map.entities.get_mut(*entity_idx) else {
+                                                            continue;
+                                                        };
+                                                        let Some(brush) = entity.brushes.get_mut(*brush_idx) else {
+                                                            continue;
+                                                        };
+                                                        if editing::apply_affine_rotate_to_brush(
+                                                            brush,
+                                                            &mut map.generation,
+                                                            xform,
+                                                        ) {
+                                                            any = true;
+                                                        }
+                                                    }
+
+                                                    let mut any_entity = false;
+                                                    for ent_idx in selected_entities.iter().copied() {
+                                                        if ent_idx == 0 {
+                                                            continue;
+                                                        }
+                                                        let Some(entity) = map.entities.get_mut(ent_idx) else {
+                                                            continue;
+                                                        };
+                                                        let angles = entity
+                                                            .properties
+                                                            .get("angles")
+                                                            .and_then(|s| core_util::vec3_from_whitespace_triplet(s))
+                                                            .unwrap_or(Vec3::ZERO);
+                                                        let q_new = glam::Quat::from_axis_angle(axis, angle)
+                                                            * core_util::entity_angles_to_quat(angles);
+                                                        let new_angles = core_util::quat_to_entity_angles(q_new);
+                                                        entity.properties.insert(
+                                                            "angles".to_string(),
+                                                            core_util::vec3_to_angles(new_angles),
+                                                        );
+                                                        map.generation = map.generation.wrapping_add(1);
+                                                        any_entity = true;
+                                                    }
+
+                                                    if any || any_entity {
+                                                        new_sel_aabb = selection_aabb_from_map(map, &selected_brushes, &selected_entities, ent_draw_config);
+                                                        crate::log_info!(console, "Rotated selection");
+                                                    }
+                                                }
+                                            }
+                                            if let Some(aabb) = new_sel_aabb {
+                                                self.last_aabb = Some(aabb.clone());
+                                                self.update_work_from_aabb(aabb);
+                                            }
+                                        }
+                                    }
+                                    self.rotate_angle = 0.0;
+                                }
                                 _ => {}
                             }
                         }
@@ -908,6 +1130,8 @@ impl View3D {
                         self.move_offset = Vec3::ZERO;
                         self.stretch = None;
                         self.stretch_delta = Vec3::ZERO;
+                        self.rotate = None;
+                        self.rotate_angle = 0.0;
                     }
                 }
 
@@ -919,6 +1143,8 @@ impl View3D {
                             self.move_offset = Vec3::ZERO;
                             self.stretch = None;
                             self.stretch_delta = Vec3::ZERO;
+                            self.rotate = None;
+                            self.rotate_angle = 0.0;
                         }
                         if edit_faces {
                             selected_faces.clear();
@@ -1000,6 +1226,78 @@ impl View3D {
                                 let text_h = text_height(ui, "1") + 2.0;
                                 let text_pos = [b[0] - tw / 2.0, b[1] - text_h];
 
+                                draw.add_line(a, b, util::adjust_color_brightness(delta_info_col, 1.5))
+                                    .thickness(2.0)
+                                    .build();
+                                draw.add_text(text_pos, util::adjust_color_brightness(delta_info_col, 2.0), delta_info);
+                            }
+                        }
+                        DragMode::StretchSelection => {
+                            if self.stretch_delta != Vec3::ZERO {
+                                // Compute center of the faces being stretched
+                                let face_center = if let Some(stretch) = self.stretch.as_ref() {
+                                    let mut center_sum = Vec3::ZERO;
+                                    let mut count = 0u32;
+                                    if let Some(map_ref) = map.as_ref() {
+                                        for (ent_idx, br_idx, face_indices) in &stretch.side_faces {
+                                            if let Some(entity) = map_ref.entities.get(*ent_idx) {
+                                                if let Some(brush) = entity.brushes.get(*br_idx) {
+                                                    if let Some(polys) = brush.clone().get_polygons() {
+                                                        for &face_idx in face_indices {
+                                                            if face_idx < polys.len() {
+                                                                let (positions, _) = &polys[face_idx];
+                                                                if !positions.is_empty() {
+                                                                    for pos in positions {
+                                                                        center_sum += *pos;
+                                                                        count += 1;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if count > 0 {
+                                        Some(center_sum / count as f32)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                // Line from original face center to stretched face center
+                                let draw_coords = face_center.and_then(|center| {
+                                    let a = world_to_screen_3d(common_vp, self.rect, center);
+                                    let b = world_to_screen_3d(common_vp, self.rect, center + self.stretch_delta);
+                                    Some((a?, b?))
+                                });
+
+                                if let Some((a, b)) = draw_coords {
+                                    let delta_info = format_vec3(self.stretch_delta, 2);
+                                    let text_h = text_height(ui, "1") + 2.0;
+                                    let text_pos = [b[0] + 8.0, b[1] - text_h];
+
+                                    draw.add_line(a, b, util::adjust_color_brightness(delta_info_col, 1.5))
+                                        .thickness(2.0)
+                                        .build();
+                                    draw.add_text(text_pos, util::adjust_color_brightness(delta_info_col, 2.0), delta_info);
+                                }
+                            }
+                        }
+                        DragMode::RotateSelection => {
+                            if self.rotate_angle.abs() > 1.0e-6 {
+                                let angle_deg = self.rotate_angle.to_degrees();
+                                let delta_info = format!("{:.1}°", angle_deg);
+                                let tw = text_width(ui, &delta_info);
+                                let text_h = text_height(ui, "1") + 2.0;
+                                let text_pos = [end.x - tw / 2.0, end.y - text_h];
+
+                                // Draw a line from start to current mouse position
+                                let a = [start.x, start.y];
+                                let b = [end.x, end.y];
                                 draw.add_line(a, b, util::adjust_color_brightness(delta_info_col, 1.5))
                                     .thickness(2.0)
                                     .build();

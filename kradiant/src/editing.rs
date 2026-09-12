@@ -296,10 +296,19 @@ pub fn rotate_selection_transform(
     selection_aabb: &Aabb,
     axis: Vec3,
     angle_rad: f32,
+    pivot_override: Option<Vec3>,
 ) -> Option<(AffineRotate, Aabb)> {
-    let pivot = (selection_aabb.min + selection_aabb.max) * 0.5;
+    let aabb_center = (selection_aabb.min + selection_aabb.max) * 0.5;
+    let pivot = pivot_override.unwrap_or(aabb_center);
     let xform = AffineRotate::from_axis_angle(pivot, axis, angle_rad)?;
-    let preview = preview_rotated_aabb(selection_aabb, xform);
+    // Preview AABB always rotates around the AABB center (for selection highlight),
+    // regardless of entity-specific pivot overrides.
+    let preview = if pivot_override.is_some() {
+        let aabb_xform = AffineRotate::from_axis_angle(aabb_center, axis, angle_rad)?;
+        preview_rotated_aabb(selection_aabb, aabb_xform)
+    } else {
+        preview_rotated_aabb(selection_aabb, xform)
+    };
     Some((xform, preview))
 }
 
@@ -1208,14 +1217,16 @@ pub fn pick_convex_face_by_ray(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PickMask(u8);
+pub struct PickMask(u16);
 
 impl PickMask {
     pub const NONE: PickMask = PickMask(0);
     pub const CONVEX: PickMask = PickMask(1 << 0);
     pub const PATCH: PickMask = PickMask(1 << 1);
     pub const CLIP: PickMask = PickMask(1 << 2);
-    pub const ALL: PickMask = PickMask(Self::CONVEX.0 | Self::PATCH.0 | Self::CLIP.0);
+    pub const PORTAL: PickMask = PickMask(1 << 3);
+    pub const HINT: PickMask = PickMask(1 << 4);
+    pub const ALL: PickMask = PickMask(Self::CONVEX.0 | Self::PATCH.0 | Self::CLIP.0 | Self::PATCH.0 | Self::HINT.0);
 
     pub fn contains(self, other: PickMask) -> bool {
         (self.0 & other.0) != 0

@@ -319,6 +319,8 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
             map,
             ent_draw_config,
             state.core.selection_rgba,
+            state.rotate_mode,
+            state.view2d.ortho_axis,
         );
     }
 
@@ -623,6 +625,28 @@ fn draw_main_menu(ui: &Ui, state: &mut EditorState) {
                     update_config(
                         &mut state.core.config,
                         "show_clip",
+                        next_value,
+                        &mut state.console,
+                        &mut state.core.view_config_rev,
+                    );
+                }
+                let mut toggled = state.core.config.view.show.portal_brushes;
+                if ui.menu_item_toggle_no_shortcut("Portal Brushes", &mut toggled, true) {
+                    let next_value = !state.core.config.view.show.portal_brushes as u8;
+                    update_config(
+                        &mut state.core.config,
+                        "show_portal",
+                        next_value,
+                        &mut state.console,
+                        &mut state.core.view_config_rev,
+                    );
+                }
+                let mut toggled = state.core.config.view.show.hint_brushes;
+                if ui.menu_item_toggle_no_shortcut("Hint Brushes", &mut toggled, true) {
+                    let next_value = !state.core.config.view.show.hint_brushes as u8;
+                    update_config(
+                        &mut state.core.config,
+                        "show_hint",
                         next_value,
                         &mut state.console,
                         &mut state.core.view_config_rev,

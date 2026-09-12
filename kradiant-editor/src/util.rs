@@ -1,4 +1,5 @@
 use dear_imgui_rs::Ui;
+use glam::{Mat4, Vec2, Vec3};
 use kradiant::editing::{self, Aabb};
 use kradiant::editor::config::EntityDef;
 use kradiant::editor::viewport::Ortho;
@@ -12,7 +13,6 @@ use std::path::PathBuf;
 
 use crate::ui::EditorState;
 use crate::ui::console::ConsoleLogger;
-use glam::{Mat4, Vec2, Vec3};
 use kradiant::editor::selection::{EdgeSelection, FaceSelection, PatchVertexSelection};
 use kradiant::editor::undo::UndoRedo;
 

@@ -185,6 +185,20 @@ pub fn update(
             *view_config_rev = view_config_rev.wrapping_add(1);
             log_info!(console, "Set show clip brushes to {}", res);
         }
+        "show_portal" => {
+            let value_u8: u8 = util::to_num(value);
+            let res = value_u8 == 1;
+            cfg.view.show.portal_brushes = res;
+            *view_config_rev = view_config_rev.wrapping_add(1);
+            log_info!(console, "Set show portal brushes to {}", res);
+        }
+        "show_hint" => {
+            let value_u8: u8 = util::to_num(value);
+            let res = value_u8 == 1;
+            cfg.view.show.hint_brushes = res;
+            *view_config_rev = view_config_rev.wrapping_add(1);
+            log_info!(console, "Set show hint brushes to {}", res);
+        }
         "show_patches" => {
             let value_u8: u8 = util::to_num(value);
             let res = value_u8 == 1;

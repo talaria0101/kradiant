@@ -252,6 +252,11 @@ impl Brush {
         self.get_polygons_and_aabb().map(|(_, polys)| polys)
     }
 
+    /// Invalidate cached geometry so the next `get_polygons` call recomputes.
+    pub fn invalidate_geometry(&mut self) {
+        self.cached_geometry = None;
+    }
+
     /// Update a single brush plane and bump the map generation counter if it changed.
     pub fn update_brush_plane(
         &mut self,
@@ -371,6 +376,34 @@ impl Brush {
             BrushContent::Convex(faces) => {
                 for f in faces {
                     if f.texture.contains("clip") {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_portal(&self) -> bool {
+        match &self.content {
+            BrushContent::Convex(faces) => {
+                for f in faces {
+                    if f.texture.contains("portal") {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_hint(&self) -> bool {
+        match &self.content {
+            BrushContent::Convex(faces) => {
+                for f in faces {
+                    if f.texture.contains("common/hint") {
                         return true;
                     }
                 }

@@ -2214,7 +2214,7 @@ fn convex_edges_in_rect(
     out
 }
 
-fn selection_aabb_faces_from_map(
+pub fn selection_aabb_faces_from_map(
     map: &mut kradiant::map::Map,
     selected_faces: &[FaceSelection],
 ) -> Option<Aabb> {
@@ -3125,7 +3125,7 @@ fn apply_affine_scale_to_selected_faces(
     any
 }
 
-fn apply_affine_rotate_to_selected_faces(
+pub fn apply_affine_rotate_to_selected_faces(
     map: &mut kradiant::map::Map,
     selected_faces: &mut [FaceSelection],
     axis: Vec3,
