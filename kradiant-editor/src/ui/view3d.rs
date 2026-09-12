@@ -764,6 +764,7 @@ impl View3D {
                                     / denom;
                                 let world_current = self.cam.pos + ray * t;
                                 let raw_offset = world_current - self.drag_world_anchor;
+                                self.drag_current = Some(current);
 
                                 match self.drag_mode {
                                     DragMode::MoveSelection => {
