@@ -1,7 +1,7 @@
 //! 3D View
 
 use dear_imgui_rs::{Condition, Key, StyleColor, TextureId, Ui, WindowFlags};
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 use kradiant::editing::Aabb;
 use kradiant::editor::config::EntityDrawAnchor;
 use kradiant::editor::viewport::types::Ortho;
@@ -1683,10 +1683,47 @@ fn pick_patch_control_vertex_by_screen_3d(
     best.map(|(sel, _, _)| sel)
 }
 
+/// Project an edge segment for screen-space picking, clipping it to the
+/// camera's near plane so long edges with off-screen endpoints (or endpoints
+/// behind the camera) stay pickable along their visible part. Screen
+/// coordinates may lie outside the viewport (distance math still works).
+fn project_edge_for_pick(
+    vp: Mat4,
+    rect: [f32; 4],
+    a: Vec3,
+    b: Vec3,
+) -> Option<([f32; 2], [f32; 2])> {
+    const W_MIN: f32 = 0.1;
+    let mut pa = vp * Vec4::new(a.x, a.y, a.z, 1.0);
+    let mut pb = vp * Vec4::new(b.x, b.y, b.z, 1.0);
+    if pa.w < W_MIN && pb.w < W_MIN {
+        return None;
+    }
+    if pa.w < W_MIN {
+        let t = (W_MIN - pa.w) / (pb.w - pa.w);
+        pa = pa.lerp(pb, t);
+    } else if pb.w < W_MIN {
+        let t = (W_MIN - pb.w) / (pa.w - pb.w);
+        pb = pb.lerp(pa, t);
+    }
+    let to_screen = |c: Vec4| -> [f32; 2] {
+        let ndc = Vec3::new(c.x, c.y, c.z) / c.w;
+        let [rx, ry, rw, rh] = rect;
+        [
+            rx + (ndc.x * 0.5 + 0.5) * rw,
+            ry + (1.0 - (ndc.y * 0.5 + 0.5)) * rh,
+        ]
+    };
+    Some((to_screen(pa), to_screen(pb)))
+}
+
 /// Screen-space edge picking for the 3D view. Occlusion rules:
-/// - When the mouse ray hits a brush surface, ONLY that brush's edges are
-///   pickable — if none of its edges project within `radius_px` of the
-///   cursor, nothing is selected (no edges grabbed through other brushes).
+/// - When the mouse ray hits a brush surface, only edges ON or IN FRONT of
+///   that surface (its own edges, flush seams of neighbours, geometry
+///   nearer than it) are pickable — never an edge strictly behind it, so
+///   no edges get grabbed through other brushes. Edges are compared by
+///   camera depth against the front hit, so this does not depend on which
+///   brush happens to be hit first.
 /// - With no brush under the ray, all edges within `radius_px` compete.
 /// Among candidates the CLOSEST TO THE CAMERA wins (depth-buffer semantics);
 /// ties within a small depth band prefer brushes that already have selected
@@ -1726,10 +1763,10 @@ fn pick_convex_edge_by_screen_3d(
             return;
         };
         for (sel, a, b) in view2d::convex_edges_for_brush(entity_idx, brush_idx, polys) {
-            let Some(sa) = world_to_screen_3d(vp, rect, a) else {
-                continue;
-            };
-            let Some(sb) = world_to_screen_3d(vp, rect, b) else {
+            // Near-plane-clipped projection: an edge stays pickable along
+            // its visible part even when an endpoint is off-screen or behind
+            // the camera.
+            let Some((sa, sb)) = project_edge_for_pick(vp, rect, a, b) else {
                 continue;
             };
             let ab = [sb[0] - sa[0], sb[1] - sa[1]];
@@ -1764,15 +1801,19 @@ fn pick_convex_edge_by_screen_3d(
         }
     }
 
-    // The frontmost brush surface along the ray blocks everything behind it:
-    // restrict candidates to that brush (None means the ray misses all
-    // brushes and any candidate edge may be picked).
-    let front = editing::pick_brush_by_ray(map, ray_origin, ray_dir, mask, None);
+    // Occlusion: nothing strictly BEHIND the frontmost brush surface under
+    // the cursor may be picked. Comparing depths (not brush identity) keeps
+    // edges lying ON that surface pickable — the front brush's own edges and
+    // flush seams of neighbouring brushes — while everything behind it is
+    // blocked. When the ray misses every brush, all candidates compete.
+    let front_t = ray_front_brush_hit_point(map, ray_origin, ray_dir, mask)
+        .map(|p| ray_dir.dot(p - ray_origin));
 
     let mut best: Option<(EdgeSelection, f32, f32)> = None;
     for (sel, d2, depth) in candidates {
-        if let Some(front) = front {
-            if (sel.entity_idx, sel.brush_idx) != front {
+        if let Some(front_t) = front_t {
+            let band = (front_t * 1.0e-3).max(0.5);
+            if depth > front_t + band {
                 continue;
             }
         }
