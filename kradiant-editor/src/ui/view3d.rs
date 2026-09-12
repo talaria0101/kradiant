@@ -411,6 +411,8 @@ impl View3D {
                                     m,
                                     (!prefer.is_empty()).then_some(&prefer[..]),
                                     vp,
+                                    ray_origin,
+                                    ray_dir,
                                     mouse,
                                     self.rect,
                                     8.0,
@@ -577,10 +579,14 @@ impl View3D {
                                     }
                                     set.into_iter().collect()
                                 };
+                                let ray =
+                                    self.screen_to_ray(Vec2::new(mouse[0], mouse[1]), config);
                                 let picked = pick_convex_edge_by_screen_3d(
                                     map_ref,
                                     (!prefer.is_empty()).then_some(&prefer[..]),
                                     vp,
+                                    self.cam.pos,
+                                    ray,
                                     mouse,
                                     self.rect,
                                     8.0,
@@ -604,8 +610,6 @@ impl View3D {
                                     // Anchor the drag at the edge point closest
                                     // to the click ray; drag on the camera-facing
                                     // plane through that point.
-                                    let ray =
-                                        self.screen_to_ray(Vec2::new(mouse[0], mouse[1]), config);
                                     if let Some((a, b)) = edge_endpoints(map_ref, &sel) {
                                         let anchor = ray_closest_point_on_segment(
                                             self.cam.pos,
@@ -1718,24 +1722,30 @@ fn pick_patch_control_vertex_by_screen_3d(
     best.map(|(sel, _, _)| sel)
 }
 
-/// Screen-space edge picking for the 3D view: project both edge endpoints and
-/// pick the closest edge within `radius_px` of the cursor (zoom-independent,
-/// matching the 2D view's picker). Edges of `prefer`red brushes win overlaps.
+/// Screen-space edge picking for the 3D view: among the edges projecting
+/// within `radius_px` of the cursor, the one CLOSEST TO THE CAMERA wins
+/// (depth-buffer semantics), so edges seen through other brushes are never
+/// picked over the edge in front. Ties within a small depth band prefer
+/// brushes that already have selected edges, then the smaller pixel distance.
 fn pick_convex_edge_by_screen_3d(
     map: &mut kradiant::map::Map,
     prefer: Option<&[(usize, usize)]>,
     vp: Mat4,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
     mouse_screen: [f32; 2],
     rect: [f32; 4],
     radius_px: f32,
 ) -> Option<EdgeSelection> {
     let r2 = radius_px.max(1.0) * radius_px.max(1.0);
-    let mut best: Option<(EdgeSelection, f32)> = None;
+    // (selection, pixel distance², camera-space depth of the closest approach
+    // of the mouse ray to the edge)
+    let mut best: Option<(EdgeSelection, f32, f32)> = None;
 
     let visit_brush = |entity_idx: usize,
                            brush_idx: usize,
                            brush: &mut kradiant::map::Brush,
-                           best: &mut Option<(EdgeSelection, f32)>| {
+                           best: &mut Option<(EdgeSelection, f32, f32)>| {
         if !matches!(brush.content, kradiant::map::BrushContent::Convex(_)) {
             return;
         }
@@ -1764,34 +1774,54 @@ fn pick_convex_edge_by_screen_3d(
             if d2 > r2 {
                 continue;
             }
-            match best {
-                None => *best = Some((sel, d2)),
-                Some((_, best_d2)) if d2 < *best_d2 => *best = Some((sel, d2)),
-                _ => {}
+
+            // Camera-space depth: ray parameter at the closest approach of
+            // the mouse ray to this edge.
+            let depth = ray_closest_point_on_segment(ray_origin, ray_dir, a, b)
+                .map(|p| ray_dir.dot(p - ray_origin).max(0.0))
+                .unwrap_or_else(|| (a - ray_origin).dot(ray_dir).max(0.0));
+
+            match *best {
+                None => *best = Some((sel, d2, depth)),
+                Some((best_sel, best_d2, best_depth)) => {
+                    // Depth band: flush/coincident edges count as tied so
+                    // pixel distance can still decide between them.
+                    let band = (best_depth * 1.0e-3).max(0.5);
+                    let take = if depth < best_depth - band {
+                        // Strictly in front of the current best: always wins.
+                        true
+                    } else if depth > best_depth + band {
+                        false
+                    } else {
+                        let best_preferred = prefer
+                            .map(|p| {
+                                p.contains(&(best_sel.entity_idx, best_sel.brush_idx))
+                            })
+                            .unwrap_or(false);
+                        let this_preferred = prefer
+                            .map(|p| p.contains(&(sel.entity_idx, sel.brush_idx)))
+                            .unwrap_or(false);
+                        if this_preferred != best_preferred {
+                            this_preferred
+                        } else {
+                            d2 < best_d2
+                        }
+                    };
+                    if take {
+                        *best = Some((sel, d2, depth));
+                    }
+                }
             }
         }
     };
 
-    if let Some(prefer) = prefer {
-        for &(entity_idx, brush_idx) in prefer {
-            let Some(entity) = map.entities.get_mut(entity_idx) else {
-                continue;
-            };
-            let Some(brush) = entity.brushes.get_mut(brush_idx) else {
-                continue;
-            };
+    for (entity_idx, entity) in map.entities.iter_mut().enumerate() {
+        for (brush_idx, brush) in entity.brushes.iter_mut().enumerate() {
             visit_brush(entity_idx, brush_idx, brush, &mut best);
         }
     }
-    if best.is_none() {
-        for (entity_idx, entity) in map.entities.iter_mut().enumerate() {
-            for (brush_idx, brush) in entity.brushes.iter_mut().enumerate() {
-                visit_brush(entity_idx, brush_idx, brush, &mut best);
-            }
-        }
-    }
 
-    best.map(|(sel, _)| sel)
+    best.map(|(sel, _, _)| sel)
 }
 
 /// World-space endpoints of a selected edge (normalized face pair indices).
