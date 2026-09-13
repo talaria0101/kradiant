@@ -15,7 +15,7 @@ pub use kradiant::editor::viewport::{AxisLock, DragMode, Ortho, StretchMode};
 use kradiant::editor::{EditorConfig, EditorPalette};
 use kradiant::map::{BrushContent, BrushId, Face};
 use kradiant::map_utils::format_float;
-use kradiant::{core_util, editing};
+use kradiant::{core_util, editing, portals};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::{Deref, DerefMut};
 
@@ -2129,6 +2129,78 @@ impl View2D {
                                 );
                             }
                         }
+                        ui.separator_horizontal();
+                        ui.menu("Portals", || {
+                            if ui.menu_item("Doorway/window portals from selection") {
+                                undo.push(
+                                    "Generate doorway portals",
+                                    map,
+                                    selected_brushes,
+                                    selected_faces,
+                                    selected_edges,
+                                    selected_patch_vertices,
+                                    selected_entities,
+                                );
+                                if let Some(map) = map.as_mut() {
+                                    match portals::generate_opening_portals(
+                                        map,
+                                        selected_brushes,
+                                        portals::PortalSide::Negative,
+                                        &portals::PortalTextures::default(),
+                                    ) {
+                                        Ok(count) => log_info!(
+                                            console,
+                                            "Generated {count} doorway/window portal brush(es)"
+                                        ),
+                                        Err(e) => log_warn!(console, "Portal generation: {e}"),
+                                    }
+                                }
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text(
+                                    "Select the brushes framing a doorway or window (jambs, lintel, threshold); a portal brush is created in every opening",
+                                );
+                            }
+                            if ui.menu_item("Cell portal walls from selection") {
+                                undo.push(
+                                    "Generate cell portal walls",
+                                    map,
+                                    selected_brushes,
+                                    selected_faces,
+                                    selected_edges,
+                                    selected_patch_vertices,
+                                    selected_entities,
+                                );
+                                if let Some(map) = map.as_mut() {
+                                    match portals::generate_cell_portal_walls(
+                                        map,
+                                        selected_brushes,
+                                        portals::PortalSide::Negative,
+                                        &portals::PortalTextures::default(),
+                                        portals::DEFAULT_PORTAL_THICKNESS,
+                                    ) {
+                                        Ok((count, overlaps)) => {
+                                            log_info!(
+                                                console,
+                                                "Generated {count} cell portal wall(s)"
+                                            );
+                                            if overlaps > 0 {
+                                                log_warn!(
+                                                    console,
+                                                    "{overlaps} wall corner(s) overlap and need manual 45-degree bevels"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => log_warn!(console, "Portal generation: {e}"),
+                                    }
+                                }
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text(
+                                    "Select one brush per cell; portal walls are generated between adjacent cells (portal face on one side, portalnodraw on the rest)",
+                                );
+                            }
+                        });
                         ui.menu("Make", || {
                             if ui.menu_item("Detail") {
                                 log_info!(console, "unimplemented");
