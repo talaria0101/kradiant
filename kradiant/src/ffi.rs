@@ -39,6 +39,7 @@ pub unsafe extern "C" fn kr_editor_load_map(ptr: *mut EditorState, path: *const 
             state.map = Some(map);
             state.map_path = path_str.to_string();
             state.bump_revision();
+            state.dirty = false;
             true
         }
         Err(_) => false,

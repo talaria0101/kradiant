@@ -17,6 +17,8 @@ pub struct EditorState {
     pub map_revision: u64,
     pub map: Option<Map>,
     pub map_load_count: u64,
+    /// True when the map has been modified since the last save or load.
+    pub dirty: bool,
 
     pub selected_entities: Vec<usize>,
     pub selected_brushes: Vec<(usize, usize)>,
@@ -59,6 +61,7 @@ impl Default for EditorState {
             map_revision: 0,
             map: Some(Map::default()),
             map_load_count: 0,
+            dirty: false,
             selected_entities: Vec::new(),
             selected_brushes: Vec::new(),
             selected_faces: Vec::new(),
@@ -90,6 +93,7 @@ impl Default for EditorState {
 impl EditorState {
     pub fn bump_revision(&mut self) {
         self.map_revision = self.map_revision.wrapping_add(1);
+        self.dirty = true;
     }
 
     pub fn clear_selection(&mut self) {

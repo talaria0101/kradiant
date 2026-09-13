@@ -230,10 +230,27 @@ pub fn screen_to_world_ortho(
 }
 */
 
+fn confirm_discard(state: &EditorState) -> bool {
+    if !state.core.dirty {
+        return true;
+    }
+    rfd::MessageDialog::new()
+        .set_title("Unsaved Changes")
+        .set_description("The current map has unsaved changes. Discard them?")
+        .set_level(rfd::MessageLevel::Warning)
+        .set_buttons(rfd::MessageButtons::OkCancel)
+        .show()
+        == rfd::MessageDialogResult::Ok
+}
+
 pub fn new_map(state: &mut EditorState) {
+    if !confirm_discard(state) {
+        return;
+    }
     state.core.map_path = "unsaved.map".to_string();
     state.core.map = Some(Map::default());
     state.core.bump_revision();
+    state.core.dirty = false;
     state.core.selected_brushes.clear();
     state.core.selected_faces.clear();
     state.core.selected_edges.clear();
@@ -245,10 +262,16 @@ pub fn new_map(state: &mut EditorState) {
 }
 
 pub fn open_map(state: &mut EditorState) {
+    if !confirm_discard(state) {
+        return;
+    }
     let cwd = {
         if !state.core.config.misc.recent_maps.is_empty() {
-            let last = state.core.config.misc.recent_maps.last().unwrap(); //.clone();
-            PathBuf::from(last).parent().unwrap().to_path_buf()
+            let last = state.core.config.misc.recent_maps.last().unwrap();
+            PathBuf::from(last)
+                .parent()
+                .unwrap_or(&PathBuf::from("/"))
+                .to_path_buf()
         } else {
             std::env::current_dir().unwrap()
         }
@@ -270,6 +293,7 @@ pub fn open_map(state: &mut EditorState) {
             &mut state.core.map_path,
             &mut state.core.map,
             &mut state.core.map_revision,
+            &mut state.core.dirty,
             &mut state.core.undo,
             &mut state.core.map_load_count,
             &mut state.core.config.misc.recent_maps,
@@ -280,6 +304,9 @@ pub fn open_map(state: &mut EditorState) {
 }
 
 pub fn open_recent_map(state: &mut EditorState, path: &str) {
+    if !confirm_discard(state) {
+        return;
+    }
     perform_open_map(
         &mut state.core.selected_brushes,
         &mut state.core.selected_faces,
@@ -289,6 +316,7 @@ pub fn open_recent_map(state: &mut EditorState, path: &str) {
         &mut state.core.map_path,
         &mut state.core.map,
         &mut state.core.map_revision,
+        &mut state.core.dirty,
         &mut state.core.undo,
         &mut state.core.map_load_count,
         &mut state.core.config.misc.recent_maps,
@@ -306,6 +334,7 @@ fn perform_open_map(
     map_path: &mut String,
     map: &mut Option<Map>,
     map_revision: &mut u64,
+    dirty: &mut bool,
     undo: &mut UndoRedo,
     map_load_count: &mut u64,
     recent_maps: &mut Vec<String>,
@@ -322,11 +351,13 @@ fn perform_open_map(
             *map_path = path.to_string();
             *map = Some(loaded_map);
             *map_revision = map_revision.wrapping_add(1);
+            *dirty = false;
             undo.clear();
             *map_load_count = map_load_count.wrapping_add(1);
             let path_str = path.to_string();
             recent_maps.retain(|p| p != &path_str);
             recent_maps.push(path_str);
+            truncate_recent_maps(recent_maps);
             log_info!(console, "Loaded map: {}", path);
         }
         Err(e) => {
@@ -335,8 +366,14 @@ fn perform_open_map(
     }
 }
 
-/// Helper to get file path for saving, prompting user if needed.
-/// Returns Some(path) if user selected a file, None if cancelled.
+fn truncate_recent_maps(recent_maps: &mut Vec<String>) {
+    const MAX_RECENT: usize = 20;
+    if recent_maps.len() > MAX_RECENT {
+        let drain = recent_maps.len() - MAX_RECENT;
+        recent_maps.drain(..drain);
+    }
+}
+
 fn get_save_path(force_dialog: bool, current_path: &str) -> Option<PathBuf> {
     if !force_dialog && !current_path.is_empty() {
         let path = PathBuf::from(current_path);
@@ -345,11 +382,18 @@ fn get_save_path(force_dialog: bool, current_path: &str) -> Option<PathBuf> {
         }
     }
 
-    let cwd = std::env::current_dir().unwrap();
+    let start_dir = if !current_path.is_empty() {
+        PathBuf::from(current_path)
+            .parent()
+            .unwrap_or(&PathBuf::from("/"))
+            .to_path_buf()
+    } else {
+        std::env::current_dir().unwrap()
+    };
     rfd::FileDialog::new()
         .set_title("Save map")
         .add_filter("CoD Map", &["map", "bak"])
-        .set_directory(cwd)
+        .set_directory(start_dir)
         .save_file()
 }
 
@@ -362,6 +406,7 @@ pub fn save_map_as(state: &mut EditorState) {
     if let Some(p) = get_save_path(true, "") {
         state.core.map_path = p.to_str().unwrap().to_string();
         perform_save_map(state, &p);
+        state.core.dirty = false;
     } else {
         log_info!(state.console, "Save map cancelled by user");
     }
@@ -369,12 +414,14 @@ pub fn save_map_as(state: &mut EditorState) {
 
 pub fn save_map(state: &mut EditorState) {
     if state.core.map.is_none() {
-        log_info!(state.console, "Not allowed to save empty map!");
+        log_error!(state.console, "Not allowed to save empty map!");
         return;
     }
 
     if let Some(path) = get_save_path(false, &state.core.map_path) {
+        state.core.map_path = path.to_str().unwrap().to_string();
         perform_save_map(state, &path);
+        state.core.dirty = false;
     } else {
         log_info!(state.console, "Save map cancelled by user");
     }
@@ -391,7 +438,13 @@ fn perform_save_map(state: &mut EditorState, path: &PathBuf) {
     }
 
     match map_loader::save_map(state.core.map.as_ref().unwrap(), path_str) {
-        Ok(_) => log_info!(state.console, "Saved map to {}", path_str),
+        Ok(_) => {
+            let p = path_str.to_string();
+            state.core.config.misc.recent_maps.retain(|x| x != &p);
+            state.core.config.misc.recent_maps.push(p);
+            truncate_recent_maps(&mut state.core.config.misc.recent_maps);
+            log_info!(state.console, "Saved map to {}", path_str);
+        }
         Err(e) => log_error!(state.console, "Failed to save map to {}: {}", path_str, e),
     }
 }

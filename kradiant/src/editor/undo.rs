@@ -22,6 +22,8 @@ pub struct UndoRedo {
     undo: Vec<Entry>,
     redo: Vec<Entry>,
     max_entries: usize,
+    /// Set to true by `push`/`push_map` to signal that the map was modified.
+    pub dirty: bool,
 }
 
 impl Default for UndoRedo {
@@ -36,6 +38,7 @@ impl UndoRedo {
             undo: Vec::new(),
             redo: Vec::new(),
             max_entries: max_entries.max(1),
+            dirty: false,
         }
     }
 
@@ -63,6 +66,7 @@ impl UndoRedo {
         selected_entities: &[usize],
     ) {
         self.redo.clear();
+        self.dirty = true;
 
         self.undo.push(Entry {
             label: label.into(),
@@ -93,6 +97,7 @@ impl UndoRedo {
         selected_entities: &[usize],
     ) {
         self.redo.clear();
+        self.dirty = true;
         self.undo.push(Entry {
             label: label.into(),
             snapshot: Snapshot {
@@ -143,6 +148,7 @@ impl UndoRedo {
         *selected_patch_vertices = entry.snapshot.selected_patch_vertices;
         *selected_entities = entry.snapshot.selected_entities;
         *map_revision = map_revision.wrapping_add(1);
+        self.dirty = true;
         Some(entry.label)
     }
 
@@ -179,6 +185,7 @@ impl UndoRedo {
         *selected_patch_vertices = entry.snapshot.selected_patch_vertices;
         *selected_entities = entry.snapshot.selected_entities;
         *map_revision = map_revision.wrapping_add(1);
+        self.dirty = true;
         Some(entry.label)
     }
 }

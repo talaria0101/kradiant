@@ -374,6 +374,12 @@ pub fn draw_editor(ui: &Ui, state: &mut EditorState, dt: f32) {
     console::draw_console(ui, state);
     draw_texture_browser(ui, state);
 
+    // Sync dirty flag from undo system.
+    if state.core.undo.dirty {
+        state.core.dirty = true;
+        state.core.undo.dirty = false;
+    }
+
     if state.show_demo {
         ui.show_demo_window(&mut state.show_demo);
     }
