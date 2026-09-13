@@ -20,6 +20,12 @@ include:
 rust-test:
   stage: test
   image: rust:1.95.0
+  cache:
+    - key:
+        files:
+          - Cargo.lock
+      paths:
+        - target
   script:
     # - rustup default stable || true
     - apt update
