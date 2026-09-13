@@ -1,5 +1,6 @@
 use dear_imgui_rs::Ui;
 use glam::{Mat4, Vec2, Vec3};
+use kradiant::dirs;
 use kradiant::editing::{self, Aabb};
 use kradiant::editor::config::EntityDef;
 use kradiant::editor::viewport::Ortho;
@@ -7,7 +8,7 @@ use kradiant::loader::map_loader;
 use kradiant::map::Map;
 use num_traits::{NumCast, ToPrimitive};
 use std::collections::BTreeMap;
-use std::fs::create_dir_all;
+use std::fs::{self, create_dir_all, read_to_string};
 use std::io;
 use std::path::PathBuf;
 
@@ -25,6 +26,37 @@ pub fn get_config_dir() -> io::Result<PathBuf> {
     }
 
     Ok(base)
+}
+
+pub fn read_cfg(f: &str) -> io::Result<String> {
+    let user_path = dirs::config_home()
+    .join("kradiant_editor")
+    .join(f);
+
+    match read_to_string(&user_path) {
+        Ok(s) if !s.is_empty() => return Ok(s),
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e)
+    }
+
+    // system config dirs
+    for dir in dirs::config_dirs() {
+        let path = dir.join("kradiant_editor").join("prefs.toml");
+        match read_to_string(&path) {
+            Ok(s) if !s.is_empty() => return Ok(s),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(io::Error::new(io::ErrorKind::NotFound, "Config not found anywhere"))
+}
+
+pub fn write_cfg(f: &str, c: &str) -> io::Result<()> {
+    let cfg_path = dirs::config_home().join("kradiant_editor").join(f);
+    fs::write(cfg_path, c.as_bytes())
 }
 
 /// Measure text dimensions via the imgui sys layer (calc_text_size is not on &Ui in 0.10).

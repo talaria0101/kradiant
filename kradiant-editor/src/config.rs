@@ -1,7 +1,4 @@
-use std::{
-    fs::OpenOptions,
-    io::{self, Read, Write},
-};
+use std::io;
 
 use crate::{ui::console::ConsoleLogger, util};
 pub use kradiant::editor::config::RenderMode;
@@ -10,118 +7,79 @@ use num_traits::NumCast;
 use strum::VariantArray;
 
 pub fn load() -> io::Result<EditorConfig> {
-    let cfg_path = util::get_config_dir()
-        .expect("Failed to get config dir")
-        .join("prefs.toml");
-    if !cfg_path.exists() {
-        return Ok(EditorConfig::default());
-    }
-    let mut cfg_file = OpenOptions::new()
-        .read(true)
-        .open(&cfg_path)
-        .expect("Failed to open config");
-    let mut cfg_str = String::new();
-    cfg_file
-        .read_to_string(&mut cfg_str)
-        .expect("Failed to read config");
+    let cfg_str = match util::read_cfg("prefs.toml") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading config: {e}");
+            return Ok(EditorConfig::default());
+        }
+    };
 
-    let cfg = toml::from_str::<EditorConfig>(&cfg_str);
-    if let Ok(cfg) = cfg {
-        Ok(cfg)
-    } else {
-        Err(io::Error::new(io::ErrorKind::Other, cfg.err().unwrap()))
+    match toml::from_str(&cfg_str) {
+        Ok(c) => Ok(c),
+        Err(e) => Err(io::Error::other(e))
     }
 }
 
 pub fn load_entity_drawing() -> io::Result<EntityDrawingConfig> {
-    let cfg_path = util::get_config_dir()
-        .expect("Failed to get config dir")
-        .join("ent_drawing.toml");
-    if !cfg_path.exists() {
-        let cfg = EntityDrawingConfig::default();
-        let cfg_str = toml::to_string_pretty(&cfg).expect("Serialize entity drawing config");
-        let mut cfg_file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&cfg_path)
-            .expect("Failed to create entity drawing config");
-        cfg_file
-            .write_all(cfg_str.as_bytes())
-            .expect("Failed to write entity drawing config");
-        return Ok(cfg);
-    }
-    let mut cfg_file = OpenOptions::new()
-        .read(true)
-        .open(&cfg_path)
-        .expect("Failed to open entity drawing config");
-    let mut cfg_str = String::new();
-    cfg_file
-        .read_to_string(&mut cfg_str)
-        .expect("Failed to read entity drawing config");
+    let cfg_str = match util::read_cfg("ent_drawing.toml") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading config: {e}");
+            String::new()
+        }
+    };
 
-    let cfg = toml::from_str::<EntityDrawingConfig>(&cfg_str);
-    if let Ok(cfg) = cfg {
-        Ok(cfg)
-    } else {
-        Err(io::Error::new(io::ErrorKind::Other, cfg.err().unwrap()))
+    match toml::from_str(&cfg_str) {
+        Ok(c) => return Ok(c),
+        Err(e) => {
+            eprintln!("Error parsing ent_drawing.toml: {e}");
+        }
     }
+
+    let def = EntityDrawingConfig::default();
+    if let Err(e) = util::write_cfg("ent_defs.toml", &toml::to_string(&def).unwrap_or_default()) {
+        eprintln!("Failed to write default ent_defs.toml: {e}");
+    }
+
+    Ok(def)
 }
 
 pub fn load_entity_defs() -> io::Result<EditorEntities> {
-    let cfg_path = util::get_config_dir()
-        .expect("Failed to get config dir")
-        .join("ent_defs.toml");
-    if !cfg_path.exists() {
-        let cfg = EditorEntities::default();
-        let cfg_str = toml::to_string_pretty(&cfg).expect("Serialize entity defs config");
-        let mut cfg_file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&cfg_path)
-            .expect("Failed to create entity defs config");
-        cfg_file
-            .write_all(cfg_str.as_bytes())
-            .expect("Failed to write entity defs config");
-        return Ok(cfg);
-    }
-    let mut cfg_file = OpenOptions::new()
-        .read(true)
-        .open(&cfg_path)
-        .expect("Failed to open entity defs config");
-    let mut cfg_str = String::new();
-    cfg_file
-        .read_to_string(&mut cfg_str)
-        .expect("Failed to read entity defs config");
+    let cfg_str = match util::read_cfg("ent_defs.toml") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading ent_defs.toml: {e}");
+            String::new()
+        }
+    };
 
     match toml::from_str::<EditorEntities>(&cfg_str) {
         Ok(mut cfg) => {
             cfg.defs.sort();
             cfg.defs.dedup();
-            Ok(cfg)
+            return Ok(cfg);
         }
-        Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+        Err(e) => eprintln!("Error parsing ent_defs.toml: {e}"),
+    };
+
+    let def = EditorEntities::default();
+    if let Err(e) = util::write_cfg("ent_defs.toml", &toml::to_string(&def).unwrap_or_default()) {
+        eprintln!("Failed to write default ent_defs.toml: {e}");
     }
+
+    Ok(def)
 }
 
 pub fn save(cfg: &EditorConfig) -> io::Result<String> {
-    let old = load()?;
+    let old = load().unwrap_or(EditorConfig::default());
     if &old == cfg {
         return Ok("Not saving config".to_string());
     }
     let cfg_str: String = toml::to_string(cfg).expect("Serialize config");
-    let cfg_path = util::get_config_dir()
-        .expect("Failed to get config dir")
-        .join("prefs.toml");
-    let mut cfg_file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .create(true)
-        .open(&cfg_path)
-        .expect("Failed to open config");
-    match cfg_file.write(cfg_str.as_bytes()) {
-        Ok(_) => Ok(format!("Saved configuration to {}", cfg_path.display())),
+
+    match util::write_cfg("prefs.toml", &cfg_str) {
+        Ok(_) => Ok(format!("Saved configuration")),
         Err(e) => Err(e),
     }
 }
