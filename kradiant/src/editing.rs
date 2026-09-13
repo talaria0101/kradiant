@@ -1764,12 +1764,34 @@ pub fn edge_move_plane_updates(
         return None;
     }
 
+    // Pre-compute all UN-shifted edge endpoints per face.  When multiple
+    // selected edges touch the same face, the reference vertex must avoid
+    // every endpoint that will be translated—not just the current edge's—so
+    // the anchor is truly stationary across every moved edge.
+    let mut edge_endpoints_per_face: Vec<(usize, Vec<Vec3>)> = Vec::new();
+    for &(face_a_idx, face_b_idx) in edge_face_pairs {
+        let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
+            polys, face_a_idx, face_b_idx,
+        ) else {
+            return None;
+        };
+        for face_idx in [face_a_idx, face_b_idx] {
+            if let Some(entry) = edge_endpoints_per_face.iter_mut().find(|(i, _)| *i == face_idx) {
+                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, edge_start)) {
+                    entry.1.push(edge_start);
+                }
+                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, edge_end)) {
+                    entry.1.push(edge_end);
+                }
+            } else {
+                edge_endpoints_per_face.push((face_idx, vec![edge_start, edge_end]));
+            }
+        }
+    }
+
     let mut updates: Vec<(usize, [Vec3; 3])> = Vec::new();
     let mut updated_faces: Vec<usize> = Vec::new();
-    // For each face, collect all moved endpoints from all edges that touch it
-    let mut face_moved_endpoints: Vec<(usize, Vec<Vec3>)> = Vec::new();
 
-    // First pass: aggregate all moved endpoints per face
     for &(face_a_idx, face_b_idx) in edge_face_pairs {
         let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
             polys, face_a_idx, face_b_idx,
@@ -1777,61 +1799,47 @@ pub fn edge_move_plane_updates(
             return None;
         };
 
-        let moved_start = edge_start + delta;
-        let moved_end = edge_end + delta;
-
         for face_idx in [face_a_idx, face_b_idx] {
-            if let Some(entry) = face_moved_endpoints.iter_mut().find(|(idx, _)| *idx == face_idx) {
-                // Add endpoints if not already present
-                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, moved_start)) {
-                    entry.1.push(moved_start);
-                }
-                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, moved_end)) {
-                    entry.1.push(moved_end);
-                }
-            } else {
-                face_moved_endpoints.push((face_idx, vec![moved_start, moved_end]));
+            if updated_faces.contains(&face_idx) {
+                continue;
             }
-        }
-    }
+            let Some(face) = faces.get(face_idx) else {
+                return None;
+            };
+            let verts = &polys.get(face_idx)?.0;
 
-    // Second pass: fit each face plane using all its moved endpoints
-    for (face_idx, moved_endpoints) in &face_moved_endpoints {
-        if updated_faces.contains(face_idx) {
-            continue;
-        }
-        let Some(face) = faces.get(*face_idx) else {
-            return None;
-        };
-        let verts = &polys.get(*face_idx)?.0;
-        // Stationary vertex: exclude ALL moved endpoints, not just one edge's
-        let Some(&reference) = verts
-            .iter()
-            .find(|&&v| {
-                !moved_endpoints.iter().any(|ep| crate::core_util::same_point(v, *ep))
-            })
-        else {
-            return None;
-        };
+            let face_endpoints = edge_endpoints_per_face
+                .iter()
+                .find(|(i, _)| *i == face_idx)
+                .map(|(_, v)| v.as_slice())
+                .unwrap_or(&[]);
 
-        let old_normal = face_plane_normal(face);
-        if old_normal.length_squared() < 1.0e-12 {
-            return None;
-        }
+            let Some(&reference) = verts
+                .iter()
+                .find(|&&v| {
+                    !face_endpoints.iter().any(|ep| crate::core_util::same_point(v, *ep))
+                })
+            else {
+                return None;
+            };
 
-        // Use the first two moved endpoints to define the new edge
-        // (all endpoints should be collinear after projection for a valid move)
-        let (mut p0, mut p1) = (moved_endpoints[0], moved_endpoints[1]);
-        let new_normal = (p1 - p0).cross(reference - p0);
-        if new_normal.length_squared() < 1.0e-12 {
-            return None;
-        }
-        if old_normal.dot(new_normal) < 0.0 {
-            std::mem::swap(&mut p0, &mut p1);
-        }
+            let old_normal = face_plane_normal(face);
+            if old_normal.length_squared() < 1.0e-12 {
+                return None;
+            }
 
-        updates.push((*face_idx, [p0, p1, reference]));
-        updated_faces.push(*face_idx);
+            let (mut p0, mut p1) = (edge_start + delta, edge_end + delta);
+            let new_normal = (p1 - p0).cross(reference - p0);
+            if new_normal.length_squared() < 1.0e-12 {
+                return None;
+            }
+            if old_normal.dot(new_normal) < 0.0 {
+                std::mem::swap(&mut p0, &mut p1);
+            }
+
+            updates.push((face_idx, [p0, p1, reference]));
+            updated_faces.push(face_idx);
+        }
     }
 
     if updates.is_empty() {
@@ -2992,5 +3000,84 @@ mod tests {
         };
         assert!(!translate_selected_edges(&mut map, &[sel], Vec3::ZERO));
         assert!(!translate_selected_edges(&mut map, &[], Vec3::ONE));
+    }
+
+    #[test]
+    fn edge_move_two_opposite_edges_sharing_face_rejected() {
+        // Two opposite edges on the bottom face (-Z) cover all 4 vertices.
+        // There is no stationary reference → must fail.
+        let (mut map, e, b) = cube_map();
+        let (fa1, fb1, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        let (fa2, fb2, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::X);
+        let sels = [
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa1,
+                face_b_idx: fb1,
+            },
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa2,
+                face_b_idx: fb2,
+            },
+        ];
+        let delta = Vec3::new(0.0, 0.0, 4.0);
+        assert!(
+            !translate_selected_edges(&mut map, &sels, delta),
+            "moving two opposite edges on one face must fail (no stationary reference)"
+        );
+        assert!(is_convex_brush_valid(&map.entities[e].brushes[b]));
+    }
+
+    #[test]
+    fn edge_move_two_non_sharing_edges_succeeds() {
+        // Two edges that don't share a face with each other: each face has
+        // its own stationary reference and each edge is translated by delta.
+        let (mut map, e, b) = cube_map();
+        // Bottom-left edge (NEG_Z & NEG_X) and top-right edge (+Z & +X).
+        let (fa1, fb1, a1_start, a1_end) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        let (fa2, fb2, a2_start, a2_end) = find_shared_edge(&map, Vec3::X, Vec3::Z);
+        let sels = [
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa1,
+                face_b_idx: fb1,
+            },
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa2,
+                face_b_idx: fb2,
+            },
+        ];
+        let delta = Vec3::new(8.0, 0.0, 0.0);
+        assert!(
+            translate_selected_edges(&mut map, &sels, delta),
+            "moving two non-sharing edges must succeed"
+        );
+        let brush = &map.entities[e].brushes[b];
+        assert!(is_convex_brush_valid(brush));
+        let polys_after = crate::geometry::brush_to_polygons(brush).unwrap();
+        let (na1, nb1) = crate::core_util::shared_edge_points(&polys_after, fa1, fb1).unwrap();
+        let (na2, nb2) = crate::core_util::shared_edge_points(&polys_after, fa2, fb2).unwrap();
+        assert!(
+            (na1 - (a1_start + delta)).length() < 0.01,
+            "edge 1 start not translated"
+        );
+        assert!(
+            (nb1 - (a1_end + delta)).length() < 0.01,
+            "edge 1 end not translated"
+        );
+        assert!(
+            (na2 - (a2_start + delta)).length() < 0.01,
+            "edge 2 start not translated"
+        );
+        assert!(
+            (nb2 - (a2_end + delta)).length() < 0.01,
+            "edge 2 end not translated"
+        );
     }
 }
