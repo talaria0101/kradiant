@@ -1759,6 +1759,12 @@ fn pick_convex_edge_by_screen_3d(
         if brush.is_clip() && !mask.contains(PickMask::CLIP) {
             return;
         }
+        if brush.is_portal() && !mask.contains(PickMask::PORTAL) {
+            return;
+        }
+        if brush.is_hint() && !mask.contains(PickMask::HINT) {
+            return;
+        }
         let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
             return;
         };

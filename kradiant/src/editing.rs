@@ -1270,6 +1270,12 @@ pub fn pick_brush_by_ray(
                     if brush.is_clip() && !mask.contains(PickMask::CLIP) {
                         continue;
                     }
+                    if brush.is_portal() && !mask.contains(PickMask::PORTAL) {
+                        continue;
+                    }
+                    if brush.is_hint() && !mask.contains(PickMask::HINT) {
+                        continue;
+                    }
 
                     let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
                         continue;
