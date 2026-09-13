@@ -9,6 +9,7 @@ CoD 1/UO level editing library and tool written in Rust.
   - Save maps
   - Loading models
   - Editing Brushes
+  - Smart portal generation: doorway/window portal brushes from a frame selection, and cell portal walls between adjacent cells (portal/portalnodraw faces, T-junction safe by construction, 4-way staggering)
   - And more...
 
 ## Work in Progress
