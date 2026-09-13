@@ -127,15 +127,19 @@ pub struct Viewport3D {
     cache: Option<View3dCache>,
     last_selection_hash: u64,
     last_preview_hash: u64,
-    /// Cache for edge_move_clamp_factor: keyed by (move_offset, selection_hash, map_generation)
+    /// Cache for edge_move_clamp_factor: keyed by (map_ptr, map_revision, move_offset, selection_hash, map_generation)
     last_edge_clamp_offset: Vec3,
     last_edge_clamp_selection_hash: u64,
     last_edge_clamp_map_generation: u64,
+    last_edge_clamp_map_ptr: usize,
+    last_edge_clamp_map_revision: u64,
     last_edge_clamp_factor: f32,
-    /// Cache for dimmed edges: keyed by (map_generation, selection_hash, show_config_hash)
+    /// Cache for dimmed edges: keyed by (map_ptr, map_revision, map_generation, selection_hash, show_config_hash)
     last_dim_edges_map_generation: u64,
     last_dim_edges_selection_hash: u64,
     last_dim_edges_config_hash: u64,
+    last_dim_edges_map_ptr: usize,
+    last_dim_edges_map_revision: u64,
     cached_dim_edges: Vec<Vec3>,
 }
 
@@ -172,10 +176,14 @@ impl Viewport3D {
             last_edge_clamp_offset: Vec3::ZERO,
             last_edge_clamp_selection_hash: 0,
             last_edge_clamp_map_generation: 0,
+            last_edge_clamp_map_ptr: 0,
+            last_edge_clamp_map_revision: 0,
             last_edge_clamp_factor: 1.0,
             last_dim_edges_map_generation: 0,
             last_dim_edges_selection_hash: 0,
             last_dim_edges_config_hash: 0,
+            last_dim_edges_map_ptr: 0,
+            last_dim_edges_map_revision: 0,
             cached_dim_edges: Vec::new(),
         }
     }
@@ -1188,10 +1196,13 @@ impl Viewport3D {
                 };
                 let sel_hash = edge_selection_hash(&editor.selected_edges);
                 let map_gen = editor.map.as_ref().map(|m| m.generation).unwrap_or(0);
+                let map_rev = editor.map_revision;
                 let clamp_factor = if raw_delta != Vec3::ZERO && !editor.selected_edges.is_empty() {
                     if raw_delta == self.last_edge_clamp_offset
                         && sel_hash == self.last_edge_clamp_selection_hash
                         && map_gen == self.last_edge_clamp_map_generation
+                        && map_ptr == self.last_edge_clamp_map_ptr
+                        && map_rev == self.last_edge_clamp_map_revision
                     {
                         self.last_edge_clamp_factor
                     } else {
@@ -1203,6 +1214,8 @@ impl Viewport3D {
                         self.last_edge_clamp_offset = raw_delta;
                         self.last_edge_clamp_selection_hash = sel_hash;
                         self.last_edge_clamp_map_generation = map_gen;
+                        self.last_edge_clamp_map_ptr = map_ptr;
+                        self.last_edge_clamp_map_revision = map_rev;
                         self.last_edge_clamp_factor = factor;
                         factor
                     }
@@ -1252,7 +1265,9 @@ impl Viewport3D {
                 let use_cached_dim = !previewing
                     && map_gen == self.last_dim_edges_map_generation
                     && sel_hash == self.last_dim_edges_selection_hash
-                    && config_hash == self.last_dim_edges_config_hash;
+                    && config_hash == self.last_dim_edges_config_hash
+                    && map_ptr == self.last_dim_edges_map_ptr
+                    && map_rev == self.last_dim_edges_map_revision;
 
                 // During a drag with a valid cache, only iterate brushes that
                 // have selected edges (for sel_edges); dim_edges comes from cache.
@@ -1298,6 +1313,8 @@ impl Viewport3D {
                     self.last_dim_edges_map_generation = map_gen;
                     self.last_dim_edges_selection_hash = sel_hash;
                     self.last_dim_edges_config_hash = config_hash;
+                    self.last_dim_edges_map_ptr = map_ptr;
+                    self.last_dim_edges_map_revision = map_rev;
                     self.cached_dim_edges = edges.clone();
                     edges
                 };
