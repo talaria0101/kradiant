@@ -1234,7 +1234,6 @@ impl Viewport3D {
                         .unwrap_or(false)
                 };
 
-                let mut sel_edges: Vec<Vec3> = Vec::new();
                 let mut sel_handles: Vec<Vec3> = Vec::new();
 
                 // Compute config hash for dimmed edges cache
@@ -1255,7 +1254,14 @@ impl Viewport3D {
                     && sel_hash == self.last_dim_edges_selection_hash
                     && config_hash == self.last_dim_edges_config_hash;
 
+                // During a drag with a valid cache, only iterate brushes that
+                // have selected edges (for sel_edges); dim_edges comes from cache.
+                // When not previewing, iterate all brushes to rebuild the cache.
                 let dim_edges: Vec<Vec3> = if use_cached_dim {
+                    self.cached_dim_edges.clone()
+                } else if previewing {
+                    // During drag without a matching cache (e.g. selection changed),
+                    // use stale cache for dim_edges and only compute sel_edges.
                     self.cached_dim_edges.clone()
                 } else {
                     let mut edges = Vec::new();
@@ -1273,37 +1279,14 @@ impl Viewport3D {
                                     continue;
                                 }
 
-                                let owned_polys: Option<Vec<(Vec<Vec3>, Vec<u32>)>>;
-                                let polys: &[(Vec<Vec3>, Vec<u32>)] = if previewing {
-                                    match sel_by_brush.get(&(entity_idx, brush_idx)) {
-                                        Some(pairs) => {
-                                            match editing::preview_edge_moved_polys(brush, pairs, drag_delta)
-                                            {
-                                                Some(p) => {
-                                                    owned_polys = Some(p);
-                                                    owned_polys.as_deref().unwrap_or(&[])
-                                                }
-                                                // Degenerate preview: show the current
-                                                // geometry (the release will refuse).
-                                                None => brush.get_polygons().unwrap_or(&[]),
-                                            }
-                                        }
-                                        None => brush.get_polygons().unwrap_or(&[]),
-                                    }
-                                } else {
-                                    brush.get_polygons().unwrap_or(&[])
-                                };
-
+                                let polys = brush.get_polygons().unwrap_or(&[]);
                                 for fa in 0..polys.len() {
                                     for fb in (fa + 1)..polys.len() {
                                         let Some((a, b)) = core_util::shared_edge_points(polys, fa, fb)
                                         else {
                                             continue;
                                         };
-                                        if is_selected_edge(entity_idx, brush_idx, fa, fb) {
-                                            sel_edges.push(a);
-                                            sel_edges.push(b);
-                                        } else {
+                                        if !is_selected_edge(entity_idx, brush_idx, fa, fb) {
                                             edges.push(a);
                                             edges.push(b);
                                         }
@@ -1312,15 +1295,66 @@ impl Viewport3D {
                             }
                         }
                     }
-                    edges
-                };
-
-                // Update cache when not previewing
-                if !previewing && !use_cached_dim {
                     self.last_dim_edges_map_generation = map_gen;
                     self.last_dim_edges_selection_hash = sel_hash;
                     self.last_dim_edges_config_hash = config_hash;
-                    self.cached_dim_edges = dim_edges.clone();
+                    self.cached_dim_edges = edges.clone();
+                    edges
+                };
+
+                // Compute sel_edges: always from live data since it depends on
+                // the current preview delta (moved polygons differ per frame).
+                let mut sel_edges: Vec<Vec3> = Vec::new();
+                if let Some(map) = editor.map.as_mut() {
+                    // Only iterate brushes that have selected edges.
+                    let selected_brushes: Vec<(usize, usize)> = editor.selected_edges.iter()
+                        .map(|e| (e.entity_idx, e.brush_idx))
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    for (entity_idx, brush_idx) in selected_brushes {
+                        let Some(entity) = map.entities.get_mut(entity_idx) else {
+                            continue;
+                        };
+                        let Some(brush) = entity.brushes.get_mut(brush_idx) else {
+                            continue;
+                        };
+                        if !matches!(&brush.content, BrushContent::Convex(_)) {
+                            continue;
+                        }
+
+                        let owned_polys: Option<Vec<(Vec<Vec3>, Vec<u32>)>>;
+                        let polys: &[(Vec<Vec3>, Vec<u32>)] = if previewing {
+                            match sel_by_brush.get(&(entity_idx, brush_idx)) {
+                                Some(pairs) => {
+                                    match editing::preview_edge_moved_polys(brush, pairs, drag_delta)
+                                    {
+                                        Some(p) => {
+                                            owned_polys = Some(p);
+                                            owned_polys.as_deref().unwrap_or(&[])
+                                        }
+                                        None => brush.get_polygons().unwrap_or(&[]),
+                                    }
+                                }
+                                None => brush.get_polygons().unwrap_or(&[]),
+                            }
+                        } else {
+                            brush.get_polygons().unwrap_or(&[])
+                        };
+
+                        for fa in 0..polys.len() {
+                            for fb in (fa + 1)..polys.len() {
+                                let Some((a, b)) = core_util::shared_edge_points(polys, fa, fb)
+                                else {
+                                    continue;
+                                };
+                                if is_selected_edge(entity_idx, brush_idx, fa, fb) {
+                                    sel_edges.push(a);
+                                    sel_edges.push(b);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Small cube handles at the selected edge endpoints.
