@@ -1892,14 +1892,16 @@ fn ray_closest_point_on_segment(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3) -> Op
     let ee = edge_dir.dot(w0);
     let denom = 1.0 - bb * bb;
 
-    let (mut _t, mut s) = if denom > 1.0e-12 {
-        ((bb * ee - dd) / denom, (ee - bb * dd) / denom)
+    let mut s = if denom > 1.0e-12 {
+        (bb * dd - ee) / denom
     } else {
-        let s = (-ee).clamp(0.0, len);
-        let closest = a + edge_dir * s;
-        (dir.dot(closest - origin), s)
+        -ee
     };
-    _t = _t.max(0.0);
     s = s.clamp(0.0, len);
+
+    let t = (dd + bb * s).max(0.0);
+    if t == 0.0 {
+        s = (-ee).clamp(0.0, len);
+    }
     Some(a + edge_dir * s)
 }

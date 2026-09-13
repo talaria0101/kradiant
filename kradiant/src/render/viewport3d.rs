@@ -1193,6 +1193,13 @@ impl Viewport3D {
                             if !matches!(&brush.content, BrushContent::Convex(_)) {
                                 continue;
                             }
+                            if !editor.config.view.show.convex
+                                || (brush.is_clip() && !editor.config.view.show.clip_brushes)
+                                || (brush.is_portal() && !editor.config.view.show.portal_brushes)
+                                || (brush.is_hint() && !editor.config.view.show.hint_brushes)
+                            {
+                                continue;
+                            }
 
                             let owned_polys: Option<Vec<(Vec<Vec3>, Vec<u32>)>>;
                             let polys: &[(Vec<Vec3>, Vec<u32>)] = if previewing {
