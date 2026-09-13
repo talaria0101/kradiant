@@ -16,7 +16,7 @@ use kradiant::editor::{EditorConfig, EditorPalette};
 use kradiant::map::{BrushContent, BrushId, Face};
 use kradiant::map_utils::format_float;
 use kradiant::{core_util, editing};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::{Deref, DerefMut};
 
 pub struct View2D {
@@ -1582,8 +1582,29 @@ impl View2D {
 
                 if canvas_interacting && ui.is_key_pressed(dear_imgui_rs::Key::Backspace) {
                     if edit_faces {
-                        selected_faces.clear();
-                        sync_selected_brushes_from_faces(selected_faces, selected_brushes);
+                        // Face deletion with joining (README TODO).
+                        delete_selected_faces_joined(
+                            map,
+                            selected_brushes,
+                            selected_faces,
+                            selected_edges,
+                            selected_patch_vertices,
+                            selected_entities,
+                            undo,
+                            console,
+                        );
+                    } else if edit_vertices {
+                        // Patch vertex deletion with welding (README TODO).
+                        weld_selected_patch_vertices(
+                            map,
+                            selected_brushes,
+                            selected_faces,
+                            selected_edges,
+                            selected_patch_vertices,
+                            selected_entities,
+                            undo,
+                            console,
+                        );
                     } else if edit_edges {
                         selected_edges.clear();
                         sync_selected_brushes_from_edges(selected_edges, selected_brushes);
@@ -2070,6 +2091,44 @@ impl View2D {
                             }
                         });
                         ui.separator_horizontal();
+                        if edit_faces && !selected_faces.is_empty() {
+                            if ui.menu_item("Delete faces (join)") {
+                                delete_selected_faces_joined(
+                                    map,
+                                    selected_brushes,
+                                    selected_faces,
+                                    selected_edges,
+                                    selected_patch_vertices,
+                                    selected_entities,
+                                    undo,
+                                    console,
+                                );
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text(
+                                    "Delete the selected faces and join the remaining faces at their centre",
+                                );
+                            }
+                        }
+                        if edit_vertices && !selected_patch_vertices.is_empty() {
+                            if ui.menu_item("Delete vertices (weld)") {
+                                weld_selected_patch_vertices(
+                                    map,
+                                    selected_brushes,
+                                    selected_faces,
+                                    selected_edges,
+                                    selected_patch_vertices,
+                                    selected_entities,
+                                    undo,
+                                    console,
+                                );
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text(
+                                    "Delete the selected patch vertices and weld complete rows/columns closed",
+                                );
+                            }
+                        }
                         ui.menu("Make", || {
                             if ui.menu_item("Detail") {
                                 log_info!(console, "unimplemented");
@@ -2143,12 +2202,117 @@ pub fn sync_selected_brushes_from_faces(
     selected_brushes.extend(set.into_iter());
 }
 
+/// Delete the selected faces and re-close each affected brush at the
+/// centroid of the deleted faces (README: "face deletion with joining").
+/// Pushes an undo entry first; remaps surviving face/edge selections.
+pub fn delete_selected_faces_joined(
+    map: &mut Option<kradiant::map::Map>,
+    selected_brushes: &mut Vec<(usize, usize)>,
+    selected_faces: &mut Vec<FaceSelection>,
+    selected_edges: &mut Vec<EdgeSelection>,
+    selected_patch_vertices: &mut Vec<PatchVertexSelection>,
+    selected_entities: &mut Vec<usize>,
+    undo: &mut kradiant::editor::undo::UndoRedo,
+    console: &mut ConsoleLogger,
+) {
+    if selected_faces.is_empty() {
+        return;
+    }
+    undo.push(
+        "Delete faces (join)",
+        map,
+        selected_brushes,
+        selected_faces,
+        selected_edges,
+        selected_patch_vertices,
+        selected_entities,
+    );
+
+    let Some(map) = map.as_mut() else {
+        return;
+    };
+    match editing::delete_selected_faces_and_join(map, selected_faces) {
+        Ok(deleted) => {
+            // Face indices shifted wherever faces were removed: drop
+            // selections that pointed at deleted faces and remap the rest.
+            let survives = |entity_idx: usize, brush_idx: usize, face_idx: usize| {
+                deleted
+                    .get(&(entity_idx, brush_idx))
+                    .map(|del| !del.contains(&face_idx))
+                    .unwrap_or(true)
+            };
+            selected_faces.retain(|sel| survives(sel.entity_idx, sel.brush_idx, sel.face_idx));
+            for sel in selected_faces.iter_mut() {
+                if let Some(del) = deleted.get(&(sel.entity_idx, sel.brush_idx)) {
+                    sel.face_idx -= del.iter().filter(|&&d| d < sel.face_idx).count();
+                }
+            }
+            selected_edges.retain(|sel| {
+                survives(sel.entity_idx, sel.brush_idx, sel.face_a_idx)
+                    && survives(sel.entity_idx, sel.brush_idx, sel.face_b_idx)
+            });
+            for sel in selected_edges.iter_mut() {
+                if let Some(del) = deleted.get(&(sel.entity_idx, sel.brush_idx)) {
+                    sel.face_a_idx -= del.iter().filter(|&&d| d < sel.face_a_idx).count();
+                    sel.face_b_idx -= del.iter().filter(|&&d| d < sel.face_b_idx).count();
+                }
+            }
+
+            let count: usize = deleted.values().map(|v| v.len()).sum();
+            log_info!(
+                console,
+                "Deleted {count} face(s) on {} brush(es) and joined the remaining faces",
+                deleted.len()
+            );
+        }
+        Err(e) => log_warn!(console, "Could not delete faces: {e}"),
+    }
+}
+
+/// Weld away the selected patch vertices (README: "vertex deletion with
+/// welding"). Pushes an undo entry first; clears the vertex selection.
+pub fn weld_selected_patch_vertices(
+    map: &mut Option<kradiant::map::Map>,
+    selected_brushes: &mut Vec<(usize, usize)>,
+    selected_faces: &mut Vec<FaceSelection>,
+    selected_edges: &mut Vec<EdgeSelection>,
+    selected_patch_vertices: &mut Vec<PatchVertexSelection>,
+    selected_entities: &mut Vec<usize>,
+    undo: &mut kradiant::editor::undo::UndoRedo,
+    console: &mut ConsoleLogger,
+) {
+    if selected_patch_vertices.is_empty() {
+        return;
+    }
+    undo.push(
+        "Delete patch vertices (weld)",
+        map,
+        selected_brushes,
+        selected_faces,
+        selected_edges,
+        selected_patch_vertices,
+        selected_entities,
+    );
+
+    let Some(map) = map.as_mut() else {
+        return;
+    };
+    match editing::delete_selected_patch_vertices(map, selected_patch_vertices) {
+        Ok(count) => {
+            selected_patch_vertices.clear();
+            log_info!(
+                console,
+                "Welded away {count} patch vertex(es); grid rows/columns closed"
+            );
+        }
+        Err(e) => log_warn!(console, "Could not delete patch vertices: {e}"),
+    }
+}
+
 pub fn sync_selected_brushes_from_edges(
     selected_edges: &[EdgeSelection],
     selected_brushes: &mut Vec<(usize, usize)>,
 ) {
-    use std::collections::BTreeSet;
-
     let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
     for sel in selected_edges {
         set.insert((sel.entity_idx, sel.brush_idx));
