@@ -1837,6 +1837,25 @@ pub fn edge_move_plane_updates(
                 std::mem::swap(&mut p0, &mut p1);
             }
 
+            // Coplanarity: every other moved endpoint on this face must land
+            // on the plane we just fitted through (p0, p1, reference).  When
+            // two selected edges share a face, the second edge's translated
+            // endpoints may fall off the plane – the move is degenerate.
+            let plane_n = (p1 - p0).cross(reference - p0);
+            let plane_d = plane_n.dot(p0);
+            let plane_len = plane_n.length();
+            for &ep in face_endpoints {
+                let shifted = ep + delta;
+                let dist = (plane_n.dot(shifted) - plane_d).abs() / plane_len;
+                // Reject if the endpoint is off the plane by more than a tiny
+                // fraction of the delta magnitude.  Using an absolute floor
+                // catches degenerate near-zero deltas too.
+                let tol = delta.length().max(1.0) * 1.0e-6;
+                if dist > tol {
+                    return None;
+                }
+            }
+
             updates.push((face_idx, [p0, p1, reference]));
             updated_faces.push(face_idx);
         }
@@ -2964,7 +2983,10 @@ mod tests {
     }
 
     #[test]
-    fn edge_move_with_two_selected_edges_stays_valid() {
+    fn edge_move_with_two_selected_edges_sharing_face_rejected() {
+        // Two edges that share a face (NEG_Z) → coplanarity check rejects
+        // because the second edge's translated endpoint falls off the plane
+        // fitted through the first edge's endpoints + reference.
         let (mut map, e, b) = cube_map();
         let (fa1, fb1, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
         let (fa2, fb2, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_Y);
@@ -2983,10 +3005,11 @@ mod tests {
             },
         ];
         let delta = Vec3::new(0.0, 0.0, 4.0);
-        assert!(translate_selected_edges(&mut map, &sels, delta));
-        let brush = &map.entities[0].brushes[0];
-        assert!(is_convex_brush_valid(brush));
-        assert_eq!(brush.aabb.max.z, 68.0);
+        assert!(
+            !translate_selected_edges(&mut map, &sels, delta),
+            "two edges sharing a face must be rejected (coplanarity)"
+        );
+        assert!(is_convex_brush_valid(&map.entities[e].brushes[b]));
     }
 
     #[test]
@@ -3079,5 +3102,68 @@ mod tests {
             (nb2 - (a2_end + delta)).length() < 0.01,
             "edge 2 end not translated"
         );
+    }
+
+    #[test]
+    fn edge_move_two_adjacent_edges_same_face_rejected() {
+        // Two adjacent edges on the top face (+Z) share one vertex.  Moving
+        // both by a face-normal delta still makes the translated endpoints
+        // non-coplanar with the fitted plane (the3rd translated vertex falls
+        // off the plane through the first edge + reference).  The coplanarity
+        // check in edge_move_plane_updates must reject this.
+        let (mut map, e, b) = cube_map();
+        let (fa1, fb1, ..) = find_shared_edge(&map, Vec3::Z, Vec3::NEG_X);
+        let (fa2, fb2, ..) = find_shared_edge(&map, Vec3::Z, Vec3::NEG_Y);
+        let sels = [
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa1,
+                face_b_idx: fb1,
+            },
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa2,
+                face_b_idx: fb2,
+            },
+        ];
+        // Even a face-normal delta makes the3 translated endpoints non-coplanar.
+        let delta = Vec3::new(0.0, 0.0, 4.0);
+        assert!(
+            !translate_selected_edges(&mut map, &sels, delta),
+            "two adjacent edges on one face must be rejected (coplanarity)"
+        );
+        assert!(is_convex_brush_valid(&map.entities[e].brushes[b]));
+    }
+
+    #[test]
+    fn edge_move_two_adjacent_edges_oblique_delta_rejected() {
+        // Same two adjacent edges, but an oblique delta makes the translated
+        // endpoints non-coplanar → must be rejected by the coplanarity check.
+        let (mut map, e, b) = cube_map();
+        let (fa1, fb1, ..) = find_shared_edge(&map, Vec3::Z, Vec3::NEG_X);
+        let (fa2, fb2, ..) = find_shared_edge(&map, Vec3::Z, Vec3::NEG_Y);
+        let sels = [
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa1,
+                face_b_idx: fb1,
+            },
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa2,
+                face_b_idx: fb2,
+            },
+        ];
+        // Oblique delta: translated endpoints won't be coplanar.
+        let delta = Vec3::new(8.0, 8.0, 4.0);
+        assert!(
+            !translate_selected_edges(&mut map, &sels, delta),
+            "oblique delta on adjacent edges must fail coplanarity check"
+        );
+        assert!(is_convex_brush_valid(&map.entities[e].brushes[b]));
     }
 }
