@@ -12,6 +12,7 @@ use std::fs::{self, create_dir_all, read_to_string};
 use std::io;
 use std::path::PathBuf;
 
+use crate::theme::{ThemeEntry, theme_from_str};
 use crate::ui::EditorState;
 use crate::ui::console::ConsoleLogger;
 use kradiant::editor::selection::{EdgeSelection, FaceSelection, PatchVertexSelection};
@@ -57,6 +58,35 @@ pub fn read_cfg(f: &str) -> io::Result<String> {
 pub fn write_cfg(f: &str, c: &str) -> io::Result<()> {
     let cfg_path = dirs::config_home().join("kradiant_editor").join(f);
     fs::write(cfg_path, c.as_bytes())
+}
+
+pub fn load_themes() -> Vec<ThemeEntry> {
+    let mut themes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut paths = vec![dirs::data_home().to_owned()];
+    paths.append(&mut dirs::data_dirs().to_owned());
+    paths.into_iter().for_each(|p| {
+        let theme_dir = p.join("kradiant_editor").join("themes");
+        if !seen.insert(theme_dir.clone()) {
+            return;
+        }
+        let Ok(r) = fs::read_dir(&theme_dir) else { return; };
+        println!("searching for themes in {}", theme_dir.display());
+        r.for_each(|e| {
+            let Ok(entry) = e else { return; };
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            if let Ok(s) = fs::read_to_string(&path) {
+                if let Ok(t) = theme_from_str(&s) {
+                    println!("adding {name} from {}", path.display());
+                    themes.push(ThemeEntry { name: name.replace(".toml", ""), data: t });
+                }
+            }
+        });
+    });
+
+    println!("read {} themes", themes.len());
+    themes
 }
 
 /// Measure text dimensions via the imgui sys layer (calc_text_size is not on &Ui in 0.10).

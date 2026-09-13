@@ -160,7 +160,7 @@ macro_rules! log_error {
 
 impl Default for EditorState {
     fn default() -> Self {
-        let themes: Vec<ThemeEntry> = EDITOR_THEMES
+        let mut themes: Vec<ThemeEntry> = EDITOR_THEMES
             .iter()
             .map(|theme_decl| {
                 let theme_data = theme_from_str(theme_decl[1]).expect("Failed to parse theme");
@@ -169,7 +169,10 @@ impl Default for EditorState {
                     data: theme_data,
                 }
             })
+            .chain(util::load_themes().into_iter())
             .collect();
+        themes.sort_unstable_by_key(|a| a.name.clone());
+        themes.dedup_by_key(|a| a.name.clone());
 
         let mut s = Self {
             core: CoreEditorState::default(),

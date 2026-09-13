@@ -1,8 +1,21 @@
 //! Helper functions for accessing XDG desktop directories
 
 use std::env;
+use std::fs::create_dir_all;
 use std::path::PathBuf;
 use std::sync::LazyLock;
+
+pub fn init() {
+    let c = config_home().join("kradiant_editor");
+    let d = data_home().join("kradiant_editor").join("themes");
+
+    if !c.exists() {
+        let _ = create_dir_all(c);
+    }
+    if !d.exists() {
+        let _ = create_dir_all(d);
+    }
+}
 
 pub fn user_home() -> &'static PathBuf {
     static HOME_DIR: LazyLock<PathBuf> = LazyLock::new(|| {

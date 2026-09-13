@@ -41,6 +41,7 @@ mod theme;
 mod util;
 
 fn main() {
+    kradiant::dirs::init();
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -81,16 +82,7 @@ struct AppState {
     tex_amb_loc: glow::UniformLocation,
     tex_sampler_loc: glow::UniformLocation,
     vbo: glow::Buffer,
-    //ebo: glow::Buffer,
     vao: glow::NativeVertexArray,
-    /*view2d_line_vertices: Vec<Vec3>,
-    view2d_selected_vertices: Vec<Vec3>,
-    view2d_grid_vertices: Vec<Vec3>,
-    view2d_fbo: glow::Framebuffer,
-    view2d_tex: glow::Texture,
-    view2d_rbo: glow::Renderbuffer, // depth
-    view2d_fbo_size: [u32; 2],
-    view2d_cache: Option<View2dCache>,*/
     vp2d: Viewport2D,
     vp3d: Viewport3D,
     needs_redraw: bool,
