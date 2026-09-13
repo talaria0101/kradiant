@@ -1766,7 +1766,10 @@ pub fn edge_move_plane_updates(
 
     let mut updates: Vec<(usize, [Vec3; 3])> = Vec::new();
     let mut updated_faces: Vec<usize> = Vec::new();
+    // For each face, collect all moved endpoints from all edges that touch it
+    let mut face_moved_endpoints: Vec<(usize, Vec<Vec3>)> = Vec::new();
 
+    // First pass: aggregate all moved endpoints per face
     for &(face_a_idx, face_b_idx) in edge_face_pairs {
         let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
             polys, face_a_idx, face_b_idx,
@@ -1774,46 +1777,61 @@ pub fn edge_move_plane_updates(
             return None;
         };
 
+        let moved_start = edge_start + delta;
+        let moved_end = edge_end + delta;
+
         for face_idx in [face_a_idx, face_b_idx] {
-            if updated_faces.contains(&face_idx) {
-                continue;
+            if let Some(entry) = face_moved_endpoints.iter_mut().find(|(idx, _)| *idx == face_idx) {
+                // Add endpoints if not already present
+                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, moved_start)) {
+                    entry.1.push(moved_start);
+                }
+                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, moved_end)) {
+                    entry.1.push(moved_end);
+                }
+            } else {
+                face_moved_endpoints.push((face_idx, vec![moved_start, moved_end]));
             }
-            let Some(face) = faces.get(face_idx) else {
-                return None;
-            };
-            let verts = &polys.get(face_idx)?.0;
-            // Stationary vertex that anchors the tilted plane: any polygon
-            // vertex that is not an endpoint of the moved edge.
-            let Some(&reference) = verts
-                .iter()
-                .find(|&&v| {
-                    !crate::core_util::same_point(v, edge_start)
-                        && !crate::core_util::same_point(v, edge_end)
-                })
-            else {
-                return None;
-            };
-
-            let old_normal = face_plane_normal(face);
-            if old_normal.length_squared() < 1.0e-12 {
-                return None;
-            }
-
-            let (mut p0, mut p1) = (edge_start + delta, edge_end + delta);
-            let new_normal = (p1 - p0).cross(reference - p0);
-            if new_normal.length_squared() < 1.0e-12 {
-                // The reference is collinear with the moved edge: the plane
-                // is not defined by these three points.
-                return None;
-            }
-            // Keep the plane orientation (CoD convention: inward normals).
-            if old_normal.dot(new_normal) < 0.0 {
-                std::mem::swap(&mut p0, &mut p1);
-            }
-
-            updates.push((face_idx, [p0, p1, reference]));
-            updated_faces.push(face_idx);
         }
+    }
+
+    // Second pass: fit each face plane using all its moved endpoints
+    for (face_idx, moved_endpoints) in &face_moved_endpoints {
+        if updated_faces.contains(face_idx) {
+            continue;
+        }
+        let Some(face) = faces.get(*face_idx) else {
+            return None;
+        };
+        let verts = &polys.get(*face_idx)?.0;
+        // Stationary vertex: exclude ALL moved endpoints, not just one edge's
+        let Some(&reference) = verts
+            .iter()
+            .find(|&&v| {
+                !moved_endpoints.iter().any(|ep| crate::core_util::same_point(v, *ep))
+            })
+        else {
+            return None;
+        };
+
+        let old_normal = face_plane_normal(face);
+        if old_normal.length_squared() < 1.0e-12 {
+            return None;
+        }
+
+        // Use the first two moved endpoints to define the new edge
+        // (all endpoints should be collinear after projection for a valid move)
+        let (mut p0, mut p1) = (moved_endpoints[0], moved_endpoints[1]);
+        let new_normal = (p1 - p0).cross(reference - p0);
+        if new_normal.length_squared() < 1.0e-12 {
+            return None;
+        }
+        if old_normal.dot(new_normal) < 0.0 {
+            std::mem::swap(&mut p0, &mut p1);
+        }
+
+        updates.push((*face_idx, [p0, p1, reference]));
+        updated_faces.push(*face_idx);
     }
 
     if updates.is_empty() {

@@ -108,6 +108,9 @@ pub struct Viewport3D {
     cache: Option<View3dCache>,
     last_selection_hash: u64,
     last_preview_hash: u64,
+    /// Cache for edge_move_clamp_factor: keyed by move_offset
+    last_edge_clamp_offset: Vec3,
+    last_edge_clamp_factor: f32,
 }
 
 impl Viewport3D {
@@ -140,6 +143,8 @@ impl Viewport3D {
             cache,
             last_selection_hash: 0,
             last_preview_hash: 0,
+            last_edge_clamp_offset: Vec3::ZERO,
+            last_edge_clamp_factor: 1.0,
         }
     }
     pub fn render(&mut self, backend: &mut RenderBackend<'_>, editor: &mut EditorState) {
@@ -1150,11 +1155,18 @@ impl Viewport3D {
                     Vec3::ZERO
                 };
                 let clamp_factor = if raw_delta != Vec3::ZERO && !editor.selected_edges.is_empty() {
-                    editor
-                        .map
-                        .as_ref()
-                        .map(|m| editing::edge_move_clamp_factor(m, &editor.selected_edges, raw_delta))
-                        .unwrap_or(0.0)
+                    if raw_delta == self.last_edge_clamp_offset {
+                        self.last_edge_clamp_factor
+                    } else {
+                        let factor = editor
+                            .map
+                            .as_ref()
+                            .map(|m| editing::edge_move_clamp_factor(m, &editor.selected_edges, raw_delta))
+                            .unwrap_or(0.0);
+                        self.last_edge_clamp_offset = raw_delta;
+                        self.last_edge_clamp_factor = factor;
+                        factor
+                    }
                 } else {
                     1.0
                 };
