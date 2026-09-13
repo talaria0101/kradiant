@@ -1292,6 +1292,33 @@ impl View3D {
                 }
 
                 if ui.is_window_hovered() {
+                    if ui.is_key_pressed(dear_imgui_rs::Key::Backspace) {
+                        if edit_faces && !selected_faces.is_empty() {
+                            // Face deletion with joining (README TODO).
+                            view2d::delete_selected_faces_joined(
+                                map,
+                                selected_brushes,
+                                selected_faces,
+                                selected_edges,
+                                selected_patch_vertices,
+                                selected_entities,
+                                undo,
+                                console,
+                            );
+                        } else if edit_vertices && !selected_patch_vertices.is_empty() {
+                            // Patch vertex deletion with welding (README TODO).
+                            view2d::weld_selected_patch_vertices(
+                                map,
+                                selected_brushes,
+                                selected_faces,
+                                selected_edges,
+                                selected_patch_vertices,
+                                selected_entities,
+                                undo,
+                                console,
+                            );
+                        }
+                    }
                     if ui.is_key_pressed(dear_imgui_rs::Key::Escape) {
                         if self.drag_start.is_some() {
                             self.drag_start = None;

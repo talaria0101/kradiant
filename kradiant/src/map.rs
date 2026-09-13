@@ -13,7 +13,7 @@ use crate::texmap::{
 };
 use crate::xmodel::XModel;
 use crate::{IVec2, Vec2, Vec3, core_util};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Strongly‑typed entity identifiers (prevents mixing entity and brush indices).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -560,6 +560,106 @@ impl Patch {
             }
         }
     }
+
+    /// Delete the given grid vertices and weld the grid closed by removing
+    /// every row and column the selection covers completely.
+    ///
+    /// A patch grid must stay rectangular, so the selection has to
+    /// decompose into complete rows and/or complete columns — every
+    /// selected vertex must lie in a fully selected row or a fully selected
+    /// column. Anything else cannot be represented as a patch and is
+    /// rejected. Removing every row or every column would delete the whole
+    /// patch and is rejected too; curve patches (`patchDef5`) additionally
+    /// need odd row/column counts to stay tessellatable.
+    pub fn weld_out_vertices(
+        &mut self,
+        selected: &[(usize, usize)],
+    ) -> Result<PatchWeldResult, String> {
+        let row_count = self.vertices.len();
+        if row_count == 0 {
+            return Err("patch has no vertices".to_string());
+        }
+        let col_count = self.vertices[0].len();
+        if self.vertices.iter().any(|r| r.len() != col_count) {
+            return Err("patch grid is ragged; cannot weld".to_string());
+        }
+
+        let mut sel: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for &(r, c) in selected {
+            if r >= row_count || c >= col_count {
+                return Err(format!(
+                    "vertex ({r},{c}) is outside the {}x{} patch grid",
+                    row_count, col_count
+                ));
+            }
+            sel.insert((r, c));
+        }
+        if sel.is_empty() {
+            return Err("no patch vertices selected".to_string());
+        }
+
+        let full_rows: Vec<usize> = (0..row_count)
+            .filter(|&r| (0..col_count).all(|c| sel.contains(&(r, c))))
+            .collect();
+        let full_cols: Vec<usize> = (0..col_count)
+            .filter(|&c| (0..row_count).all(|r| sel.contains(&(r, c))))
+            .collect();
+
+        for &(r, c) in &sel {
+            if !full_rows.contains(&r) && !full_cols.contains(&c) {
+                return Err(format!(
+                    "vertex ({r},{c}) is not part of a fully selected row or column; \
+                     a patch grid can only weld complete rows/columns"
+                ));
+            }
+        }
+
+        let new_rows = row_count - full_rows.len();
+        let new_cols = col_count - full_cols.len();
+        if new_rows == 0 || new_cols == 0 {
+            return Err("cannot delete the whole patch; delete the brush instead".to_string());
+        }
+        if new_rows < 2 || new_cols < 2 {
+            return Err(format!(
+                "welding would leave a {new_rows}x{new_cols} grid; at least 2x2 is required"
+            ));
+        }
+        if self.patch_type == PatchType::Curve && ((new_rows - 1) % 2 != 0 || (new_cols - 1) % 2 != 0)
+        {
+            return Err(format!(
+                "curve patches need odd row and column counts; welding would leave {new_rows}x{new_cols}"
+            ));
+        }
+
+        for &r in full_rows.iter().rev() {
+            self.vertices.remove(r);
+        }
+        for row in &mut self.vertices {
+            for &c in full_cols.iter().rev() {
+                row.remove(c);
+            }
+        }
+
+        self.params.rows = self.vertices.len() as u32;
+        self.params.cols = self.vertices.first().map(|r| r.len()).unwrap_or(0) as u32;
+        self.cached_mesh = None;
+        self.cached_aabb = None;
+        self.cached_wire_edges = None;
+
+        Ok(PatchWeldResult {
+            removed_rows: full_rows.len(),
+            removed_cols: full_cols.len(),
+            removed_vertices: sel.len(),
+        })
+    }
+}
+
+/// Outcome of a successful patch vertex weld.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatchWeldResult {
+    pub removed_rows: usize,
+    pub removed_cols: usize,
+    pub removed_vertices: usize,
 }
 
 /// Entity (worldspawn or any other brush collection with key/value properties).
@@ -616,6 +716,197 @@ mod tests {
     use super::*;
     use crate::editing::default_texture_params;
     use crate::texmap::FaceUvMapper;
+
+    fn grid_patch(rows: usize, cols: usize, patch_type: PatchType) -> Patch {
+        let vertices = (0..rows)
+            .map(|r| {
+                (0..cols)
+                    .map(|c| PatchVertex {
+                        position: Vec3::new(
+                            c as f32 * 64.0,
+                            r as f32 * 64.0,
+                            ((r + c) % 2) as f32 * 8.0,
+                        ),
+                        uv: Vec2::new(c as f32, r as f32),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        Patch::new(
+            patch_type,
+            "common/caulk".into(),
+            PatchParams {
+                rows: rows as u32,
+                cols: cols as u32,
+                ..Default::default()
+            },
+            vertices,
+        )
+    }
+
+    fn full_row(row: usize, cols: usize) -> Vec<(usize, usize)> {
+        (0..cols).map(|c| (row, c)).collect()
+    }
+
+    fn full_col(col: usize, rows: usize) -> Vec<(usize, usize)> {
+        (0..rows).map(|r| (r, col)).collect()
+    }
+
+    #[test]
+    fn weld_removes_full_row_and_updates_params() {
+        let mut patch = grid_patch(4, 4, PatchType::Terrain);
+        let before = patch.vertices.clone();
+
+        let result = patch.weld_out_vertices(&full_row(1, 4)).unwrap();
+        assert_eq!(result.removed_rows, 1);
+        assert_eq!(result.removed_cols, 0);
+        assert_eq!(result.removed_vertices, 4);
+
+        assert_eq!(patch.vertices.len(), 3);
+        assert!(patch.vertices.iter().all(|r| r.len() == 4));
+        assert_eq!(patch.params.rows, 3);
+        assert_eq!(patch.params.cols, 4);
+        // Row 0 untouched, old row 2 became row 1.
+        assert_eq!(patch.vertices[0][2].position, before[0][2].position);
+        assert_eq!(patch.vertices[1][2].position, before[2][2].position);
+        assert_eq!(patch.vertices[2][3].position, before[3][3].position);
+    }
+
+    #[test]
+    fn weld_removes_full_column() {
+        let mut patch = grid_patch(4, 4, PatchType::Terrain);
+        let before = patch.vertices.clone();
+
+        let result = patch.weld_out_vertices(&full_col(2, 4)).unwrap();
+        assert_eq!(result.removed_cols, 1);
+        assert_eq!(result.removed_rows, 0);
+
+        assert_eq!(patch.vertices.len(), 4);
+        assert!(patch.vertices.iter().all(|r| r.len() == 3));
+        assert_eq!(patch.params.rows, 4);
+        assert_eq!(patch.params.cols, 3);
+        assert_eq!(patch.vertices[1][1].position, before[1][1].position);
+        assert_eq!(patch.vertices[1][2].position, before[1][3].position);
+    }
+
+    #[test]
+    fn weld_removes_full_row_and_full_column_together() {
+        let mut patch = grid_patch(4, 4, PatchType::Terrain);
+        let mut sel = full_row(0, 4);
+        sel.extend(full_col(0, 4));
+
+        let result = patch.weld_out_vertices(&sel).unwrap();
+        assert_eq!(result.removed_rows, 1);
+        assert_eq!(result.removed_cols, 1);
+        assert_eq!(result.removed_vertices, 7); // 4 + 4 - 1 shared corner
+
+        assert_eq!(patch.vertices.len(), 3);
+        assert!(patch.vertices.iter().all(|r| r.len() == 3));
+        // The welded grid starts at the old (1,1) vertex.
+        assert_eq!(patch.vertices[0][0].position, Vec3::new(64.0, 64.0, 0.0));
+    }
+
+    #[test]
+    fn weld_rejects_selections_that_do_not_form_rows_or_columns() {
+        let mut patch = grid_patch(4, 4, PatchType::Terrain);
+        let before: Vec<Vec<Vec3>> = patch
+            .vertices
+            .iter()
+            .map(|r| r.iter().map(|v| v.position).collect())
+            .collect();
+        let before_params = patch.params;
+
+        // Single interior vertex.
+        assert!(patch.weld_out_vertices(&[(1, 1)]).is_err());
+        // Partial run of a row.
+        assert!(patch.weld_out_vertices(&[(0, 0), (0, 1)]).is_err());
+        // 2x2 corner block.
+        assert!(patch
+            .weld_out_vertices(&[(0, 0), (0, 1), (1, 0), (1, 1)])
+            .is_err());
+
+        // Nothing changed.
+        let after: Vec<Vec<Vec3>> = patch
+            .vertices
+            .iter()
+            .map(|r| r.iter().map(|v| v.position).collect())
+            .collect();
+        assert_eq!(after, before);
+        assert_eq!(patch.params.rows, before_params.rows);
+        assert_eq!(patch.params.cols, before_params.cols);
+    }
+
+    #[test]
+    fn weld_rejects_removing_the_whole_patch_and_bad_input() {
+        let mut patch = grid_patch(4, 4, PatchType::Terrain);
+        let all: Vec<(usize, usize)> = (0..4)
+            .flat_map(|r| (0..4).map(move |c| (r, c)))
+            .collect();
+        assert!(patch.weld_out_vertices(&all).is_err());
+        assert!(patch.weld_out_vertices(&[]).is_err());
+        assert!(patch.weld_out_vertices(&[(4, 0)]).is_err());
+        assert!(patch.weld_out_vertices(&[(0, 4)]).is_err());
+        // Grid still intact.
+        assert_eq!(patch.vertices.len(), 4);
+    }
+
+    #[test]
+    fn weld_curve_patch_requires_odd_dimensions() {
+        // 5x5 curve: removing one row leaves 4 (even) -> rejected.
+        let mut curve = grid_patch(5, 5, PatchType::Curve);
+        assert!(curve.weld_out_vertices(&full_row(0, 5)).is_err());
+        // Removing two rows leaves 3 (odd) -> fine.
+        let mut sel = full_row(0, 5);
+        sel.extend(full_row(1, 5));
+        assert!(curve.weld_out_vertices(&sel).is_ok());
+        assert_eq!(curve.vertices.len(), 3);
+        assert_eq!(curve.params.rows, 3);
+
+        // Terrain patches only need >= 2x2.
+        let mut terrain = grid_patch(4, 4, PatchType::Terrain);
+        assert!(terrain.weld_out_vertices(&full_row(0, 4)).is_ok());
+        assert_eq!(terrain.vertices.len(), 3);
+    }
+
+    #[test]
+    fn weld_invalidates_the_tessellation_cache() {
+        let mut patch = grid_patch(4, 4, PatchType::Terrain);
+        let before = patch.get_mesh().unwrap().positions.len();
+        assert_eq!(before, 16);
+
+        assert!(patch.weld_out_vertices(&full_row(1, 4)).is_ok());
+
+        let after = patch.get_mesh().unwrap().positions.len();
+        assert_eq!(after, 12);
+    }
+
+    #[test]
+    fn welded_patch_round_trips_through_map_string() {
+        let mut patch = grid_patch(4, 4, PatchType::Terrain);
+        assert!(patch.weld_out_vertices(&full_row(1, 4)).is_ok());
+
+        let map_source = String::new()
+            + "{\n\"classname\" \"worldspawn\"\n{\n"
+            + &patch.to_map_string()
+            + "}\n}";
+        let map = crate::parser::parse_map_string(&map_source).unwrap();
+        assert_eq!(map.entities[0].brushes.len(), 1);
+        match &map.entities[0].brushes[0].content {
+            BrushContent::Patch(parsed) => {
+                assert_eq!(parsed.params.rows, 3);
+                assert_eq!(parsed.params.cols, 4);
+                assert_eq!(parsed.vertices.len(), 3);
+                assert!(parsed.vertices.iter().all(|r| r.len() == 4));
+                assert_eq!(
+                    parsed.vertices[0][0].position,
+                    patch.vertices[0][0].position
+                );
+            }
+            _ => panic!("expected patch brush"),
+        }
+    }
 
     #[test]
     fn fit_texture_maps_min_to_zero() {
