@@ -567,6 +567,12 @@ impl Viewport2D {
                                 if brush.is_clip() && !editor.config.view.show.clip_brushes {
                                     continue;
                                 }
+                                if brush.is_portal() && !editor.config.view.show.portal_brushes {
+                                    continue;
+                                }
+                                if brush.is_hint() && !editor.config.view.show.hint_brushes {
+                                    continue;
+                                }
                                 match &mut brush.content {
                                     BrushContent::Convex(_) => {
                                         if !editor.config.view.show.convex {
@@ -638,7 +644,7 @@ impl Viewport2D {
                                         }
                                     }
                                     BrushContent::Patch(patch) => {
-                                        if !editor.config.view.show.convex {
+                                        if !editor.config.view.show.patches {
                                             continue;
                                         }
                                         let Some((mesh, patch_aabb, edges)) =

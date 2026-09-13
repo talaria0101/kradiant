@@ -37,6 +37,7 @@ pub struct View2D {
     /// Patch vertices touched during current selection drag
     pub selection_drag_touched_verts: Option<HashSet<usize>>, // stores hashed selection
     pub selection_drag_touched_entities: Option<HashSet<usize>>,
+    last_rclick: Vec2,
 }
 
 impl Default for View2D {
@@ -53,6 +54,7 @@ impl Default for View2D {
             selection_drag_touched_edges: None,
             selection_drag_touched_verts: None,
             selection_drag_touched_entities: None,
+            last_rclick: Vec2::ZERO,
         }
     }
 }
@@ -280,7 +282,9 @@ impl View2D {
                         self.pan[1] += dy;
                         ui.reset_mouse_drag_delta(MouseButton::Right);
                     }
-                    if ui.is_mouse_clicked(MouseButton::Right) {}
+                    if ui.is_mouse_clicked(MouseButton::Right) {
+                        self.last_rclick = Vec2::from_array(ui.io().mouse_pos());
+                    }
                 }
 
                 let mouse = ui.io().mouse_pos();
@@ -312,6 +316,12 @@ impl View2D {
                 }
                 if config.view.show.clip_brushes {
                     mask.add(PickMask::CLIP);
+                }
+                if config.view.show.portal_brushes {
+                    mask.add(PickMask::PORTAL);
+                }
+                if config.view.show.hint_brushes {
+                    mask.add(PickMask::HINT);
                 }
 
                 // Shift+LMouse for selection
@@ -1529,9 +1539,15 @@ impl View2D {
                     }
                 }
 
-                if canvas_interacting && ui.is_mouse_double_clicked(MouseButton::Right) && !ui.is_popup_open("2d_view_menu") {
-                    let [dx, dy] = ui.mouse_drag_delta(MouseButton::Right);
-                    if dx.abs() < 2.0 && dy.abs() < 2.0 {
+                if canvas_interacting && ui.is_mouse_released(MouseButton::Right) && !ui.is_popup_open("2d_view_menu") {
+                    // let [dx, dy] = ui.mouse_drag_delta(MouseButton::Right);
+                    let mouse = Vec2::from_array(ui.mouse_pos());
+                    let d = if self.last_rclick == Vec2::ZERO {
+                        Vec2::ZERO
+                    } else {
+                        (mouse - self.last_rclick).abs()
+                    };
+                    if d.x < 2.0 && d.y < 2.0 {
                         self.menu_loc = snapped;
                         ui.open_popup("2d_view_menu");
                     }
