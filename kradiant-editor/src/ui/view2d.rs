@@ -764,7 +764,7 @@ impl View2D {
 
                                         self.move_offset = Vec3::ZERO;
                                     }
-                                    DragMode::MoveSelection => {
+                                    DragMode::MoveSelection | DragMode::MoveEdges => {
                                         let d = end - start;
                                         if d != Vec2::ZERO {
                                             let delta = util::drag_delta_to_3d(d, self.ortho_axis, axis_lock);
@@ -806,7 +806,7 @@ impl View2D {
                                                     }
                                                 } else if edit_edges {
                                                     let any = can_apply
-                                                        && translate_selected_edges(map, selected_edges, delta);
+                                                        && editing::translate_selected_edges(map, selected_edges, delta);
                                                     if any {
                                                         log_info!(console, "Moved selected edges");
                                                     }
@@ -1726,7 +1726,7 @@ impl View2D {
                         };
 
                         match self.drag_mode {
-                                DragMode::MoveSelection | DragMode::MoveVertices => {
+                                DragMode::MoveSelection | DragMode::MoveVertices | DragMode::MoveEdges => {
                                     let (a, b) = if let Some(sel) =
                                         selection_aabb_active(map, selected_brushes, selected_faces, selected_edges, selected_entities, edit_faces, edit_edges, ent_draw_config)
                                     {
@@ -2160,7 +2160,7 @@ fn normalize_edge_selection(
     }
 }
 
-fn convex_edges_for_brush(
+pub(crate) fn convex_edges_for_brush(
     entity_idx: usize,
     brush_idx: usize,
     polys: &[(Vec<Vec3>, Vec<u32>)],
@@ -3118,65 +3118,6 @@ fn translate_selected_faces(
         }
 
         if changed {
-            map.generation = map.generation.wrapping_add(1);
-            any = true;
-        }
-    }
-
-    any
-}
-
-fn translate_selected_edges(
-    map: &mut kradiant::map::Map,
-    selected_edges: &[EdgeSelection],
-    delta: Vec3,
-) -> bool {
-    if selected_edges.is_empty() || delta == Vec3::ZERO {
-        return false;
-    }
-
-    use std::collections::BTreeMap;
-    let mut by_brush: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
-    for sel in selected_edges {
-        by_brush
-            .entry((sel.entity_idx, sel.brush_idx))
-            .or_default()
-            .extend([sel.face_a_idx, sel.face_b_idx]);
-    }
-
-    let mut any = false;
-    for ((entity_idx, brush_idx), mut face_indices) in by_brush {
-        face_indices.sort_unstable();
-        face_indices.dedup();
-
-        let Some(entity) = map.entities.get_mut(entity_idx) else {
-            continue;
-        };
-        let Some(brush) = entity.brushes.get_mut(brush_idx) else {
-            continue;
-        };
-        let BrushContent::Convex(faces) = &brush.content else {
-            continue;
-        };
-        let old_planes: Vec<[Vec3; 3]> = faces.iter().map(|f| f.plane_points).collect();
-
-        let mut tmp = brush.clone();
-        let mut dummy_gen = 0u64;
-        let mut brush_changed = false;
-        for face_idx in face_indices {
-            let Some(plane) = old_planes.get(face_idx).copied() else {
-                continue;
-            };
-            tmp.update_brush_plane(
-                &mut dummy_gen,
-                face_idx,
-                [plane[0] + delta, plane[1] + delta, plane[2] + delta],
-            );
-            brush_changed = true;
-        }
-
-        if brush_changed && tmp.get_polygons_and_aabb().is_some() {
-            *brush = tmp;
             map.generation = map.generation.wrapping_add(1);
             any = true;
         }

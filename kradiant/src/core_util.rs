@@ -332,7 +332,7 @@ pub fn resolved_arrow_length(style: &crate::editor::config::EntityDrawStyle, fal
 pub(crate) fn preview_point(dmode: DragMode, offset: Vec3, stretch_mode: Option<StretchMode>, stretch: Option<AffineScale>, rotate: Option<AffineRotate>, p: Vec3) -> Vec3
 {
     match dmode {
-        DragMode::MoveSelection | DragMode::MoveVertices => p + offset,
+        DragMode::MoveSelection | DragMode::MoveVertices | DragMode::MoveEdges => p + offset,
         DragMode::StretchSelection if stretch_mode.is_some() => {
             let stretch_mode = stretch_mode.unwrap();
             if stretch_mode == StretchMode::Scale {

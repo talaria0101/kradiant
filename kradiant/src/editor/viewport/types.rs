@@ -30,6 +30,9 @@ pub enum DragMode {
     NewBrush,
     MoveSelection,
     MoveVertices,
+    /// Edge edit mode: dragging moves the selected edges (Blender-style
+    /// edge drag), tilting the adjacent face planes.
+    MoveEdges,
     StretchSelection,
     RotateSelection,
     RectangularSelection,

@@ -1270,6 +1270,12 @@ pub fn pick_brush_by_ray(
                     if brush.is_clip() && !mask.contains(PickMask::CLIP) {
                         continue;
                     }
+                    if brush.is_portal() && !mask.contains(PickMask::PORTAL) {
+                        continue;
+                    }
+                    if brush.is_hint() && !mask.contains(PickMask::HINT) {
+                        continue;
+                    }
 
                     let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
                         continue;
@@ -1709,9 +1715,277 @@ pub fn pick_brush_or_ent_by_ray(
     }
 }
 
-/// Translate selected edges by moving their vertices.
-/// This moves the actual edge vertices, not the faces that define them.
-pub fn translate_selected_edges_by_vertices(
+/// Normalized (face_a < face_b) face pair for an edge selection.
+fn normalized_edge_pair(sel: &EdgeSelection) -> (usize, usize) {
+    (
+        sel.face_a_idx.min(sel.face_b_idx),
+        sel.face_a_idx.max(sel.face_b_idx),
+    )
+}
+
+/// Group edge selections per brush: (entity, brush) -> deduped normalized
+/// face pairs.
+fn group_edges_by_brush(
+    selected_edges: &[EdgeSelection],
+) -> std::collections::BTreeMap<(usize, usize), Vec<(usize, usize)>> {
+    let mut grouped: std::collections::BTreeMap<(usize, usize), Vec<(usize, usize)>> =
+        std::collections::BTreeMap::new();
+    for sel in selected_edges {
+        let pair = normalized_edge_pair(sel);
+        let pairs = grouped
+            .entry((sel.entity_idx, sel.brush_idx))
+            .or_default();
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
+    grouped
+}
+
+/// Compute the plane updates needed to move the edges shared by the given
+/// face pairs (indices into `polys`/`faces`, which correspond 1:1) by
+/// `delta` — Blender-style edge dragging for plane-defined convex brushes.
+///
+/// Every OTHER face of the brush keeps its plane; the two faces adjacent to
+/// a moved edge are re-fit through the moved edge plus one of their
+/// stationary polygon vertices, so their planes tilt to follow the edge
+/// while the rest of the geometry stays glued in place.
+///
+/// Returns `(face index, new plane points)` per updated face, or `None` when
+/// any touched face cannot be re-fit (degenerate/collinear result) — the
+/// caller must then refuse the whole move.
+pub fn edge_move_plane_updates(
+    faces: &[Face],
+    polys: &[(Vec<Vec3>, Vec<u32>)],
+    edge_face_pairs: &[(usize, usize)],
+    delta: Vec3,
+) -> Option<Vec<(usize, [Vec3; 3])>> {
+    if delta == Vec3::ZERO || edge_face_pairs.is_empty() {
+        return None;
+    }
+
+    // Pre-compute all UN-shifted edge endpoints per face.  When multiple
+    // selected edges touch the same face, the reference vertex must avoid
+    // every endpoint that will be translated—not just the current edge's—so
+    // the anchor is truly stationary across every moved edge.
+    let mut edge_endpoints_per_face: Vec<(usize, Vec<Vec3>)> = Vec::new();
+    for &(face_a_idx, face_b_idx) in edge_face_pairs {
+        let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
+            polys, face_a_idx, face_b_idx,
+        ) else {
+            return None;
+        };
+        for face_idx in [face_a_idx, face_b_idx] {
+            if let Some(entry) = edge_endpoints_per_face.iter_mut().find(|(i, _)| *i == face_idx) {
+                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, edge_start)) {
+                    entry.1.push(edge_start);
+                }
+                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, edge_end)) {
+                    entry.1.push(edge_end);
+                }
+            } else {
+                edge_endpoints_per_face.push((face_idx, vec![edge_start, edge_end]));
+            }
+        }
+    }
+
+    let mut updates: Vec<(usize, [Vec3; 3])> = Vec::new();
+    let mut updated_faces: Vec<usize> = Vec::new();
+
+    for &(face_a_idx, face_b_idx) in edge_face_pairs {
+        let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
+            polys, face_a_idx, face_b_idx,
+        ) else {
+            return None;
+        };
+
+        for face_idx in [face_a_idx, face_b_idx] {
+            if updated_faces.contains(&face_idx) {
+                continue;
+            }
+            let Some(face) = faces.get(face_idx) else {
+                return None;
+            };
+            let verts = &polys.get(face_idx)?.0;
+
+            let face_endpoints = edge_endpoints_per_face
+                .iter()
+                .find(|(i, _)| *i == face_idx)
+                .map(|(_, v)| v.as_slice())
+                .unwrap_or(&[]);
+
+            let Some(&reference) = verts
+                .iter()
+                .find(|&&v| {
+                    !face_endpoints.iter().any(|ep| crate::core_util::same_point(v, *ep))
+                })
+            else {
+                return None;
+            };
+
+            let old_normal = face_plane_normal(face);
+            if old_normal.length_squared() < 1.0e-12 {
+                return None;
+            }
+
+            let (mut p0, mut p1) = (edge_start + delta, edge_end + delta);
+            let new_normal = (p1 - p0).cross(reference - p0);
+            if new_normal.length_squared() < 1.0e-12 {
+                return None;
+            }
+            if old_normal.dot(new_normal) < 0.0 {
+                std::mem::swap(&mut p0, &mut p1);
+            }
+
+            // Coplanarity: every other moved endpoint on this face must land
+            // on the plane we just fitted through (p0, p1, reference).  When
+            // two selected edges share a face, the second edge's translated
+            // endpoints may fall off the plane – the move is degenerate.
+            let plane_n = (p1 - p0).cross(reference - p0);
+            let plane_d = plane_n.dot(p0);
+            let plane_len = plane_n.length();
+            for &ep in face_endpoints {
+                let shifted = ep + delta;
+                let dist = (plane_n.dot(shifted) - plane_d).abs() / plane_len;
+                // Reject if the endpoint is off the plane by more than a tiny
+                // fraction of the delta magnitude.  Using an absolute floor
+                // catches degenerate near-zero deltas too.
+                let tol = delta.length().max(1.0) * 1.0e-6;
+                if dist > tol {
+                    return None;
+                }
+            }
+
+            updates.push((face_idx, [p0, p1, reference]));
+            updated_faces.push(face_idx);
+        }
+    }
+
+    if updates.is_empty() {
+        None
+    } else {
+        Some(updates)
+    }
+}
+
+/// Recompute the brush polygons as they would look after moving the given
+/// edges (face pairs within this brush) by `delta`, without mutating the
+/// brush. Returns `None` when the move would degenerate the brush (faces
+/// clipped away, fewer than 4 vertices, no extent on some axis) so callers
+/// can refuse the drag.
+pub fn preview_edge_moved_polys(
+    brush: &Brush,
+    edge_face_pairs: &[(usize, usize)],
+    delta: Vec3,
+) -> Option<Vec<(Vec<Vec3>, Vec<u32>)>> {
+    let faces = match &brush.content {
+        BrushContent::Convex(faces) => faces,
+        BrushContent::Patch(_) => return None,
+    };
+
+    let polys = crate::geometry::brush_to_polygons(brush).ok()?;
+    let updates = edge_move_plane_updates(faces, &polys, edge_face_pairs, delta)?;
+
+    let mut probe = brush.clone();
+    if let BrushContent::Convex(probe_faces) = &mut probe.content {
+        for (face_idx, plane_points) in updates {
+            probe_faces[face_idx].plane_points = plane_points;
+        }
+    }
+    probe.invalidate_geometry();
+
+    if !is_convex_brush_valid(&probe) {
+        return None;
+    }
+    let new_polys = crate::geometry::brush_to_polygons(&probe).ok()?;
+    // Every plane of a valid convex brush still contributes a face.
+    if new_polys.len() != faces.len() || new_polys.iter().any(|(w, _)| w.len() < 3) {
+        return None;
+    }
+    Some(new_polys)
+}
+
+/// Largest fraction `s` (0..=1) of `delta` with which every affected brush
+/// can be edge-moved while staying valid AND non-explosive: no resulting
+/// vertex may escape the brush's original AABB dilated by the move distance
+/// plus a small margin. Without this, dragging an edge until an adjacent
+/// face tilts through near-parallelism with another plane shoots the brush
+/// vertices off towards infinity.
+///
+/// Uses bisection, assuming validity degrades monotonically along the drag
+/// (true for the practical degeneration modes).
+pub fn edge_move_clamp_factor(
+    map: &Map,
+    selected_edges: &[EdgeSelection],
+    delta: Vec3,
+) -> f32 {
+    if selected_edges.is_empty() || delta == Vec3::ZERO {
+        return 1.0;
+    }
+
+    fn brush_can_move(brush: &Brush, pairs: &[(usize, usize)], delta: Vec3) -> bool {
+        if delta == Vec3::ZERO {
+            return true;
+        }
+        let Some(polys) = preview_edge_moved_polys(brush, pairs, delta) else {
+            return false;
+        };
+        // Explosion guard: moving an edge by `delta` may never push geometry
+        // further than `|delta|` (+ margin) outside the original AABB.
+        let min = brush.aabb.min - delta.abs() - Vec3::splat(1.0);
+        let max = brush.aabb.max + delta.abs() + Vec3::splat(1.0);
+        polys.iter().all(|(verts, _)| {
+            verts.iter().all(|v| {
+                v.x >= min.x
+                    && v.y >= min.y
+                    && v.z >= min.z
+                    && v.x <= max.x
+                    && v.y <= max.y
+                    && v.z <= max.z
+            })
+        })
+    }
+
+    let grouped = group_edges_by_brush(selected_edges);
+    let mut factor = 1.0f32;
+    for ((entity_idx, brush_idx), pairs) in &grouped {
+        let Some(entity) = map.entities.get(*entity_idx) else {
+            return 0.0;
+        };
+        let Some(brush) = entity.brushes.get(*brush_idx) else {
+            return 0.0;
+        };
+        if !brush_can_move(brush, pairs, delta) {
+            // Bisect the largest valid fraction in [0, 1).
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            for _ in 0..12 {
+                let mid = (lo + hi) * 0.5;
+                if brush_can_move(brush, pairs, delta * mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            factor = factor.min(lo);
+            if factor <= 1.0e-4 {
+                return 0.0;
+            }
+        }
+    }
+    factor
+}
+
+/// Move the selected edges (Blender-style edge drag) by `delta`.
+///
+/// Only the faces adjacent to a moved edge change: their planes are re-fit
+/// through the moved edge and one stationary vertex, tilting to follow the
+/// edge. All other faces keep their exact planes. The whole move is atomic —
+/// if any affected brush cannot move at all without degenerating, nothing is
+/// modified and `false` is returned. Otherwise the move is clamped to the
+/// largest fraction of `delta` every affected brush tolerates (see
+/// [`edge_move_clamp_factor`]), so a drag can squash a brush but never
+/// stretch it out towards infinity.
+pub fn translate_selected_edges(
     map: &mut Map,
     selected_edges: &[EdgeSelection],
     delta: Vec3,
@@ -1720,84 +1994,52 @@ pub fn translate_selected_edges_by_vertices(
         return false;
     }
 
-    // Collect all vertices that need to be moved using a simple list approach
-    let mut vertex_moves: Vec<((usize, usize), Vec3, Vec3)> = Vec::new();
-
-    // Collect all vertices that need to be moved
-    for sel in selected_edges {
-        let entity_idx = sel.entity_idx;
-        let brush_idx = sel.brush_idx;
-
-        let Some(entity) = map.entities.get(entity_idx) else {
-            continue;
-        };
-        let Some(brush) = entity.brushes.get(brush_idx) else {
-            continue;
-        };
-        let BrushContent::Convex(_) = &brush.content else {
-            continue;
-        };
-
-        // Clone brush to get mutable reference for get_polygons_and_aabb
-        let mut brush_clone = brush.clone();
-        let Some((_, polys)) = brush_clone.get_polygons_and_aabb() else {
-            continue;
-        };
-
-        if let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
-            polys, sel.face_a_idx, sel.face_b_idx,
-        )
-        {
-            // Both edge vertices need to be moved
-            vertex_moves.push(((entity_idx, brush_idx), edge_start, delta));
-            vertex_moves.push(((entity_idx, brush_idx), edge_end, delta));
-        }
-    }
-
-    if vertex_moves.is_empty() {
+    let factor = edge_move_clamp_factor(map, selected_edges, delta);
+    if factor <= 1.0e-4 {
         return false;
     }
+    let delta = delta * factor;
 
-    // Apply vertex moves to brushes
+    let grouped = group_edges_by_brush(selected_edges);
+
     let mut any = false;
-    for ((entity_idx, brush_idx), edge_vertex, move_delta) in vertex_moves {
+    for ((entity_idx, brush_idx), pairs) in grouped {
         let Some(entity) = map.entities.get_mut(entity_idx) else {
             continue;
         };
         let Some(brush) = entity.brushes.get_mut(brush_idx) else {
             continue;
         };
-        let BrushContent::Convex(faces) = &mut brush.content else {
+
+        // Plane updates come from the PRE-move polygons (the delta is added
+        // internally); the clamp factor already proved this converges, but
+        // apply to a clone so a failure cannot leave the brush half-updated.
+        let updates = {
+            let BrushContent::Convex(faces) = &brush.content else {
+                continue;
+            };
+            let Ok(polys) = crate::geometry::brush_to_polygons(brush) else {
+                continue;
+            };
+            edge_move_plane_updates(faces, &polys, &pairs, delta)
+        };
+        let Some(updates) = updates else {
             continue;
         };
 
-        // Move all vertices in the brush by delta if they match the edge vertex
-        let mut brush_changed = false;
-        for face in faces {
-            for point in &mut face.plane_points {
-                // Check if this point should be moved
-                if (*point - edge_vertex).length_squared() < 0.01 * 0.01 {
-                    *point += move_delta;
-                    brush_changed = true;
-                }
-            }
+        let mut tmp = brush.clone();
+        for (face_idx, plane_points) in updates {
+            tmp.update_brush_plane(&mut 0u64, face_idx, plane_points);
         }
+        // Recompute the AABB (and the polygon cache) from the new geometry.
+        let _ = tmp.get_polygons_and_aabb();
+        *brush = tmp;
 
-        if brush_changed {
-            map.generation = map.generation.wrapping_add(1);
-            any = true;
-        }
+        map.generation = map.generation.wrapping_add(1);
+        any = true;
     }
 
     any
-}
-
-pub fn translate_selected_edges(
-    map: &mut Map,
-    selected_edges: &[EdgeSelection],
-    delta: Vec3,
-) -> bool {
-    translate_selected_edges_by_vertices(map, selected_edges, delta)
 }
 
 /// Find the shared edge points between two faces in a convex brush.
@@ -2561,5 +2803,367 @@ mod tests {
 
         let touching = find_touching_brushes(&mut map, 0, 0, 0.1);
         assert!(touching.is_empty(), "brush should not touch itself");
+    }
+
+    // --- Edge editing (Blender-style edge drag) ---------------------------
+
+    fn cube_map() -> (Map, usize, usize) {
+        let brush = convex_brush_from_aabb(
+            BrushId(0),
+            Aabb::from_points(Vec3::splat(0.0), Vec3::splat(64.0)),
+            "common/caulk",
+        );
+        let mut map = Map::default();
+        map.entities.push(Entity {
+            id: EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: std::collections::HashMap::new(),
+            brushes: vec![brush],
+            model: None,
+        });
+        (map, 0, 0)
+    }
+
+    fn face_idx_with_normal(brush: &Brush, normal: Vec3) -> usize {
+        let BrushContent::Convex(faces) = &brush.content else {
+            panic!("expected convex brush");
+        };
+        faces
+            .iter()
+            .position(|f| {
+                let n = face_plane_normal(f);
+                (n - normal).length_squared() < 1.0e-4
+            })
+            .unwrap_or_else(|| panic!("no face with normal {normal:?}"))
+    }
+
+    fn find_shared_edge(map: &Map, na: Vec3, nb: Vec3) -> (usize, usize, Vec3, Vec3) {
+        let brush = &map.entities[0].brushes[0];
+        let polys = crate::geometry::brush_to_polygons(brush).unwrap();
+        let fa = face_idx_with_normal(brush, na);
+        let fb = face_idx_with_normal(brush, nb);
+        let (a, b) = crate::core_util::shared_edge_points(&polys, fa, fb)
+            .unwrap_or_else(|| panic!("faces {na:?}/{nb:?} share no edge"));
+        (fa, fb, a, b)
+    }
+
+    #[test]
+    fn edge_move_tilts_only_adjacent_faces() {
+        let (mut map, e, b) = cube_map();
+        // Edge between the top face (inward normal -Z) and the +X wall
+        // (inward normal -X).
+        let (fa, fb, a, bpt) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        let sel = EdgeSelection {
+            entity_idx: e,
+            brush_idx: b,
+            face_a_idx: fa,
+            face_b_idx: fb,
+        };
+
+        let brush_before = map.entities[0].brushes[0].clone();
+        let delta = Vec3::new(0.0, 0.0, 8.0);
+        assert!(translate_selected_edges(&mut map, &[sel], delta));
+
+        let brush_after = &map.entities[0].brushes[0];
+        let BrushContent::Convex(faces_after) = &brush_after.content else {
+            panic!("expected convex brush");
+        };
+        let BrushContent::Convex(faces_before) = &brush_before.content else {
+            panic!("expected convex brush");
+        };
+
+        // Untouched faces keep their exact planes.
+        for (i, (before, after)) in faces_before.iter().zip(faces_after.iter()).enumerate() {
+            if i == fa || i == fb {
+                assert_ne!(
+                    before.plane_points, after.plane_points,
+                    "adjacent faces must tilt"
+                );
+            } else {
+                assert_eq!(
+                    before.plane_points, after.plane_points,
+                    "face {i} must keep its plane"
+                );
+            }
+        }
+
+        // The moved edge sits at start+delta / end+delta, and both refit
+        // planes contain it.
+        let polys = crate::geometry::brush_to_polygons(brush_after).unwrap();
+        let (na, nb) = crate::core_util::shared_edge_points(&polys, fa, fb)
+            .expect("edge still shared after move");
+        assert!((na - (a + delta)).length() < 1.0e-3);
+        assert!((nb - (bpt + delta)).length() < 1.0e-3);
+        for &face_idx in &[fa, fb] {
+            let n = face_plane_normal(&faces_after[face_idx]);
+            let d = n.dot(faces_after[face_idx].plane_points[0]);
+            assert!((n.dot(na) - d).abs() < 1.0e-3, "refit plane misses edge");
+            assert!((n.dot(nb) - d).abs() < 1.0e-3, "refit plane misses edge");
+        }
+
+        // Brush stays valid and the rest of the geometry is untouched.
+        assert!(is_convex_brush_valid(brush_after));
+        assert_eq!(brush_after.aabb.max.z, 72.0);
+        assert_eq!(brush_after.aabb.min.z, 0.0);
+        assert_eq!(brush_after.aabb.max.x, 64.0);
+    }
+
+    #[test]
+    fn edge_move_refuses_when_faces_share_no_edge() {
+        let (mut map, e, b) = cube_map();
+        // Top (inward -Z) and bottom (inward +Z) faces share no edge.
+        let fa = face_idx_with_normal(&map.entities[0].brushes[0], Vec3::NEG_Z);
+        let fb = face_idx_with_normal(&map.entities[0].brushes[0], Vec3::Z);
+        let sel = EdgeSelection {
+            entity_idx: e,
+            brush_idx: b,
+            face_a_idx: fa,
+            face_b_idx: fb,
+        };
+
+        let before = map.entities[0].brushes[0].clone();
+        assert!(!translate_selected_edges(&mut map, &[sel], Vec3::new(0.0, 0.0, -8.0)));
+        // Nothing was modified.
+        let mut before = before;
+        before.invalidate_geometry();
+        assert_eq!(
+            before.get_polygons().map(|p| p.to_vec()).unwrap_or_default(),
+            crate::geometry::brush_to_polygons(&map.entities[0].brushes[0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn edge_move_clamps_instead_of_stretching_to_infinity() {
+        let (mut map, e, b) = cube_map();
+        let (fa, fb, a, _bpt) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        let sel = EdgeSelection {
+            entity_idx: e,
+            brush_idx: b,
+            face_a_idx: fa,
+            face_b_idx: fb,
+        };
+        // Drag the edge down 1000 units — far past collapse.
+        let delta = Vec3::new(0.0, 0.0, -1000.0);
+        let factor = edge_move_clamp_factor(&map, &[sel], delta);
+        assert!(factor > 1.0e-4 && factor < 0.1, "factor = {factor}");
+
+        assert!(translate_selected_edges(&mut map, &[sel], delta));
+        let brush = &map.entities[0].brushes[0];
+        assert!(is_convex_brush_valid(brush), "clamped move must stay valid");
+        // The brush got squashed, not stretched towards infinity: the whole
+        // brush is within the original AABB dilated by the FULL drag.
+        assert!(brush.aabb.min.z > -1000.0 - 1.0);
+        assert!((brush.aabb.max.z - 64.0).abs() < 0.01);
+        // The applied move matches the clamped delta (preview parity).
+        let polys = crate::geometry::brush_to_polygons(brush).unwrap();
+        let (na, _nb) = crate::core_util::shared_edge_points(&polys, fa, fb).unwrap();
+        let expected_z = a.z + delta.z * factor;
+        assert!((na.z - expected_z).abs() < 1.0, "moved to {} want {expected_z}", na.z);
+    }
+
+    #[test]
+    fn edge_move_preview_matches_applied_result() {
+        let (mut map, e, b) = cube_map();
+        let (fa, fb, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_Y);
+        let sel = EdgeSelection {
+            entity_idx: e,
+            brush_idx: b,
+            face_a_idx: fa,
+            face_b_idx: fb,
+        };
+        let delta = Vec3::new(16.0, 0.0, 8.0);
+
+        let brush = map.entities[0].brushes[0].clone();
+        let preview = preview_edge_moved_polys(&brush, &[(fa, fb)], delta)
+            .expect("preview should succeed");
+
+        assert!(translate_selected_edges(&mut map, &[sel], delta));
+        let applied = crate::geometry::brush_to_polygons(&map.entities[0].brushes[0]).unwrap();
+        assert_eq!(preview, applied, "preview and apply must agree exactly");
+    }
+
+    #[test]
+    fn edge_move_with_two_selected_edges_sharing_face_rejected() {
+        // Two edges that share a face (NEG_Z) → coplanarity check rejects
+        // because the second edge's translated endpoint falls off the plane
+        // fitted through the first edge's endpoints + reference.
+        let (mut map, e, b) = cube_map();
+        let (fa1, fb1, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        let (fa2, fb2, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_Y);
+        let sels = [
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa1,
+                face_b_idx: fb1,
+            },
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa2,
+                face_b_idx: fb2,
+            },
+        ];
+        let delta = Vec3::new(0.0, 0.0, 4.0);
+        assert!(
+            !translate_selected_edges(&mut map, &sels, delta),
+            "two edges sharing a face must be rejected (coplanarity)"
+        );
+        assert!(is_convex_brush_valid(&map.entities[e].brushes[b]));
+    }
+
+    #[test]
+    fn edge_move_ignores_patch_brushes_and_zero_delta() {
+        let (mut map, e, b) = cube_map();
+        let sel = EdgeSelection {
+            entity_idx: e,
+            brush_idx: b,
+            face_a_idx: 0,
+            face_b_idx: 1,
+        };
+        assert!(!translate_selected_edges(&mut map, &[sel], Vec3::ZERO));
+        assert!(!translate_selected_edges(&mut map, &[], Vec3::ONE));
+    }
+
+    #[test]
+    fn edge_move_two_opposite_edges_sharing_face_rejected() {
+        // Two opposite edges on the bottom face (-Z) cover all 4 vertices.
+        // There is no stationary reference → must fail.
+        let (mut map, e, b) = cube_map();
+        let (fa1, fb1, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        let (fa2, fb2, ..) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::X);
+        let sels = [
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa1,
+                face_b_idx: fb1,
+            },
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa2,
+                face_b_idx: fb2,
+            },
+        ];
+        let delta = Vec3::new(0.0, 0.0, 4.0);
+        assert!(
+            !translate_selected_edges(&mut map, &sels, delta),
+            "moving two opposite edges on one face must fail (no stationary reference)"
+        );
+        assert!(is_convex_brush_valid(&map.entities[e].brushes[b]));
+    }
+
+    #[test]
+    fn edge_move_two_non_sharing_edges_succeeds() {
+        // Two edges that don't share a face with each other: each face has
+        // its own stationary reference and each edge is translated by delta.
+        let (mut map, e, b) = cube_map();
+        // Bottom-left edge (NEG_Z & NEG_X) and top-right edge (+Z & +X).
+        let (fa1, fb1, a1_start, a1_end) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        let (fa2, fb2, a2_start, a2_end) = find_shared_edge(&map, Vec3::X, Vec3::Z);
+        let sels = [
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa1,
+                face_b_idx: fb1,
+            },
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa2,
+                face_b_idx: fb2,
+            },
+        ];
+        let delta = Vec3::new(8.0, 0.0, 0.0);
+        assert!(
+            translate_selected_edges(&mut map, &sels, delta),
+            "moving two non-sharing edges must succeed"
+        );
+        let brush = &map.entities[e].brushes[b];
+        assert!(is_convex_brush_valid(brush));
+        let polys_after = crate::geometry::brush_to_polygons(brush).unwrap();
+        let (na1, nb1) = crate::core_util::shared_edge_points(&polys_after, fa1, fb1).unwrap();
+        let (na2, nb2) = crate::core_util::shared_edge_points(&polys_after, fa2, fb2).unwrap();
+        assert!(
+            (na1 - (a1_start + delta)).length() < 0.01,
+            "edge 1 start not translated"
+        );
+        assert!(
+            (nb1 - (a1_end + delta)).length() < 0.01,
+            "edge 1 end not translated"
+        );
+        assert!(
+            (na2 - (a2_start + delta)).length() < 0.01,
+            "edge 2 start not translated"
+        );
+        assert!(
+            (nb2 - (a2_end + delta)).length() < 0.01,
+            "edge 2 end not translated"
+        );
+    }
+
+    #[test]
+    fn edge_move_two_adjacent_edges_same_face_rejected() {
+        // Two adjacent edges on the top face (+Z) share one vertex.  Moving
+        // both by a face-normal delta still makes the translated endpoints
+        // non-coplanar with the fitted plane (the3rd translated vertex falls
+        // off the plane through the first edge + reference).  The coplanarity
+        // check in edge_move_plane_updates must reject this.
+        let (mut map, e, b) = cube_map();
+        let (fa1, fb1, ..) = find_shared_edge(&map, Vec3::Z, Vec3::NEG_X);
+        let (fa2, fb2, ..) = find_shared_edge(&map, Vec3::Z, Vec3::NEG_Y);
+        let sels = [
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa1,
+                face_b_idx: fb1,
+            },
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa2,
+                face_b_idx: fb2,
+            },
+        ];
+        // Even a face-normal delta makes the3 translated endpoints non-coplanar.
+        let delta = Vec3::new(0.0, 0.0, 4.0);
+        assert!(
+            !translate_selected_edges(&mut map, &sels, delta),
+            "two adjacent edges on one face must be rejected (coplanarity)"
+        );
+        assert!(is_convex_brush_valid(&map.entities[e].brushes[b]));
+    }
+
+    #[test]
+    fn edge_move_two_adjacent_edges_oblique_delta_rejected() {
+        // Same two adjacent edges, but an oblique delta makes the translated
+        // endpoints non-coplanar → must be rejected by the coplanarity check.
+        let (mut map, e, b) = cube_map();
+        let (fa1, fb1, ..) = find_shared_edge(&map, Vec3::Z, Vec3::NEG_X);
+        let (fa2, fb2, ..) = find_shared_edge(&map, Vec3::Z, Vec3::NEG_Y);
+        let sels = [
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa1,
+                face_b_idx: fb1,
+            },
+            EdgeSelection {
+                entity_idx: e,
+                brush_idx: b,
+                face_a_idx: fa2,
+                face_b_idx: fb2,
+            },
+        ];
+        // Oblique delta: translated endpoints won't be coplanar.
+        let delta = Vec3::new(8.0, 8.0, 4.0);
+        assert!(
+            !translate_selected_edges(&mut map, &sels, delta),
+            "oblique delta on adjacent edges must fail coplanarity check"
+        );
+        assert!(is_convex_brush_valid(&map.entities[e].brushes[b]));
     }
 }

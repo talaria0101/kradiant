@@ -748,7 +748,9 @@ impl Viewport2D {
                 let preview_face = editor.view2d.face_stretch_preview();
                 let preview_point = |p: Vec3| -> Vec3 {
                     match preview_drag_mode {
-                        DragMode::MoveSelection | DragMode::MoveVertices => p + preview_move_offset,
+                        DragMode::MoveSelection | DragMode::MoveVertices | DragMode::MoveEdges => {
+                            p + preview_move_offset
+                        }
                         DragMode::StretchSelection => {
                             if preview_stretch_mode == StretchMode::Scale {
                                 preview_stretch
