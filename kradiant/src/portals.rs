@@ -96,10 +96,14 @@ fn thin_axis(aabb: &Aabb) -> usize {
 }
 
 fn aabb_of_brush(brush: &Brush) -> Option<Aabb> {
-    if matches!(brush.content, BrushContent::Patch(_)) {
-        return None;
+    match &brush.content {
+        BrushContent::Patch(_) => return None,
+        BrushContent::Convex(_) => {}
     }
-    Some(brush.aabb.clone())
+    // Never trust `brush.aabb`: freshly parsed brushes have it zeroed until
+    // geometry is first requested. Derive it from the polygons instead.
+    let polys = crate::geometry::brush_to_polygons(brush).ok()?;
+    Some(crate::editing::aabb_from_polys(&polys))
 }
 
 /// The two axes that span the plane with normal along `axis`.
@@ -1032,4 +1036,121 @@ mod tests {
         )
         .is_err());
     }
-}
+
+    /// Demo on the real training_outside map: the mapper splits the arena
+    /// into four quadrant cells (as in the outdoor tutorial) and the
+    /// generator produces the four interior portal walls, staggered at the
+    /// 4-way junction.
+    #[test]
+    fn training_outside_quadrant_cells_generate_four_staggered_walls() {
+        let map_text = include_str!("../test/training_outside.map");
+        let mut map = crate::parser::parse_map_string(map_text).unwrap();
+
+        // Mapper-designated cells: the arena split at x=0 / y=320.
+        let (x0, x1, y0, y1) = (-1384.0f32, 1248.0f32, -1196.0f32, 1836.0f32);
+        let (z0, z1) = (256.0f32, 512.0f32);
+        let cells = vec![
+            box_brush((x0, 320.0, z0), (0.0, y1, z1)),   // NW
+            box_brush((0.0, 320.0, z0), (x1, y1, z1)),   // NE
+            box_brush((x0, y0, z0), (0.0, 320.0, z1)),   // SW
+            box_brush((0.0, y0, z0), (x1, 320.0, z1)),   // SE
+        ];
+        let world_brush_count = map.entities[0].brushes.len();
+        let first_id = map.entities[0]
+            .brushes
+            .iter()
+            .map(|b| b.id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        for (n, cell) in cells.into_iter().enumerate() {
+            let mut cell = cell;
+            cell.id = BrushId(first_id + n as u32);
+            map.entities[0].brushes.push(cell);
+        }
+        let cell_count = 4usize;
+
+        let selection: Vec<(usize, usize)> = ((world_brush_count)..(world_brush_count
+            + cell_count))
+            .map(|b| (0, b))
+            .collect();
+
+        let (created, overlaps) = generate_cell_portal_walls(
+            &mut map,
+            &selection,
+            PortalSide::Negative,
+            &PortalTextures::default(),
+            8.0,
+        )
+        .expect("quadrant cells must generate walls");
+
+        assert_eq!(created, 4, "one wall per neighbouring cell pair");
+        // The stagger pass already resolves the junctions on the staggered
+        // planes; the remaining 2 perpendicular corners would need manual
+        // 45-degree bevels (as in the tutorial), reported to the caller.
+        assert_eq!(overlaps, 2);
+
+        // The walls sit at the map centre lines, staggered in pairs.
+        let added = &map.entities[0].brushes[world_brush_count + cell_count..];
+        assert_eq!(added.len(), 4);
+        let x_walls: Vec<&Brush> = added
+            .iter()
+            .filter(|b| (b.aabb.max.x - b.aabb.min.x) < (b.aabb.max.y - b.aabb.min.y))
+            .collect();
+        assert_eq!(x_walls.len(), 2, "two walls on the y-split plane");
+        for w in &x_walls {
+            // One spans the north half (y 320..1836), one the south half
+            // (y -1196..320) — the T-junction containment.
+            let north = (w.aabb.min.y - 320.0).abs() < POINT_EPS
+                && (w.aabb.max.y - y1).abs() < POINT_EPS;
+            let south = (w.aabb.min.y - y0).abs() < POINT_EPS
+                && (w.aabb.max.y - 320.0).abs() < POINT_EPS;
+            assert!(
+                north || south,
+                "wall must span exactly one cell pair's face: {:?}",
+                (w.aabb.min.y, w.aabb.max.y)
+            );
+        }
+        let offsets: Vec<f32> = x_walls
+            .iter()
+            .map(|w| w.aabb.min.x + 4.0)
+            .collect();
+        assert!(
+            (offsets[0] - offsets[1]).abs() >= 4.0,
+            "4-way stagger: plane offsets {offsets:?}"
+        );
+
+        let y_walls: Vec<&Brush> = added
+            .iter()
+            .filter(|b| (b.aabb.max.y - b.aabb.min.y) <= (b.aabb.max.x - b.aabb.min.x))
+            .collect();
+        assert_eq!(y_walls.len(), 2, "two walls on the x-split plane");
+        let offsets: Vec<f32> = y_walls
+            .iter()
+            .map(|w| w.aabb.min.y + 4.0)
+            .collect();
+        assert!(
+            (offsets[0] - offsets[1]).abs() >= 4.0,
+            "4-way stagger: plane offsets {offsets:?}"
+        );
+
+        // Every wall is a proper portal brush: 1 portal face + 5 nodraw.
+        for w in added {
+            let faces = match &w.content {
+                BrushContent::Convex(f) => f,
+                _ => panic!("expected convex portal brush"),
+            };
+            assert_eq!(faces.iter().filter(|f| f.texture == "common/portal").count(), 1);
+            assert_eq!(
+                faces
+                    .iter()
+                    .filter(|f| f.texture == "common/portalnodraw")
+                    .count(),
+                5
+            );
+        }
+    }
+
+
+        
+    }
