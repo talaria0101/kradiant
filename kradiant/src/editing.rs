@@ -2916,7 +2916,7 @@ mod tests {
     #[test]
     fn edge_move_clamps_instead_of_stretching_to_infinity() {
         let (mut map, e, b) = cube_map();
-        let (fa, fb, a, bpt) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
+        let (fa, fb, a, _bpt) = find_shared_edge(&map, Vec3::NEG_Z, Vec3::NEG_X);
         let sel = EdgeSelection {
             entity_idx: e,
             brush_idx: b,
