@@ -19,6 +19,7 @@ pub mod map;
 pub mod map_utils;
 pub mod parser;
 pub mod portals;
+pub mod bsp;
 pub mod render;
 pub mod shader;
 pub mod texmap;

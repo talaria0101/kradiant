@@ -95,6 +95,11 @@ fn thin_axis(aabb: &Aabb) -> usize {
     axis
 }
 
+/// Public wrapper for crate-internal callers (the bsp module).
+pub(crate) fn aabb_of_brush_pub(brush: &Brush) -> Option<Aabb> {
+    aabb_of_brush(brush)
+}
+
 fn aabb_of_brush(brush: &Brush) -> Option<Aabb> {
     match &brush.content {
         BrushContent::Patch(_) => return None,
@@ -626,6 +631,139 @@ fn aabb_overlap_volume(a: &Aabb, b: &Aabb) -> f32 {
     dx * dy * dz
 }
 
+/// Union coplanar placed portals that overlap or come within `gap` world
+/// units of each other on their shared plane, replacing the old brushes in
+/// `map` with one unioned brush per merged group. Returns how many portals
+/// were consolidated away.
+pub(crate) fn merge_placed_portals_public(
+    map: &mut Map,
+    placed: &mut Vec<PlacedPortal>,
+    gap: f32,
+    side: PortalSide,
+    textures: &PortalTextures,
+) -> usize {
+    merge_placed_portals(map, placed, gap, side, textures)
+}
+
+fn merge_placed_portals(
+    map: &mut Map,
+    placed: &mut Vec<PlacedPortal>,
+    gap: f32,
+    side: PortalSide,
+    textures: &PortalTextures,
+) -> usize {
+    if placed.len() < 2 {
+        return 0;
+    }
+
+    // Group by (thin axis, quantized plane position).
+    let axis_of = |p: &PlacedPortal| thin_axis(&p.aabb);
+    let plane_of = |p: &PlacedPortal| -> (usize, i64) {
+        let axis = axis_of(p);
+        let mid = (p.aabb.min[axis] + p.aabb.max[axis]) * 0.5;
+        (axis, (mid / PLANE_QUANT).round() as i64)
+    };
+    let mut groups: std::collections::HashMap<(usize, i64), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, p) in placed.iter().enumerate() {
+        groups.entry(plane_of(p)).or_default().push(i);
+    }
+
+    // Fixpoint union inside each coplanar group.
+    let mut merged: Vec<Vec<usize>> = Vec::new();
+    for (_, members) in groups {
+        let mut sets: Vec<Vec<usize>> = members.iter().map(|&i| vec![i]).collect();
+        loop {
+            let mut changed = false;
+            'outer: for a in 0..sets.len() {
+                for b in (a + 1)..sets.len() {
+                    let (au0, av0, au1, av1) = {
+                        let (u, v) = plane_axes(axis_of(&placed[sets[a][0]]));
+                        let mut r = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                        for &i in &sets[a] {
+                            r.0 = r.0.min(placed[i].aabb.min[u]);
+                            r.1 = r.1.min(placed[i].aabb.min[v]);
+                            r.2 = r.2.max(placed[i].aabb.max[u]);
+                            r.3 = r.3.max(placed[i].aabb.max[v]);
+                        }
+                        r
+                    };
+                    let (bu0, bv0, bu1, bv1) = {
+                        let (u, v) = plane_axes(axis_of(&placed[sets[b][0]]));
+                        let mut r = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                        for &i in &sets[b] {
+                            r.0 = r.0.min(placed[i].aabb.min[u]);
+                            r.1 = r.1.min(placed[i].aabb.min[v]);
+                            r.2 = r.2.max(placed[i].aabb.max[u]);
+                            r.3 = r.3.max(placed[i].aabb.max[v]);
+                        }
+                        r
+                    };
+                    let near = au0 - gap <= bu1
+                        && bu0 - gap <= au1
+                        && av0 - gap <= bv1
+                        && bv0 - gap <= av1;
+                    if near {
+                        let mut union = sets[a].clone();
+                        union.extend(sets[b].iter().copied());
+                        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+                        sets[lo] = union;
+                        sets.swap_remove(hi);
+                        changed = true;
+                        break 'outer;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        merged.extend(sets);
+    }
+
+    let removed = placed.len() - merged.len();
+    if removed == 0 {
+        return 0;
+    }
+
+    // Replace brushes: drop every placed portal, insert the unions.
+    for p in placed.iter() {
+        if let Some(entity) = map.entities.get_mut(p.entity) {
+            entity.brushes.retain(|b| b.id != p.id);
+        }
+    }
+    let mut next: Vec<PlacedPortal> = Vec::with_capacity(merged.len());
+    for group in &merged {
+        let first = group[0];
+        let mut aabb = placed[first].aabb;
+        for &i in group.iter().skip(1) {
+            aabb.min = aabb.min.min(placed[i].aabb.min);
+            aabb.max = aabb.max.max(placed[i].aabb.max);
+        }
+        let entity_idx = placed[first].entity;
+        let Some(entity) = map.entities.get_mut(entity_idx) else {
+            continue;
+        };
+        let next_id = entity
+            .brushes
+            .iter()
+            .map(|b| b.id.0)
+            .max()
+            .map(|id| id.wrapping_add(1))
+            .unwrap_or(0);
+        let id = BrushId(next_id);
+        let brush = generate_opening_portal_brush(id, &aabb, side, textures);
+        entity.brushes.push(brush);
+        next.push(PlacedPortal {
+            entity: entity_idx,
+            id,
+            aabb,
+        });
+    }
+    *placed = next;
+    removed
+}
+
 /// Build the actual portal brush for a wall slab: every face portal-nodraw
 /// except the face pointing towards `side` along the wall-normal axis.
 pub fn generate_cell_wall_brush(
@@ -705,9 +843,29 @@ const PLANE_QUANT: f32 = 0.25;
 /// A brush must span the plane with at least this margin on both sides to
 /// count as crossing it (walls thinner than 2 units are not scan targets).
 const CROSS_MARGIN: f32 = 1.0;
-/// How far (world units) a face may sit from the scan plane and still count
-/// as the wall's surface on that plane.
-const FACE_BAND: f32 = 6.0;
+/// Coplanar generated portals whose plane projections come within this gap
+/// are unioned into one brush (the originals over-cover through trim and
+/// let the compiler trim the portal to the enclosed volume).
+pub(crate) const PORTAL_MERGE_GAP: f32 = 16.0;
+
+/// A generated portal brush, tracked so the merge pass can replace it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PlacedPortal {
+    pub(crate) entity: usize,
+    pub(crate) id: BrushId,
+    pub(crate) aabb: Aabb,
+}
+
+/// Snap ascending, deduplicated grid coordinates DOWN onto a lattice of
+/// `snap` world units (`snap <= 0` returns them unchanged).
+fn snap_coords(coords: &[f32], snap: f32) -> Vec<f32> {
+    if snap <= 0.0 {
+        return coords.to_vec();
+    }
+    let mut out: Vec<f32> = coords.iter().map(|c| (c / snap).floor() * snap).collect();
+    out.dedup_by(|a, b| (*a - *b).abs() <= POINT_EPS);
+    out
+}
 
 /// Result of [`generate_auto_opening_portals`].
 #[derive(Debug, Clone, Copy, Default)]
@@ -716,6 +874,8 @@ pub struct AutoOpeningReport {
     pub clusters_scanned: usize,
     pub clusters_skipped_oversize: usize,
     pub portals_created: usize,
+    /// Portals consolidated away by the coplanar merge pass.
+    pub portals_merged: usize,
 }
 
 /// Scan every wall plane of the map for rectangular holes (doorways,
@@ -768,7 +928,7 @@ pub fn generate_auto_opening_portals(
         .collect();
 
     let mut report = AutoOpeningReport::default();
-    let mut created: Vec<Aabb> = Vec::new();
+    let mut created: Vec<PlacedPortal> = Vec::new();
 
     for axis in 0..3usize {
         let (u, v) = plane_axes(axis);
@@ -825,9 +985,12 @@ pub fn generate_auto_opening_portals(
                     if n[axis].abs() < 0.999 {
                         continue; // not parallel to the scan plane
                     }
-                    if (verts[0][axis] - p).abs() > FACE_BAND {
-                        continue; // not in the band
-                    }
+                    // The brush already crosses the plane, so every face of
+                    // it that is parallel to the plane is one of the wall's
+                    // two surfaces - no matter how thick the wall is. (A
+                    // fixed band around the plane silently dropped every
+                    // face of walls thicker than twice the band, which made
+                    // whole buildings invisible to the scanner.)
                     face_rects.push(face_rect(verts, u, v));
                 }
                 if face_rects.is_empty() {
@@ -902,6 +1065,27 @@ pub fn generate_auto_opening_portals(
                 vs.dedup_by(|a, b| (*a - *b).abs() <= POINT_EPS);
                 if us.len() < 2 || vs.len() < 2 {
                     continue;
+                }
+
+                // Long walls (whole rowhouses, city blocks) gather hundreds
+                // of distinct face coordinates. Rather than skipping the
+                // cluster wholesale, snap the grid lines to a coarser lattice
+                // until it fits. Snapping rounds coordinates DOWN, so grid
+                // cells grow and coverage shrinks slightly: openings get a
+                // little larger, never closed off. Trim narrower than the
+                // snap vanishes into the opening, which matches how the
+                // originals over-cover and let the compiler trim.
+                let mut snap = 0.0f32;
+                loop {
+                    if us.len() <= CLUSTER_MAX_COORDS && vs.len() <= CLUSTER_MAX_COORDS {
+                        break;
+                    }
+                    snap = if snap == 0.0 { 1.0 } else { snap * 2.0 };
+                    if snap > 64.0 {
+                        break;
+                    }
+                    us = snap_coords(&us, snap);
+                    vs = snap_coords(&vs, snap);
                 }
                 if us.len() > CLUSTER_MAX_COORDS || vs.len() > CLUSTER_MAX_COORDS {
                     report.clusters_skipped_oversize += 1;
@@ -1006,7 +1190,10 @@ pub fn generate_auto_opening_portals(
                         max: Vec3::new(max[0], max[1], max[2]),
                     };
 
-                    if created.iter().any(|c| aabb_overlap_volume(&aabb, c) > 1.0) {
+                    if created
+                        .iter()
+                        .any(|c| aabb_overlap_volume(&aabb, &c.aabb) > 1.0)
+                    {
                         continue;
                     }
 
@@ -1021,15 +1208,27 @@ pub fn generate_auto_opening_portals(
                         .max()
                         .map(|id| id.wrapping_add(1))
                         .unwrap_or(0);
-                    let brush =
-                        generate_opening_portal_brush(BrushId(next_id), &aabb, side, textures);
+                    let id = BrushId(next_id);
+                    let brush = generate_opening_portal_brush(id, &aabb, side, textures);
                     entity.brushes.push(brush);
-                    created.push(aabb);
+                    created.push(PlacedPortal {
+                        entity: entity_idx,
+                        id,
+                        aabb,
+                    });
                     report.portals_created += 1;
                 }
             }
         }
     }
+
+    // The originals over-cover on purpose: one box through transoms, arch
+    // steps and trim, letting the compiler trim the portal to the enclosed
+    // volume. Union coplanar portals that touch or sit within a small gap
+    // of each other, so trim between windows does not fragment the result.
+    report.portals_merged =
+        merge_placed_portals(map, &mut created, PORTAL_MERGE_GAP, side, textures);
+    report.portals_created = created.len();
 
     Ok(report)
 }
@@ -1521,7 +1720,379 @@ mod tests {
         }
     }
 
+    // -------------------------------------------------------------------
+    // Whole-map dbg harness (ignored by default; needs dawnville on disk)
+    // -------------------------------------------------------------------
+
+    /// A brush is an IW portal brush when it has a `common/portal` face
+    /// (exact texture, not `portalnodraw`).
+    fn is_portal_brush(brush: &Brush) -> bool {
+        match &brush.content {
+            BrushContent::Convex(faces) => faces.iter().any(|f| f.texture == "common/portal"),
+            BrushContent::Patch(_) => false,
+        }
+    }
+
+    #[test]
+    #[ignore = "dbg harness: needs the official IW dawnville.map on disk"]
+    fn dbg_dawnville_pipeline() {
+        let path = std::env::var("DAWNVILLE_MAP")
+            .unwrap_or_else(|_| "/workspace/attachments/dawnville/dawnville.map".to_string());
+        let text = std::fs::read_to_string(&path).expect("dawnville.map on disk");
+        let t0 = std::time::Instant::now();
+        let mut map = crate::parser::parse_map_string(&text).expect("parse");
+        println!(
+            "parsed dawnville: {} entities, {} brushes in {:?}",
+            map.entities.len(),
+            map.entities.iter().map(|e| e.brushes.len()).sum::<usize>(),
+            t0.elapsed()
+        );
+
+        // Ground truth: record original portal AABBs, then strip them.
+        let mut originals: Vec<Aabb> = Vec::new();
+        let mut removed = 0usize;
+        for entity in &mut map.entities {
+            for brush in &entity.brushes {
+                if is_portal_brush(brush) {
+                    if let Some(aabb) = aabb_of_brush(brush) {
+                        originals.push(aabb);
+                    }
+                }
+            }
+            let before = entity.brushes.len();
+            entity.brushes.retain(|b| !is_portal_brush(b));
+            removed += before - entity.brushes.len();
+        }
+        println!(
+            "ground truth: {removed} IW portal brushes removed, {} with valid AABBs",
+            originals.len()
+        );
+        let brush_count = map.entities.iter().map(|e| e.brushes.len()).sum::<usize>();
+
+        let t1 = std::time::Instant::now();
+        let report = generate_auto_opening_portals(
+            &mut map,
+            PortalSide::Negative,
+            &PortalTextures::default(),
+        )
+        .expect("auto pass");
+        println!("auto pass in {:?}: {report:?}", t1.elapsed());
+        let total_after = map.entities.iter().map(|e| e.brushes.len()).sum::<usize>();
+        println!("brushes: {brush_count} (cleaned) -> {total_after} (with portals)");
+
+        // Coverage: for each original portal, take its two largest extents
+        // as the face rect and grid-sample how much of it sits inside any
+        // generated portal (16-unit tolerance bridges thickness gaps).
+        let generated: Vec<Aabb> = map
+            .entities
+            .iter()
+            .flat_map(|e| e.brushes.iter())
+            .filter(|b| is_portal_brush(b))
+            .filter_map(|b| aabb_of_brush(b))
+            .collect();
+        println!("generated portal brushes: {}", generated.len());
+
+        const TOL: f32 = 16.0;
+        const N: usize = 32;
+        let mut fracs = Vec::new();
+        let mut center_hits = 0usize;
+        for o in &originals {
+            let ext = [o.max[0] - o.min[0], o.max[1] - o.min[1], o.max[2] - o.min[2]];
+            let skip = if ext[0] <= ext[1] && ext[0] <= ext[2] {
+                0
+            } else if ext[1] <= ext[2] {
+                1
+            } else {
+                2
+            };
+            let axes: Vec<usize> = (0..3).filter(|&a| a != skip).collect();
+            let (u0, v0, u1, v1) = (o.min[axes[0]], o.min[axes[1]], o.max[axes[0]], o.max[axes[1]]);
+            let area = (u1 - u0) * (v1 - v0);
+            if area <= 0.0 {
+                continue;
+            }
+            let mid = (o.min[skip] + o.max[skip]) * 0.5;
+            let mut hits = 0usize;
+            for j in 0..N {
+                for i in 0..N {
+                    let p = [
+                        if axes[0] == 0 { u0 + (u1 - u0) * (i as f32 + 0.5) / N as f32 } else if axes[1] == 0 { v0 + (v1 - v0) * (j as f32 + 0.5) / N as f32 } else { mid },
+                        if axes[0] == 1 { u0 + (u1 - u0) * (i as f32 + 0.5) / N as f32 } else if axes[1] == 1 { v0 + (v1 - v0) * (j as f32 + 0.5) / N as f32 } else { mid },
+                        if axes[0] == 2 { u0 + (u1 - u0) * (i as f32 + 0.5) / N as f32 } else if axes[1] == 2 { v0 + (v1 - v0) * (j as f32 + 0.5) / N as f32 } else { mid },
+                    ];
+                    if generated.iter().any(|g| {
+                        (0..3).all(|a| p[a] >= g.min[a] - TOL && p[a] <= g.max[a] + TOL)
+                    }) {
+                        hits += 1;
+                    }
+                }
+            }
+            fracs.push(hits as f32 / (N * N) as f32);
+            let c = [
+                (o.min[0] + o.max[0]) * 0.5,
+                (o.min[1] + o.max[1]) * 0.5,
+                (o.min[2] + o.max[2]) * 0.5,
+            ];
+            if generated.iter().any(|g| {
+                (0..3).all(|a| c[a] >= g.min[a] - TOL && c[a] <= g.max[a] + TOL)
+            }) {
+                center_hits += 1;
+            }
+        }
+        let n = fracs.len() as f32;
+        let full = fracs.iter().filter(|&&f| f >= 0.99).count();
+        let partial = fracs.iter().filter(|&&f| f >= 0.05 && f < 0.99).count();
+        let zero = fracs.iter().filter(|&&f| f < 0.05).count();
+        println!(
+            "coverage of {} originals: {full} full (>=99%), {partial} partial (5-99%), {zero} untouched; mean frac {:.2}; center-hit {center_hits}/{}",
+            fracs.len(),
+            fracs.iter().sum::<f32>() / n.max(1.0),
+            fracs.len()
+        );
+
+        // Breakdown of the misses: size class x best guess why.
+        println!("--- untouched originals (frac < 0.05) ---");
+        for (o, &f) in originals.iter().zip(fracs.iter()) {
+            if f >= 0.05 {
+                continue;
+            }
+            let ext = [o.max[0] - o.min[0], o.max[1] - o.min[1], o.max[2] - o.min[2]];
+            let mut e = ext;
+            e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "  center ({:.0},{:.0},{:.0}) ext {:.0}x{:.0}x{:.0} (sorted {:.0}/{:.0}/{:.0}) frac {:.2}",
+                (o.min[0] + o.max[0]) * 0.5,
+                (o.min[1] + o.max[1]) * 0.5,
+                (o.min[2] + o.max[2]) * 0.5,
+                ext[0], ext[1], ext[2], e[0], e[1], e[2], f
+            );
+        }
+
+        // Round-trip: save and re-parse.
+        let out = "/workspace/dawnville_portals_generated.map";
+        crate::parser::save_map(&map, out).expect("save");
+        let text2 = std::fs::read_to_string(out).expect("read back");
+        let map2 = crate::parser::parse_map_string(&text2).expect("re-parse");
+        let total2 = map2.entities.iter().map(|e| e.brushes.len()).sum::<usize>();
+        println!(
+            "round-trip: {} entities, {total2} brushes (expected {total_after})",
+            map2.entities.len()
+        );
+        assert_eq!(total2, total_after, "round-trip brush count");
+    }
+
 
         
     
+}
+
+#[cfg(test)]
+mod dbg_probe {
+    use super::*;
+    use crate::map::{BrushContent, BrushId};
+
+    /// Dump the scan-plane composition at one missed IW portal:
+    /// center (-1384,-18868,110) ext 64x8x92 -> wall plane y=-18868.
+    #[test]
+    #[ignore = "dbg probe: needs dawnville on disk"]
+    fn dbg_dawnville_probe_missed_window() {
+        let path = std::env::var("DAWNVILLE_MAP")
+            .unwrap_or_else(|_| "/workspace/attachments/dawnville/dawnville.map".to_string());
+        let text = std::fs::read_to_string(&path).expect("dawnville.map on disk");
+        let mut map = crate::parser::parse_map_string(&text).expect("parse");
+        for entity in &mut map.entities {
+            entity.brushes.retain(|b| {
+                !matches!(&b.content, BrushContent::Convex(faces) if faces.iter().any(|f| f.texture == "common/portal"))
+            });
+        }
+
+        let axis = 1usize; // y
+        let p = -18812.0f32;
+        let (u, v) = plane_axes(axis);
+
+        struct C {
+            aabb: Aabb,
+            rects: Vec<(f32, f32, f32, f32)>,
+        }
+        let mut crossers: Vec<C> = Vec::new();
+        for (ei, entity) in map.entities.iter().enumerate() {
+            for b in &entity.brushes {
+                if matches!(b.content, BrushContent::Patch(_)) {
+                    continue;
+                }
+                let mut owned = b.clone();
+                owned.invalidate_geometry();
+                let Ok(polys) = crate::geometry::brush_to_polygons(&owned) else { continue };
+                let aabb = crate::editing::aabb_from_polys(&polys);
+                if aabb.min[axis] > p - CROSS_MARGIN || aabb.max[axis] < p + CROSS_MARGIN {
+                    continue;
+                }
+                if aabb.min[0] > 250.0 || aabb.max[0] < -150.0 || aabb.min[2] > 300.0 {
+                    continue; // probe window neighbourhood only
+                }
+                let mut plane_info = Vec::new();
+                for (verts, _idx) in &polys {
+                    if verts.len() < 3 { continue; }
+                    let e1 = verts[1] - verts[0];
+                    let e2 = verts[2] - verts[0];
+                    let n = e1.cross(e2);
+                    if n.length_squared() < 1.0e-12 { continue; }
+                    let n = n.normalize();
+                    let dom = if n[0].abs() >= n[1].abs() && n[0].abs() >= n[2].abs() { 0 } else if n[1].abs() >= n[2].abs() { 1 } else { 2 };
+                    plane_info.push(format!("{}@{:.0}", "xyz"[dom..].chars().next().unwrap(), verts[0][dom]));
+                }
+                println!(
+                    "nearbrush ent{ei} aabb x[{:.0},{:.0}] y[{:.0},{:.0}] z[{:.0},{:.0}] faces {:?}",
+                    aabb.min[0], aabb.max[0], aabb.min[1], aabb.max[1], aabb.min[2], aabb.max[2], plane_info
+                );
+                let mut rects = Vec::new();
+                for (verts, _idx) in &polys {
+                    if verts.len() < 3 { continue; }
+                    let e1 = verts[1] - verts[0];
+                    let e2 = verts[2] - verts[0];
+                    let n = e1.cross(e2);
+                    if n.length_squared() < 1.0e-12 { continue; }
+                    let n = n.normalize();
+                    if n[axis].abs() < 0.999 { continue; }
+                    rects.push(face_rect(verts, u, v));
+                }
+                if !rects.is_empty() {
+                    println!(
+                        "crosser ent{ei} aabb x[{:.0},{:.0}] y[{:.0},{:.0}] z[{:.0},{:.0}] rects {:?}",
+                        aabb.min[0], aabb.max[0], aabb.min[1], aabb.max[1], aabb.min[2], aabb.max[2], rects
+                    );
+                    crossers.push(C { aabb, rects });
+                }
+            }
+        }
+        println!("crossers: {}", crossers.len());
+    }
+}
+
+
+#[cfg(test)]
+mod dbg_bsp_tests {
+    use super::*;
+    use crate::bsp::{generate_bsp_portals, BspPortalParams};
+    use crate::editing::Aabb;
+
+    /// A brush is an IW portal brush when it has a `common/portal` face.
+    fn is_portal_brush(brush: &Brush) -> bool {
+        match &brush.content {
+            BrushContent::Convex(faces) => faces.iter().any(|f| f.texture == "common/portal"),
+            BrushContent::Patch(_) => false,
+        }
+    }
+
+    #[test]
+    #[ignore = "dbg harness: needs the official IW dawnville.map on disk"]
+    fn dbg_dawnville_bsp() {
+        let path = std::env::var("DAWNVILLE_MAP")
+            .unwrap_or_else(|_| "/workspace/attachments/dawnville/dawnville.map".to_string());
+        let text = std::fs::read_to_string(&path).expect("dawnville.map on disk");
+        let mut map = crate::parser::parse_map_string(&text).expect("parse");
+        println!(
+            "parsed dawnville: {} entities, {} brushes",
+            map.entities.len(),
+            map.entities.iter().map(|e| e.brushes.len()).sum::<usize>()
+        );
+
+        // Strip the IW portals, keep their AABBs as ground truth.
+        let mut originals: Vec<Aabb> = Vec::new();
+        let mut removed = 0usize;
+        for entity in &mut map.entities {
+            for brush in &entity.brushes {
+                if is_portal_brush(brush) {
+                    if let Some(aabb) = aabb_of_brush(brush) {
+                        originals.push(aabb);
+                    }
+                }
+            }
+            let before = entity.brushes.len();
+            entity.brushes.retain(|b| !is_portal_brush(b));
+            removed += before - entity.brushes.len();
+        }
+        println!("ground truth: {removed} IW portal brushes, {} valid", originals.len());
+
+        let params = BspPortalParams::default();
+        let hist = crate::bsp::dbg_framing_histogram(&map);
+        println!("framing histogram (0.0..1.0 by 0.1): {hist:?}");
+        let t1 = std::time::Instant::now();
+        let report = generate_bsp_portals(&mut map, PortalSide::Negative, &PortalTextures::default(), &params)
+            .expect("bsp portals");
+        println!("bsp pass in {:?}: {report:?}", t1.elapsed());
+
+        // Coverage metric (same as the plane-scan harness).
+        let generated: Vec<Aabb> = map
+            .entities
+            .iter()
+            .flat_map(|e| e.brushes.iter())
+            .filter(|b| is_portal_brush(b))
+            .filter_map(|b| aabb_of_brush(b))
+            .collect();
+        println!("generated portal brushes: {}", generated.len());
+
+        const TOL: f32 = 16.0;
+        const N: usize = 32;
+        let mut fracs = Vec::new();
+        let mut center_hits = 0usize;
+        for o in &originals {
+            let ext = [o.max[0] - o.min[0], o.max[1] - o.min[1], o.max[2] - o.min[2]];
+            let skip = if ext[0] <= ext[1] && ext[0] <= ext[2] {
+                0
+            } else if ext[1] <= ext[2] {
+                1
+            } else {
+                2
+            };
+            let axes: Vec<usize> = (0..3).filter(|&a| a != skip).collect();
+            let (u0, v0, u1, v1) = (o.min[axes[0]], o.min[axes[1]], o.max[axes[0]], o.max[axes[1]]);
+            if (u1 - u0) * (v1 - v0) <= 0.0 {
+                continue;
+            }
+            let mid = (o.min[skip] + o.max[skip]) * 0.5;
+            let mut hits = 0usize;
+            for j in 0..N {
+                for i in 0..N {
+                    let fu = u0 + (u1 - u0) * (i as f32 + 0.5) / N as f32;
+                    let fv = v0 + (v1 - v0) * (j as f32 + 0.5) / N as f32;
+                    let p = [
+                        if axes[0] == 0 { fu } else if axes[1] == 0 { fv } else { mid },
+                        if axes[0] == 1 { fu } else if axes[1] == 1 { fv } else { mid },
+                        if axes[0] == 2 { fu } else if axes[1] == 2 { fv } else { mid },
+                    ];
+                    if generated.iter().any(|g| {
+                        (0..3).all(|a| p[a] >= g.min[a] - TOL && p[a] <= g.max[a] + TOL)
+                    }) {
+                        hits += 1;
+                    }
+                }
+            }
+            fracs.push(hits as f32 / (N * N) as f32);
+            let c = [(o.min[0] + o.max[0]) * 0.5, (o.min[1] + o.max[1]) * 0.5, (o.min[2] + o.max[2]) * 0.5];
+            if generated.iter().any(|g| {
+                (0..3).all(|a| c[a] >= g.min[a] - TOL && c[a] <= g.max[a] + TOL)
+            }) {
+                center_hits += 1;
+            }
+        }
+        let n = fracs.len() as f32;
+        let full = fracs.iter().filter(|&&f| f >= 0.99).count();
+        let partial = fracs.iter().filter(|&&f| f >= 0.05 && f < 0.99).count();
+        let zero = fracs.iter().filter(|&&f| f < 0.05).count();
+        println!(
+            "coverage of {} originals: {full} full (>=99%), {partial} partial (5-99%), {zero} untouched; mean frac {:.2}; center-hit {center_hits}/{}",
+            fracs.len(),
+            fracs.iter().sum::<f32>() / n.max(1.0),
+            fracs.len()
+        );
+
+        crate::parser::save_map(&map, "/workspace/dawnville_portals_bsp.map").expect("save");
+        let text2 = std::fs::read_to_string("/workspace/dawnville_portals_bsp.map").expect("read back");
+        let map2 = crate::parser::parse_map_string(&text2).expect("re-parse");
+        let total2 = map2.entities.iter().map(|e| e.brushes.len()).sum::<usize>();
+        let total = map.entities.iter().map(|e| e.brushes.len()).sum::<usize>();
+        println!("round-trip: {} entities, {total2} brushes (expected {total})", map2.entities.len());
+        assert_eq!(total2, total, "round-trip brush count");
+    }
 }
