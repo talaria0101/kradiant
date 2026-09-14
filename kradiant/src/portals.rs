@@ -424,8 +424,36 @@ pub fn plan_cell_walls(
 
     let mut walls: Vec<PortalWall> = Vec::new();
 
+    // Cheap pair pre-filter: a coplanar opposing face pair implies both
+    // AABBs contain the shared plane on the normal axis and overlap on the
+    // plane axes - so plain AABB triple-overlap never skips a valid pair,
+    // while real maps skip the vast majority of the O(n^2) pairs.
+    let aabbs: Vec<Option<Aabb>> = cells
+        .iter()
+        .map(|b| {
+            crate::geometry::brush_to_polygons(b)
+                .ok()
+                .map(|polys| crate::editing::aabb_from_polys(&polys))
+        })
+        .collect();
+
     for a in 0..cells.len() {
+        let Some(aabb_a) = &aabbs[a] else {
+            continue;
+        };
         for b in (a + 1)..cells.len() {
+            let Some(aabb_b) = &aabbs[b] else {
+                continue;
+            };
+            if aabb_a.min.x > aabb_b.max.x
+                || aabb_b.min.x > aabb_a.max.x
+                || aabb_a.min.y > aabb_b.max.y
+                || aabb_b.min.y > aabb_a.max.y
+                || aabb_a.min.z > aabb_b.max.z
+                || aabb_b.min.z > aabb_a.max.z
+            {
+                continue;
+            }
             // Every coplanar opposing face pair contributes one wall.
             for (fa, poly_a) in polys[a].iter().enumerate() {
                 let na = face_plane_normal(&cells[a].get_face(fa).ok_or("bad face")?);
@@ -664,6 +692,348 @@ pub fn generate_cell_portal_walls(
 
     Ok((walls.len(), overlaps))
 }
+
+// ---------------------------------------------------------------------------
+// Whole-map automatic opening detection
+// ---------------------------------------------------------------------------
+
+/// How many distinct grid coordinates a plane cluster may span before it is
+/// skipped (keeps the compressed grid bounded on huge open planes).
+const CLUSTER_MAX_COORDS: usize = 512;
+/// Plane positions are quantized to this grid before scanning.
+const PLANE_QUANT: f32 = 0.25;
+/// A brush must span the plane with at least this margin on both sides to
+/// count as crossing it (walls thinner than 2 units are not scan targets).
+const CROSS_MARGIN: f32 = 1.0;
+/// How far (world units) a face may sit from the scan plane and still count
+/// as the wall's surface on that plane.
+const FACE_BAND: f32 = 6.0;
+
+/// Result of [`generate_auto_opening_portals`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AutoOpeningReport {
+    pub planes_scanned: usize,
+    pub clusters_scanned: usize,
+    pub clusters_skipped_oversize: usize,
+    pub portals_created: usize,
+}
+
+/// Scan every wall plane of the map for rectangular holes (doorways,
+/// windows, courtyard openings) and insert a portal brush into each one.
+///
+/// This is the fully automatic counterpart to
+/// [`generate_opening_portals`]: candidate planes come from thin-brush
+/// mid-planes and quantized hull extents; brushes spanning a plane are
+/// clustered by on-plane face-rectangle overlap; each cluster's empty
+/// rectangular regions become portal brushes spanning the wall's median
+/// thickness, centred on the plane.
+///
+/// Coverage uses the brush faces lying in the plane band (not brush AABBs),
+/// so sloped/arched geometry does not falsely cover openings.
+///
+/// Skipped: clusters whose compressed grid exceeds [`CLUSTER_MAX_COORDS`]
+/// (huge open planes), clusters with fewer than two crossing brushes,
+/// openings smaller than [`MIN_OPENING_EXTENT`], and openings overlapping
+/// an already created portal.
+pub fn generate_auto_opening_portals(
+    map: &mut Map,
+    side: PortalSide,
+    textures: &PortalTextures,
+) -> Result<AutoOpeningReport, String> {
+    struct BrushEntry {
+        entity_idx: usize,
+        brush: Brush,
+        aabb: Aabb,
+    }
+    let brushes: Vec<BrushEntry> = map
+        .entities
+        .iter()
+        .enumerate()
+        .flat_map(|(e, entity)| {
+            entity.brushes.iter().filter_map(move |b| {
+                if matches!(b.content, BrushContent::Patch(_)) {
+                    return None;
+                }
+                let mut owned = b.clone();
+                owned.invalidate_geometry();
+                let polys = crate::geometry::brush_to_polygons(&owned).ok()?;
+                let aabb = crate::editing::aabb_from_polys(&polys);
+                Some(BrushEntry {
+                    entity_idx: e,
+                    brush: owned,
+                    aabb,
+                })
+            })
+        })
+        .collect();
+
+    let mut report = AutoOpeningReport::default();
+    let mut created: Vec<Aabb> = Vec::new();
+
+    for axis in 0..3usize {
+        let (u, v) = plane_axes(axis);
+
+        // Candidate planes: mid-planes of wall-like thin brushes (so every
+        // wall is scanned through its middle) plus quantized hull extents.
+        let mut planes: Vec<i64> = Vec::new();
+        for b in &brushes {
+            let ext = b.aabb.max[axis] - b.aabb.min[axis];
+            if ext <= 64.0 {
+                planes.push(
+                    ((b.aabb.min[axis] + b.aabb.max[axis]) * 0.5 / PLANE_QUANT).round() as i64,
+                );
+            }
+            for p in [b.aabb.min[axis], b.aabb.max[axis]] {
+                planes.push((p / PLANE_QUANT).round() as i64);
+            }
+        }
+        planes.sort_unstable();
+        planes.dedup();
+        report.planes_scanned += planes.len();
+
+        for plane_q in planes {
+            let p = plane_q as f32 * PLANE_QUANT;
+
+            // Brushes spanning the plane, with the rects of the faces lying
+            // in the plane band (exact coverage, no AABB overreach).
+            struct Crosser<'a> {
+                entity_idx: usize,
+                thickness: f32,
+                face_rects: Vec<(f32, f32, f32, f32)>,
+                _brush: &'a Brush,
+            }
+            let mut crossers: Vec<Crosser> = Vec::new();
+            for b in &brushes {
+                if b.aabb.min[axis] > p - CROSS_MARGIN || b.aabb.max[axis] < p + CROSS_MARGIN {
+                    continue;
+                }
+                let Ok(polys) = crate::geometry::brush_to_polygons(&b.brush) else {
+                    continue;
+                };
+                let mut face_rects: Vec<(f32, f32, f32, f32)> = Vec::new();
+                for (verts, _indices) in &polys {
+                    if verts.len() < 3 {
+                        continue;
+                    }
+                    let e1 = verts[1] - verts[0];
+                    let e2 = verts[2] - verts[0];
+                    let n = e1.cross(e2);
+                    if n.length_squared() < 1.0e-12 {
+                        continue;
+                    }
+                    let n = n.normalize();
+                    if n[axis].abs() < 0.999 {
+                        continue; // not parallel to the scan plane
+                    }
+                    if (verts[0][axis] - p).abs() > FACE_BAND {
+                        continue; // not in the band
+                    }
+                    face_rects.push(face_rect(verts, u, v));
+                }
+                if face_rects.is_empty() {
+                    continue;
+                }
+                crossers.push(Crosser {
+                    entity_idx: b.entity_idx,
+                    thickness: b.aabb.max[axis] - b.aabb.min[axis],
+                    face_rects,
+                    _brush: &b.brush,
+                });
+            }
+            if crossers.len() < 2 {
+                continue;
+            }
+
+            // Cluster crossers by face-rect overlap (union-find).
+            let n = crossers.len();
+            let mut parent: Vec<usize> = (0..n).collect();
+            fn find(parent: &mut Vec<usize>, mut i: usize) -> usize {
+                while parent[i] != i {
+                    parent[i] = parent[parent[i]];
+                    i = parent[i];
+                }
+                i
+            }
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let overlap = crossers[i].face_rects.iter().any(|r1| {
+                        crossers[j].face_rects.iter().any(|r2| {
+                            intervals_overlap(r1.0, r1.2, r2.0, r2.2, POINT_EPS)
+                                && intervals_overlap(r1.1, r1.3, r2.1, r2.3, POINT_EPS)
+                        })
+                    });
+                    if overlap {
+                        let ri = find(&mut parent, i);
+                        let rj = find(&mut parent, j);
+                        if ri != rj {
+                            parent[ri] = rj;
+                        }
+                    }
+                }
+            }
+            let mut groups: std::collections::HashMap<usize, Vec<usize>> =
+                std::collections::HashMap::new();
+            for i in 0..n {
+                groups.entry(find(&mut parent, i)).or_default().push(i);
+            }
+            let mut groups: Vec<Vec<usize>> = groups.into_values().collect();
+            groups.sort_by_key(|g| g.first().copied().unwrap_or(0));
+
+            for group in &groups {
+                report.clusters_scanned += 1;
+                if group.len() < 2 {
+                    continue;
+                }
+
+                // Compressed grid over all cluster face rects.
+                let mut us: Vec<f32> = Vec::new();
+                let mut vs: Vec<f32> = Vec::new();
+                for &i in group {
+                    for r in &crossers[i].face_rects {
+                        us.push(r.0);
+                        us.push(r.2);
+                        vs.push(r.1);
+                        vs.push(r.3);
+                    }
+                }
+                us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                us.dedup_by(|a, b| (*a - *b).abs() <= POINT_EPS);
+                vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                vs.dedup_by(|a, b| (*a - *b).abs() <= POINT_EPS);
+                if us.len() < 2 || vs.len() < 2 {
+                    continue;
+                }
+                if us.len() > CLUSTER_MAX_COORDS || vs.len() > CLUSTER_MAX_COORDS {
+                    report.clusters_skipped_oversize += 1;
+                    continue;
+                }
+
+                let nu = us.len() - 1;
+                let nv = vs.len() - 1;
+                let mut covered = vec![false; nu * nv];
+                for &i in group {
+                    for r in &crossers[i].face_rects {
+                        for gi in 0..nu {
+                            if !intervals_overlap(us[gi], us[gi + 1], r.0, r.2, POINT_EPS) {
+                                continue;
+                            }
+                            for gj in 0..nv {
+                                if intervals_overlap(vs[gj], vs[gj + 1], r.1, r.3, POINT_EPS) {
+                                    covered[gj * nu + gi] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Empty components become openings. Real openings are
+                // rarely rectangular (stepped arches, trim, abutting
+                // geometry), so each component is decomposed greedily into
+                // maximal rectangles and every rectangle big enough becomes
+                // a portal brush.
+                let mut component = covered.clone();
+                loop {
+                    // Largest rectangle of full rows: histogram method.
+                    let mut heights = vec![0usize; nu];
+                    let mut best: Option<(usize, usize, usize, usize, u64)> = None;
+                    for j in 0..nv {
+                        for i in 0..nu {
+                            heights[i] = if component[j * nu + i] {
+                                heights[i] + 1
+                            } else {
+                                0
+                            };
+                        }
+                        let mut stack: Vec<usize> = Vec::new();
+                        let mut i = 0usize;
+                        while i <= nu {
+                            let h = if i < nu { heights[i] } else { 0 };
+                            if stack.is_empty() || h >= heights[*stack.last().unwrap()] {
+                                stack.push(i);
+                                i += 1;
+                            } else {
+                                let top = stack.pop().unwrap();
+                                let left = stack.last().copied().unwrap_or(0);
+                                let width = i - left;
+                                let height = heights[top];
+                                if height > 0 {
+                                    let area = width as u64 * height as u64;
+                                    if best.as_ref().map_or(true, |b| area > b.4) {
+                                        best = Some((left, j + 1 - height, i - 1, j, area));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let Some((bi0, bj0, bi1, bj1, area)) = best else {
+                        break;
+                    };
+                    if area == 0 {
+                        break;
+                    }
+                    let ru0 = us[bi0];
+                    let ru1 = us[bi1 + 1];
+                    let rv0 = vs[bj0];
+                    let rv1 = vs[bj1 + 1];
+                    if ru1 - ru0 < MIN_OPENING_EXTENT || rv1 - rv0 < MIN_OPENING_EXTENT {
+                        // Everything left is smaller than the minimum.
+                        break;
+                    }
+                    for j in bj0..=bj1 {
+                        for i in bi0..=bi1 {
+                            component[j * nu + i] = false;
+                        }
+                    }
+
+                    // Wall thickness: median extent of the cluster's crossing
+                    // brushes along the wall axis.
+                    let mut extents: Vec<f32> =
+                        group.iter().map(|&i| crossers[i].thickness).collect();
+                    extents.sort_by(|a, b| a.total_cmp(b));
+                    let thickness = extents[extents.len() / 2].clamp(2.0, 16.0);
+                    let half = thickness * 0.5;
+
+                    let mut min = [0.0f32; 3];
+                    let mut max = [0.0f32; 3];
+                    min[axis] = p - half;
+                    max[axis] = p + half;
+                    min[u] = ru0;
+                    max[u] = ru1;
+                    min[v] = rv0;
+                    max[v] = rv1;
+                    let aabb = Aabb {
+                        min: Vec3::new(min[0], min[1], min[2]),
+                        max: Vec3::new(max[0], max[1], max[2]),
+                    };
+
+                    if created.iter().any(|c| aabb_overlap_volume(&aabb, c) > 1.0) {
+                        continue;
+                    }
+
+                    let entity_idx = crossers[group[0]].entity_idx;
+                    let Some(entity) = map.entities.get_mut(entity_idx) else {
+                        continue;
+                    };
+                    let next_id = entity
+                        .brushes
+                        .iter()
+                        .map(|b| b.id.0)
+                        .max()
+                        .map(|id| id.wrapping_add(1))
+                        .unwrap_or(0);
+                    let brush =
+                        generate_opening_portal_brush(BrushId(next_id), &aabb, side, textures);
+                    entity.brushes.push(brush);
+                    created.push(aabb);
+                    report.portals_created += 1;
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1153,4 +1523,5 @@ mod tests {
 
 
         
-    }
+    
+}
