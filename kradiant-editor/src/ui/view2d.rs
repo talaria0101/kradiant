@@ -2146,6 +2146,38 @@ impl View2D {
                                     "Select the brushes framing a doorway or window (jambs, lintel, threshold); a portal brush is created in every opening",
                                 );
                             }
+                            if ui.menu_item("Auto portals (whole map)") {
+                                undo.push(
+                                    "Generate auto portals",
+                                    map,
+                                    selected_brushes,
+                                    selected_faces,
+                                    selected_edges,
+                                    selected_patch_vertices,
+                                    selected_entities,
+                                );
+                                if let Some(map) = map.as_mut() {
+                                    match portals::generate_auto_opening_portals(
+                                        map,
+                                        portals::PortalSide::Negative,
+                                        &portals::PortalTextures::default(),
+                                    ) {
+                                        Ok(report) => log_info!(
+                                            console,
+                                            "Auto portals: {} doorway/window portals created ({} planes, {} clusters scanned)",
+                                            report.portals_created,
+                                            report.planes_scanned,
+                                            report.clusters_scanned
+                                        ),
+                                        Err(e) => log_warn!(console, "Portal generation: {e}"),
+                                    }
+                                }
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text(
+                                    "Scan every wall plane of the map and place a portal brush in each rectangular opening (doorways, windows)",
+                                );
+                            }
                             if ui.menu_item("Cell portal walls from selection") {
                                 undo.push(
                                     "Generate cell portal walls",
