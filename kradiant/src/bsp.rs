@@ -37,6 +37,20 @@ const EPS_BRUSH: f32 = 0.1;
 const PLANE_NORMAL_EPS: f64 = 0.00001;
 const PLANE_DIST_EPS: f64 = 0.01;
 
+/// Splitter selection strategy for the BSP build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SplitterSelection {
+    /// CoD sub_404CE0: grid-forced axial splits on x/y, then face-based
+    /// scoring (5*(facing - splits) + 5*axial). The compiler's own
+    /// algorithm.
+    #[default]
+    CodFaces,
+    /// qbsp3-style brush-side scoring (5*facing - 5*splits - |front-back|
+    /// + 5*axial, splits preferred). Better measured coverage on
+    /// dawnville with the current candidate framing.
+    BrushScoring,
+}
+
 /// Parameters for [`generate_bsp_portals`].
 #[derive(Debug, Clone)]
 pub struct BspPortalParams {
@@ -54,16 +68,23 @@ pub struct BspPortalParams {
     /// originals top out around 5200; anything near the 131072 world bound
     /// is an uncarved void cross-section, not a mappable portal.
     pub max_extent: f32,
+    /// Splitter selection strategy.
+    pub selection: SplitterSelection,
 }
 
 impl Default for BspPortalParams {
     fn default() -> Self {
+        // Leaf-portal pieces of one opening can be narrow (the carving splits
+        // an 88-tall doorway into 64x16 + 64x72 chunks); the coplanar merge
+        // pass rebuilds the full opening after emission, so the piece floor
+        // only has to keep trim slivers out.
         Self {
-            min_edge: crate::portals::MIN_OPENING_EXTENT,
-            min_area: crate::portals::MIN_OPENING_EXTENT * crate::portals::MIN_OPENING_EXTENT,
+            min_edge: 8.0,
+            min_area: 64.0,
             thickness: 8.0,
             area_separators: true,
             max_extent: 8192.0,
+            selection: SplitterSelection::BrushScoring,
         }
     }
 }
@@ -197,12 +218,10 @@ fn split_winding(w: &Winding, n: Vec3, d: f32, eps: f64) -> (Option<Winding>, Op
         if sides[i] == SIDE_ON || sides[j] == SIDE_ON || sides[i] == sides[j] {
             continue;
         }
+        // The split point belongs to BOTH pieces (q3 ClipWindingEpsilon).
         let mid = interpolate(w[i], w[j], dots[i], dots[j], n, d);
-        if sides[i] == SIDE_FRONT {
-            back.push(mid);
-        } else {
-            front.push(mid);
-        }
+        front.push(mid.clone());
+        back.push(mid);
     }
     let f = if front.len() >= 3 { Some(front) } else { None };
     let b = if back.len() >= 3 { Some(back) } else { None };
@@ -265,6 +284,45 @@ fn winding_is_tiny(w: &Winding) -> bool {
 }
 
 /// Plane of a CCW winding (normal pointing against the winding's front).
+/// AABB side test against a plane: 1 front, 2 back, 3 both, 0 facing.
+fn box_on_plane_side(b: &Aabb, plane: &Plane) -> u8 {
+    const FRONT: u8 = 1;
+    const BACK: u8 = 2;
+    for k in 0..3 {
+        let a = plane.n[k].abs();
+        if a < 0.999 {
+            continue;
+        }
+        if plane.n[k] > 0.0 {
+            let front = ((b.max[k] as f64) - (plane.d as f64)) > EPS_BRUSH as f64;
+            let back = ((b.min[k] as f64) - (plane.d as f64)) < -(EPS_BRUSH as f64);
+            return match (front, back) {
+                (true, true) => FRONT | BACK,
+                (true, false) => FRONT,
+                _ => BACK,
+            };
+        } else {
+            let front = ((plane.d as f64) - (b.min[k] as f64)) > EPS_BRUSH as f64;
+            let back = ((plane.d as f64) - (b.max[k] as f64)) < -(EPS_BRUSH as f64);
+            return match (front, back) {
+                (true, true) => FRONT | BACK,
+                (true, false) => FRONT,
+                _ => BACK,
+            };
+        }
+    }
+    let mut out = 0u8;
+    for p in [b.min, b.max] {
+        let (dot, _) = classify(p, plane.n, plane.d, EPS_BRUSH as f64);
+        if dot > 0.0 {
+            out |= FRONT;
+        } else {
+            out |= BACK;
+        }
+    }
+    out
+}
+
 fn winding_plane(w: &Winding) -> Option<Plane> {
     if w.len() < 3 {
         return None;
@@ -557,10 +615,63 @@ struct TreeNode {
     planenum: i32,
     children: Option<[usize; 2]>,
     brushes: Vec<BspBrush>,
+    /// Structural faces driving the splitter selection (CoD FaceBSP).
+    faces: Vec<BspFace>,
+    /// Node volume bounds. Children inherit the parent bounds, then an
+    /// axial split plane seeds the split axis on each side (facebsp.c).
+    mins: Vec3,
+    maxs: Vec3,
     leaf: bool,
     /// index into `Vec<NodeData>`, or usize::MAX for the outside node.
     portals: Vec<usize>,
 }
+
+/// One structural face: canonical plane index + a winding. Splitters are
+/// chosen from these, exactly like CoD's FaceBSP (sub_404CE0).
+#[derive(Clone)]
+struct BspFace {
+    plane_idx: usize,
+    winding: Winding,
+}
+
+/// CoD WindingAgainstPlane (facebsp.c): -2 crosses, 0 front, 1 back,
+/// 2 coplanar. Epsilon 0.1 on both sides.
+fn winding_against_plane(w: &Winding, n: Vec3, d: f32) -> i32 {
+    if w.is_empty() {
+        return 2;
+    }
+    let mut front = false;
+    let mut back = false;
+    for p in w {
+        let dot = (p.x as f64 * n.x as f64 + p.y as f64 * n.y as f64 + p.z as f64 * n.z as f64)
+            - d as f64;
+        if dot >= -0.1 {
+            if dot > 0.1 {
+                if back {
+                    return -2;
+                }
+                front = true;
+            }
+        } else {
+            if front {
+                return -2;
+            }
+            back = true;
+        }
+    }
+    if back {
+        1
+    } else if front {
+        0
+    } else {
+        2
+    }
+}
+
+/// blocksize for the grid-forced axial splits (q3map default, -blocksize).
+const BLOCKSIZE: f32 = 1024.0;
+/// Face clip epsilon for splitter partitioning (facebsp.c FACE_EPSILON).
+const FACE_EPSILON: f64 = 0.2;
 
 struct TreePortal {
     winding: Winding,
@@ -569,12 +680,14 @@ struct TreePortal {
     nodes: [usize; 2],
 }
 
+
 struct PortalTree {
     pool: PlanePool,
     nodes: Vec<TreeNode>,
     portals: Vec<TreePortal>,
     outside: usize,
     max_depth: usize,
+    selection: SplitterSelection,
 }
 
 impl PortalTree {
@@ -619,12 +732,27 @@ fn is_detail_texture(tex: &str) -> bool {
 }
 
 impl PortalTree {
-    fn build(pool: PlanePool, brushes: Vec<BspBrush>) -> PortalTree {
+    fn build(pool: PlanePool, brushes: Vec<BspBrush>, selection: SplitterSelection) -> PortalTree {
+        // CoD FaceBSP: the structural face list drives the splitter
+        // selection; one face per brush side.
+        let faces: Vec<BspFace> = brushes
+            .iter()
+            .flat_map(|b| {
+                b.sides
+                    .iter()
+                    .map(|(idx, w)| BspFace {
+                        plane_idx: *idx,
+                        winding: w.clone(),
+                    })
+            })
+            .collect();
+        // Tree bounds from the face windings (FaceBSP).
         let mut bounds: Option<Aabb> = None;
-        for b in &brushes {
+        for f in &faces {
+            let wb = winding_bounds(&f.winding);
             bounds = Some(match bounds {
-                None => b.bounds,
-                Some(acc) => aabb_union(acc, b.bounds),
+                None => wb,
+                Some(acc) => aabb_union(acc, wb),
             });
         }
         let mut mins = Vec3::new(-4096.0, -4096.0, -4096.0);
@@ -639,6 +767,7 @@ impl PortalTree {
             portals: Vec::new(),
             outside: usize::MAX,
             max_depth: 0,
+            selection,
         };
 
         // Headnode + outside node with 6 border portals (decomp MakeOutsideNode).
@@ -646,6 +775,9 @@ impl PortalTree {
             planenum: PLANENUM_LEAF,
             children: None,
             brushes,
+            faces,
+            mins,
+            maxs,
             leaf: false,
             portals: Vec::new(),
         });
@@ -653,6 +785,9 @@ impl PortalTree {
             planenum: PLANENUM_LEAF,
             children: None,
             brushes: Vec::new(),
+            faces: Vec::new(),
+            mins,
+            maxs,
             leaf: true,
             portals: Vec::new(),
         });
@@ -717,20 +852,21 @@ impl PortalTree {
         self.nodes.len() - 1
     }
 
-    /// Pick the plane that splits fewest brushes while balancing them
-    /// (qbsp3 SelectSplitPlane scoring, simplified). `parent_planes` are
-    /// the ancestor split planes (q3 CheckPlaneAgainstParents: never split
-    /// on the same plane twice on one path).
-    fn select_split_plane(
+    /// qbsp3-style brush-side scoring with ancestor-plane blocking. Kept
+    /// because it measures better on dawnville with the current framing
+    /// classifier; see SplitterSelection.
+    fn select_split_plane_brush(
         &self,
         node: &TreeNode,
         parent_planes: &[usize],
     ) -> Option<usize> {
         const MAX_CANDIDATES: usize = 256;
         let brushes = &node.brushes;
+        if brushes.is_empty() {
+            return None;
+        }
         let mut best: Option<(usize, i64)> = None;
 
-        // Candidate planes: canonical side planes of the node's brushes.
         let mut candidates: Vec<usize> = Vec::new();
         for b in brushes {
             for (idx, _) in &b.sides {
@@ -739,7 +875,6 @@ impl PortalTree {
                 }
             }
         }
-        // Deterministic order, cap the work.
         candidates.sort_unstable();
         if candidates.len() > MAX_CANDIDATES {
             let step = candidates.len() / MAX_CANDIDATES;
@@ -756,11 +891,9 @@ impl PortalTree {
             let mut splits = 0i64;
             let mut facing = 0i64;
             for b in brushes {
-                // Quick AABB reject.
                 let side = box_on_plane_side(&b.bounds, &plane);
                 const FRONT: u8 = 1;
                 const BACK: u8 = 2;
-                const BOTH: u8 = 3;
                 match side {
                     FRONT => {
                         front += 1;
@@ -770,13 +903,12 @@ impl PortalTree {
                         back += 1;
                         continue;
                     }
-                    BOTH => {}
+                    3 => {}
                     _ => {
                         facing += 1;
                         continue;
                     }
                 }
-                // Exact test: any winding point crossing?
                 let mut df = 0.0f64;
                 let mut db = 0.0f64;
                 for (sidx, w) in &b.sides {
@@ -793,9 +925,6 @@ impl PortalTree {
                         }
                     }
                 }
-                // db = max(-dot) >= 0 here; a brush is entirely front when
-                // nothing sits behind (db ~ 0), entirely back when nothing
-                // sits in front (df ~ 0).
                 if df < EPS_BRUSH as f64 {
                     back += 1;
                 } else if db < EPS_BRUSH as f64 {
@@ -806,19 +935,60 @@ impl PortalTree {
                     back += 1;
                 }
             }
-            let axial = plane.n.x.abs() > 0.999 || plane.n.y.abs() > 0.999 || plane.n.z.abs() > 0.999;
+            let axial = plane.n.x == 1.0 || plane.n.y == 1.0 || plane.n.z == 1.0;
             let mut value: i64 = 5 * facing - 5 * splits - (front - back).abs();
             if axial {
                 value += 5;
             }
-            // Strongly prefer planes that actually separate brushes; a
-            // zero-split plane is only chosen when nothing better exists
-            // (routing/balance, like q3).
             if splits == 0 {
                 value -= 1000;
             }
             if best.map_or(true, |(_, bv)| value > bv) {
                 best = Some((cand, value));
+            }
+        }
+        best.map(|(idx, _)| idx)
+    }
+
+    /// CoD sub_404CE0 SelectSplitPlaneNum: grid-forced axial splits on x/y
+    /// first, then the plane whose face has the most coplanar supporters and
+    /// the fewest splits: score = 5*(facing - splits) + 5*axial.
+    fn select_split_plane_cod(node: &TreeNode, pool: &mut PlanePool) -> Option<usize> {
+        // Grid force (x/y only): the next 1024-line boundary the node spans.
+        for axis in 0..2usize {
+            let grid = (node.mins[axis] / BLOCKSIZE).floor() * BLOCKSIZE + BLOCKSIZE;
+            if node.maxs[axis] > grid {
+                let mut n = Vec3::ZERO;
+                n[axis] = 1.0;
+                return Some(pool.find(n, grid));
+            }
+        }
+
+        // Face scoring. `checked` mirrors the decomp: reset once, outer loop
+        // skips coplanar faces already counted, inner loop counts all faces.
+        let faces = &node.faces;
+        let mut checked = vec![false; faces.len()];
+        let mut best: Option<(usize, f32)> = None;
+        for i in 0..faces.len() {
+            if checked[i] {
+                continue;
+            }
+            let plane = pool.planes[faces[i].plane_idx];
+            let mut facing = 0i32;
+            let mut splits = 0i32;
+            for (k, f) in faces.iter().enumerate() {
+                if f.plane_idx == faces[i].plane_idx {
+                    facing += 1;
+                    checked[k] = true;
+                } else if winding_against_plane(&f.winding, plane.n, plane.d) == -2 {
+                    splits += 1;
+                }
+            }
+            // `plane->type < 3` = the three axial plane types.
+            let axial = plane.n.x == 1.0 || plane.n.y == 1.0 || plane.n.z == 1.0;
+            let score = 5.0 * (facing - splits) as f32 + if axial { 5.0 } else { 0.0 };
+            if best.map_or(true, |(_, bs)| score > bs) {
+                best = Some((faces[i].plane_idx, score));
             }
         }
         best.map(|(idx, _)| idx)
@@ -837,22 +1007,32 @@ impl PortalTree {
             return;
         }
 
-        if depth >= 128 {
+        if depth >= 200 || self.nodes[node_idx].faces.is_empty() {
+            // CoD BuildTree_r: no faces left -> leaf. Brushes still here
+            // make it solid.
             self.nodes[node_idx].leaf = true;
             return;
         }
 
         let split = {
             let node = &self.nodes[node_idx];
-            let planes: Vec<usize> = parent_planes.iter().map(|(p, _)| *p).collect();
-            self.select_split_plane(node, &planes)
+            match self.selection {
+                SplitterSelection::CodFaces => {
+                    Self::select_split_plane_cod(node, &mut self.pool)
+                }
+                SplitterSelection::BrushScoring => {
+                    let planes: Vec<usize> =
+                        parent_planes.iter().map(|(p, _)| *p).collect();
+                    self.select_split_plane_brush(node, &planes)
+                }
+            }
         };
         let Some(split) = split else {
             self.nodes[node_idx].leaf = true;
             return;
         };
 
-        // Partition the brushes.
+        // Partition the brushes (solid/open classification).
         let plane = self.pool.planes[split];
         let node = &mut self.nodes[node_idx];
         let mut front_list: Vec<BspBrush> = Vec::new();
@@ -868,12 +1048,60 @@ impl PortalTree {
             }
         }
 
+        // Partition the faces (facebsp.c): crossing faces are clipped,
+        // coplanar faces are dropped, which is what keeps a plane from being
+        // selected twice on one path.
+        let mut front_faces: Vec<BspFace> = Vec::new();
+        let mut back_faces: Vec<BspFace> = Vec::new();
+        let faces = std::mem::take(&mut node.faces);
+        for f in faces {
+            let side = winding_against_plane(&f.winding, plane.n, plane.d);
+            match side {
+                -2 => {
+                    let (wf, wb) = split_winding(&f.winding, plane.n, plane.d, FACE_EPSILON);
+                    if let Some(wf) = wf {
+                        front_faces.push(BspFace {
+                            plane_idx: f.plane_idx,
+                            winding: wf,
+                        });
+                    }
+                    if let Some(wb) = wb {
+                        back_faces.push(BspFace {
+                            plane_idx: f.plane_idx,
+                            winding: wb,
+                        });
+                    }
+                }
+                0 => front_faces.push(f),
+                1 => back_faces.push(f),
+                _ => {} // coplanar: dropped (decomp @404FAD)
+            }
+        }
+
         let planenum = split as i32;
         self.nodes[node_idx].planenum = planenum;
+        // Children inherit the full node bounds, then an axial split plane
+        // seeds the split axis on each side (facebsp.c).
+        let parent_mins = self.nodes[node_idx].mins;
+        let parent_maxs = self.nodes[node_idx].maxs;
+        let mut front_mins = parent_mins;
+        let front_maxs = parent_maxs;
+        let back_mins = parent_mins;
+        let mut back_maxs = parent_maxs;
+        for axis in 0..3usize {
+            if plane.n[axis] == 1.0 {
+                front_mins[axis] = plane.d;
+                back_maxs[axis] = plane.d;
+                break;
+            }
+        }
         let front_idx = self.push_node(TreeNode {
             planenum: PLANENUM_LEAF,
             children: None,
             brushes: front_list,
+            faces: front_faces,
+            mins: front_mins,
+            maxs: front_maxs,
             leaf: false,
             portals: Vec::new(),
         });
@@ -881,6 +1109,9 @@ impl PortalTree {
             planenum: PLANENUM_LEAF,
             children: None,
             brushes: back_list,
+            faces: back_faces,
+            mins: back_mins,
+            maxs: back_maxs,
             leaf: false,
             portals: Vec::new(),
         });
@@ -1028,45 +1259,7 @@ impl PortalTree {
     }
 }
 
-fn box_on_plane_side(b: &Aabb, plane: &Plane) -> u8 {
-    const FRONT: u8 = 1;
-    const BACK: u8 = 2;
-    // Fast axial reject.
-    for k in 0..3 {
-        let a = plane.n[k].abs();
-        if a < 0.999 {
-            continue;
-        }
-        if plane.n[k] > 0.0 {
-            let front = ((b.max[k] as f64) - (plane.d as f64)) > EPS_BRUSH as f64;
-            let back = ((b.min[k] as f64) - (plane.d as f64)) < -(EPS_BRUSH as f64);
-            return match (front, back) {
-                (true, true) => FRONT | BACK,
-                (true, false) => FRONT,
-                _ => BACK,
-            };
-        } else {
-            let front = ((plane.d as f64) - (b.min[k] as f64)) > EPS_BRUSH as f64;
-            let back = ((plane.d as f64) - (b.max[k] as f64)) < -(EPS_BRUSH as f64);
-            return match (front, back) {
-                (true, true) => FRONT | BACK,
-                (true, false) => FRONT,
-                _ => BACK,
-            };
-        }
-    }
-    // Non-axial plane: classify both corners (conservative).
-    let mut out = 0u8;
-    for p in [b.min, b.max] {
-        let (dot, _) = classify(p, plane.n, plane.d, EPS_BRUSH as f64);
-        if dot > 0.0 {
-            out |= FRONT;
-        } else {
-            out |= BACK;
-        }
-    }
-    out
-}
+
 
 // ---------------------------------------------------------------------------
 // Candidate filtering + brush emission
@@ -1315,7 +1508,7 @@ pub fn generate_bsp_portals(
     }
 
     // Build tree + portals.
-    let tree = PortalTree::build(pool, structural);
+    let tree = PortalTree::build(pool, structural, params.selection);
     report.max_depth = tree.max_depth;
     for node in &tree.nodes {
         if node.leaf {
@@ -1356,6 +1549,14 @@ pub fn generate_bsp_portals(
         } else {
             framed >= 0.8
         };
+        if std::env::var("BSP_DEBUG").is_ok() {
+            let wb2 = winding_bounds(&winding);
+            eprintln!(
+                "cand: n=({},{},{}) d={:.0} x[{:.0},{:.0}] y[{:.0},{:.0}] z[{:.0},{:.0}] framed={:.2} keep={}",
+                plane.n.x, plane.n.y, plane.n.z, plane.d,
+                wb2.min.x, wb2.max.x, wb2.min.y, wb2.max.y, wb2.min.z, wb2.max.z, framed, keep
+            );
+        }
         if !keep {
             continue;
         }
@@ -1482,28 +1683,53 @@ mod tests {
         }
         assert_eq!(structural.len(), 9);
 
-        let tree = PortalTree::build(pool, structural);
-        let candidates = collect_candidates(&tree);
-        // Framed openings on the doorway plane(s).
-        let doorway = candidates
-            .iter()
-            .filter(|(_, plane)| plane.n.x.abs() > 0.9 && (plane.d - 64.0).abs() < 0.5 || plane.n.x.abs() > 0.9 && (plane.d - 72.0).abs() < 0.5)
-            .filter(|(w, _)| {
-                let e = winding_bounds(w);
-                (e.max.x - e.min.x) < 12.0 && winding_area(w) < 20000.0
-            })
-            .max_by_key(|(w, _)| winding_area(w) as u64)
-            .expect("a framed portal on the doorway plane");
-        let w = &doorway.0;
-        let area = winding_area(w);
-        assert!(area > 48.0 * 64.0 * 0.5, "doorway-sized winding, got {area}");
-        // The winding lies within the doorway bounds (y,z), x == 64..72.
-        let b = winding_bounds(w);
-        eprintln!("doorway winding bounds: min=({}, {}, {}) max=({}, {}, {}) area={:.0}",
-            b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z, area);
-        assert!(b.min.x >= 63.5 && b.max.x <= 72.5);
-        assert!(b.min.y >= 47.0 && b.max.y <= 113.0);
-        assert!(b.min.z >= -1.0 && b.max.z <= 89.0);
+        // End-to-end: emit portal brushes through the full pipeline and
+        // require the doorway cross-section to be covered.
+        let mut map = crate::map::Map::default();
+        map.entities.push(crate::map::Entity {
+            id: crate::map::EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: Default::default(),
+            brushes,
+            model: None,
+        });
+        let textures = crate::portals::PortalTextures::default();
+        let _ = &textures;
+        let report = generate_bsp_portals(
+            &mut map,
+            crate::portals::PortalSide::Negative,
+            &textures,
+            &BspPortalParams::default(),
+        )
+        .expect("bsp portals");
+        eprintln!("doorway e2e report: {report:?}");
+
+        // The doorway void spans x 64..72, y 48..112, z 0..88. Some emitted
+        // portal brush must sit in there, thin along x, covering a decent
+        // chunk of the 64x88 cross-section.
+        let doorway = Aabb::from_points(
+            Vec3::new(63.5, 47.5, -0.5),
+            Vec3::new(72.5, 112.5, 88.5),
+        );
+
+        let mut best = 0.0f32;
+        for b in &map.entities[0].brushes {
+            let Some(aabb) = crate::portals::aabb_of_brush_pub(b) else {
+                continue;
+            };
+            // Overlap of the brush with the doorway column.
+            let dx = (aabb.max.x.min(doorway.max.x) - aabb.min.x.max(doorway.min.x)).max(0.0);
+            let dy = (aabb.max.y.min(doorway.max.y) - aabb.min.y.max(doorway.min.y)).max(0.0);
+            let dz = (aabb.max.z.min(doorway.max.z) - aabb.min.z.max(doorway.min.z)).max(0.0);
+            if dx <= 0.0 || aabb.max.x - aabb.min.x > 16.0 {
+                continue; // must be thin along x, inside the wall
+            }
+            best = best.max(dy * dz);
+        }
+        assert!(
+            best >= 48.0 * 64.0 * 0.5,
+            "doorway coverage too small: {best}"
+        );
     }
 
     #[test]
@@ -1568,7 +1794,7 @@ pub fn dbg_framing_histogram(map: &Map) -> Vec<(usize, usize)> {
             }
         }
     }
-    let tree = PortalTree::build(pool, structural);
+    let tree = PortalTree::build(pool, structural, SplitterSelection::default());
     let cands = collect_candidates(&tree);
     let mut buckets = [0usize; 11];
     for (winding, _plane) in &cands {
@@ -1607,7 +1833,7 @@ pub fn dbg_probe_planes(map: &mut Map, planes: &[(f32, usize)], u_range: (f32, f
             }
         }
     }
-    let tree = PortalTree::build(pool, structural);
+    let tree = PortalTree::build(pool, structural, SplitterSelection::default());
     eprintln!("bsp: {} leaves, {} portals", tree.nodes.iter().filter(|n| n.leaf).count(), tree.portals.len());
     for p in &tree.portals {
         let [a, b] = p.nodes;
@@ -1680,7 +1906,7 @@ pub fn dbg_trace_point(map: &mut Map, pt: Vec3) {
             }
         }
     }
-    let tree = PortalTree::build(pool, structural);
+    let tree = PortalTree::build(pool, structural, SplitterSelection::default());
     eprintln!(
         "trace point ({:.0},{:.0},{:.0}): leaves {} portals {}",
         pt.x, pt.y, pt.z,
@@ -1731,3 +1957,4 @@ pub fn dbg_trace_point(map: &mut Map, pt: Vec3) {
         }
     }
 }
+
