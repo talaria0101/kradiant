@@ -2014,7 +2014,11 @@ mod dbg_bsp_tests {
         }
         println!("ground truth: {removed} IW portal brushes, {} valid", originals.len());
 
-        let params = BspPortalParams::default();
+        let mut params = BspPortalParams::default();
+        if std::env::var("BSP_COD").is_ok() {
+            params.selection = crate::bsp::SplitterSelection::CodFaces;
+        }
+        println!("selection: {:?}", params.selection);
         let hist = crate::bsp::dbg_framing_histogram(&map);
         println!("framing histogram (0.0..1.0 by 0.1): {hist:?}");
         let t1 = std::time::Instant::now();
