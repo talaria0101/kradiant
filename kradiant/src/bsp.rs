@@ -68,6 +68,18 @@ pub struct BspPortalParams {
     /// originals top out around 5200; anything near the 131072 world bound
     /// is an uncarved void cross-section, not a mappable portal.
     pub max_extent: f32,
+    /// Coplanar portals within this gap (world units) are unioned into one
+    /// brush after emission (the originals over-cover through trim and let
+    /// the compiler trim the portal to the enclosed volume).
+    pub merge_gap: f32,
+    /// Deepest BSP level built; deeper nodes become leaves. Dawnville's
+    /// 77k-unit y extent needs ~110 levels of 1024 grid peeling alone,
+    /// so this must clear that plus face depth.
+    pub max_depth: usize,
+    /// Orient each portal's active face toward the larger adjacent open
+    /// leaf (IW orients portals toward the larger cell). When false the
+    /// `side` argument to [`generate_bsp_portals`] applies to all portals.
+    pub auto_side: bool,
     /// Splitter selection strategy.
     pub selection: SplitterSelection,
 }
@@ -84,7 +96,10 @@ impl Default for BspPortalParams {
             thickness: 8.0,
             area_separators: true,
             max_extent: 8192.0,
-            selection: SplitterSelection::BrushScoring,
+            merge_gap: 32.0,
+            max_depth: 200,
+            auto_side: true,
+            selection: SplitterSelection::CodFaces,
         }
     }
 }
@@ -363,6 +378,33 @@ struct Plane {
     d: f32,
 }
 
+/// Largest normal deviation from axial that still snaps to the axis.
+/// 1e-4 (~0.006 degrees) catches float-error rotations from plane-point
+/// math while leaving mapper-rotated walls (dawnville's diagonals deviate
+/// by 0.01+) alone.
+const SNAP_NORMAL_EPS: f32 = 1.0e-4;
+
+/// Snap a near-axial normal to the exact axis (q3map FindFloatPlane
+/// behaviour). Returns the input unchanged when no component dominates.
+fn snap_normal(n: Vec3) -> Vec3 {
+    let mut dom = 0usize;
+    let mut best = 0.0f32;
+    for k in 0..3 {
+        let a = n[k].abs();
+        if a > best {
+            best = a;
+            dom = k;
+        }
+    }
+    if best > 1.0 - SNAP_NORMAL_EPS {
+        let mut s = Vec3::ZERO;
+        s[dom] = if n[dom] >= 0.0 { 1.0 } else { -1.0 };
+        s
+    } else {
+        n
+    }
+}
+
 #[derive(Default)]
 struct PlanePool {
     planes: Vec<Plane>,
@@ -370,8 +412,15 @@ struct PlanePool {
 
 impl PlanePool {
     /// Canonical, positive-facing plane index (normalised like q3map).
+    /// Near-axial normals snap to exact axial planes first: downstream
+    /// code compares pool normals with `== 1.0` (axial split bounds
+    /// seeding, axial scoring bonuses), and the grid force merges its
+    /// exact-axial planes into near-axial face planes without snapping.
+    /// Without the snap a merged grid plane is near-axial, never seeds
+    /// bounds, partitions nothing, and is re-selected forever (depth-200
+    /// sliver recursion on dawnville: x=-2048 re-split 140 levels deep).
     fn find(&mut self, n: Vec3, d: f32) -> usize {
-        let mut n = n;
+        let mut n = snap_normal(n);
         let mut d = d;
         const N_EPS: f32 = PLANE_NORMAL_EPS as f32;
         if n.x < -N_EPS
@@ -668,6 +717,123 @@ fn winding_against_plane(w: &Winding, n: Vec3, d: f32) -> i32 {
     }
 }
 
+/// Subtract a convex brush volume from a winding: return the pieces of `w`
+/// lying outside `brush`. Points within `eps` of a brush plane count as
+/// inside, so abutting coincident faces are consumed. Pieces are wound
+/// like the input and carry no plane association (callers keep the side's
+/// canonical plane index).
+fn subtract_brush(w: &Winding, brush_planes: &[Plane], eps: f64) -> Vec<Winding> {
+    let mut outside: Vec<Winding> = Vec::new();
+    // Stack of (piece, next brush plane to test): a piece surviving all
+    // planes is fully buried and dropped.
+    let mut stack: Vec<(Winding, usize)> = vec![(w.clone(), 0)];
+    while let Some((piece, pi)) = stack.pop() {
+        if piece.len() < 3 {
+            continue;
+        }
+        if pi >= brush_planes.len() {
+            continue; // inside every plane -> buried
+        }
+        let pl = &brush_planes[pi];
+        let (_, _, counts) = classify_winding(&piece, pl.n, pl.d, eps);
+        if counts[SIDE_FRONT as usize] == 0 {
+            // All back or on-plane (abutting counts as buried): still
+            // inside with respect to this plane, test the rest.
+            stack.push((piece, pi + 1));
+            continue;
+        }
+        if counts[SIDE_BACK as usize] == 0 {
+            // All front or on-plane: outside, keep the whole piece.
+            outside.push(piece);
+            continue;
+        }
+        // Crossing: the front part is outside; the back part may still be
+        // outside through the remaining planes.
+        let (front, back) = split_winding(&piece, pl.n, pl.d, eps);
+        if let Some(f) = front {
+            outside.push(f);
+        }
+        if let Some(b) = back {
+            stack.push((b, pi + 1));
+        }
+    }
+    outside
+        .into_iter()
+        .filter(|p| p.len() >= 3 && !winding_is_tiny(p))
+        .collect()
+}
+
+/// Build the structural face list from clipped hull windings (CoD
+/// MakeVisibleBspFaceList / visibleHull): every brush side winding with
+/// the parts buried inside other structural brushes removed. Fully buried
+/// sides yield no faces, which is what keeps coincident interior planes
+/// out of the splitter selection. Falls back to raw sides when nothing
+/// survives (degenerate input).
+fn make_visible_bsp_face_list(brushes: &[BspBrush]) -> Vec<BspFace> {
+    // Outward planes per brush (the pool only stores canonical
+    // positive-facing planes, so derive the true planes from windings).
+    let outward: Vec<Vec<Plane>> = brushes
+        .iter()
+        .map(|b| {
+            b.sides
+                .iter()
+                .filter_map(|(_, w)| winding_plane(w))
+                .collect()
+        })
+        .collect();
+    let mut faces = Vec::new();
+    for (bi, b) in brushes.iter().enumerate() {
+        for (idx, w) in &b.sides {
+            let wb = winding_bounds(w);
+            let mut pieces = vec![w.clone()];
+            for (oi, o_planes) in outward.iter().enumerate() {
+                if oi == bi {
+                    continue;
+                }
+                // Quick reject: the winding must touch the other brush.
+                let ob = &brushes[oi].bounds;
+                const PAD: f32 = 0.5;
+                if wb.max.x < ob.min.x - PAD
+                    || wb.min.x > ob.max.x + PAD
+                    || wb.max.y < ob.min.y - PAD
+                    || wb.min.y > ob.max.y + PAD
+                    || wb.max.z < ob.min.z - PAD
+                    || wb.min.z > ob.max.z + PAD
+                {
+                    continue;
+                }
+                let mut next = Vec::new();
+                for p in &pieces {
+                    next.extend(subtract_brush(p, o_planes, 0.1));
+                }
+                pieces = next;
+                if pieces.is_empty() {
+                    break;
+                }
+            }
+            for p in pieces {
+                faces.push(BspFace {
+                    plane_idx: *idx,
+                    winding: p,
+                });
+            }
+        }
+    }
+    if faces.is_empty() {
+        // Degenerate: every side buried (or no brushes); raw sides still
+        // partition space.
+        for b in brushes {
+            for (idx, w) in &b.sides {
+                faces.push(BspFace {
+                    plane_idx: *idx,
+                    winding: w.clone(),
+                });
+            }
+        }
+    }
+    faces
+}
+
 /// blocksize for the grid-forced axial splits (q3map default, -blocksize).
 const BLOCKSIZE: f32 = 1024.0;
 /// Face clip epsilon for splitter partitioning (facebsp.c FACE_EPSILON).
@@ -687,6 +853,7 @@ struct PortalTree {
     portals: Vec<TreePortal>,
     outside: usize,
     max_depth: usize,
+    depth_limit: usize,
     selection: SplitterSelection,
 }
 
@@ -732,20 +899,18 @@ fn is_detail_texture(tex: &str) -> bool {
 }
 
 impl PortalTree {
-    fn build(pool: PlanePool, brushes: Vec<BspBrush>, selection: SplitterSelection) -> PortalTree {
+    fn build(
+        pool: PlanePool,
+        brushes: Vec<BspBrush>,
+        selection: SplitterSelection,
+        depth_limit: usize,
+    ) -> PortalTree {
         // CoD FaceBSP: the structural face list drives the splitter
-        // selection; one face per brush side.
-        let faces: Vec<BspFace> = brushes
-            .iter()
-            .flat_map(|b| {
-                b.sides
-                    .iter()
-                    .map(|(idx, w)| BspFace {
-                        plane_idx: *idx,
-                        winding: w.clone(),
-                    })
-            })
-            .collect();
+        // selection; faces are the clipped hull windings
+        // (MakeVisibleBspFaceList): side parts buried inside other
+        // structural brushes are removed, so coincident interior planes
+        // never reach the splitter.
+        let faces: Vec<BspFace> = make_visible_bsp_face_list(&brushes);
         // Tree bounds from the face windings (FaceBSP).
         let mut bounds: Option<Aabb> = None;
         for f in &faces {
@@ -767,6 +932,7 @@ impl PortalTree {
             portals: Vec::new(),
             outside: usize::MAX,
             max_depth: 0,
+            depth_limit,
             selection,
         };
 
@@ -1007,7 +1173,7 @@ impl PortalTree {
             return;
         }
 
-        if depth >= 200 || self.nodes[node_idx].faces.is_empty() {
+        if depth >= self.depth_limit || self.nodes[node_idx].faces.is_empty() {
             // CoD BuildTree_r: no faces left -> leaf. Brushes still here
             // make it solid.
             self.nodes[node_idx].leaf = true;
@@ -1304,16 +1470,19 @@ fn locate_leaf(tree: &PortalTree, pt: Vec3) -> usize {
     }
 }
 
-/// Fraction of the winding's edges whose immediate outside is solid world
-/// (a jamb, sill, lintel or wall face). A mapper-portal-worthy opening is
-/// framed by solid geometry; void-shell cross-sections are not.
+/// Fraction of the winding's perimeter whose immediate outside is solid
+/// world (a jamb, sill, lintel or wall face), weighted by edge length.
+/// A mapper-portal-worthy opening is framed by solid geometry;
+/// void-shell cross-sections are not. Length weighting (rather than
+/// per-edge counts) keeps long wall-span edges from being outvoted by
+/// clusters of short trim-sliver edges on fragmented leaf portals.
 fn solid_perimeter_fraction(tree: &PortalTree, winding: &Winding) -> f32 {
     let Some(plane) = winding_plane(winding) else {
         return 0.0;
     };
     let n = winding.len();
-    let mut solid = 0usize;
-    let mut total = 0usize;
+    let mut solid_len = 0.0f32;
+    let mut total_len = 0.0f32;
     for i in 0..n {
         let a = winding[i];
         let b = winding[(i + 1) % n];
@@ -1322,7 +1491,7 @@ fn solid_perimeter_fraction(tree: &PortalTree, winding: &Winding) -> f32 {
         if len < 0.5 {
             continue;
         }
-        total += 1;
+        total_len += len;
         // Outward in-plane edge normal: edge_dir x plane_normal points away
         // from the winding interior for CCW windings.
         let dir = edge * (1.0 / len);
@@ -1333,13 +1502,13 @@ fn solid_perimeter_fraction(tree: &PortalTree, winding: &Winding) -> f32 {
         out_n = out_n.normalize();
         let mid = (a + b) * 0.5 + out_n * 2.0;
         if leaf_kind(tree, locate_leaf(tree, mid)) == LeafKind::Solid {
-            solid += 1;
+            solid_len += len;
         }
     }
-    if total == 0 {
+    if total_len <= 0.0 {
         0.0
     } else {
-        solid as f32 / total as f32
+        solid_len / total_len
     }
 }
 
@@ -1369,7 +1538,24 @@ fn collect_candidates(tree: &PortalTree) -> Vec<(Winding, Plane)> {
     out
 }
 
-
+/// March from `start` along `dir` through open leaves and return how many
+/// steps stay in open space (stops at solid leaves, the outside void and
+/// after 2048 units). Measures how deep the open cell behind a portal
+/// runs, for portal-side selection.
+fn open_run_length(tree: &PortalTree, start: Vec3, dir: Vec3) -> usize {
+    const STEP: f32 = 8.0;
+    const MAX_STEPS: usize = 256; // 2048 world units
+    let mut run = 0usize;
+    let mut p = start;
+    for _ in 0..MAX_STEPS {
+        if leaf_kind(tree, locate_leaf(tree, p)) != LeafKind::Open {
+            break;
+        }
+        run += 1;
+        p += dir * STEP;
+    }
+    run
+}
 
 /// Emit one convex portal brush for a winding: the winding extruded
 /// +-thickness/2 along the plane normal.
@@ -1453,7 +1639,7 @@ fn portal_brush_from_winding(
     };
     for f in &mut faces {
         let n = face_plane_normal(f);
-        if (n - plane.n * -want).length() < 0.1 && n.dot(plane.n * -want) > 0.95 {
+        if (n - plane.n * want).length() < 0.1 && n.dot(plane.n * want) > 0.95 {
             f.texture = textures.portal.clone();
         }
     }
@@ -1508,7 +1694,7 @@ pub fn generate_bsp_portals(
     }
 
     // Build tree + portals.
-    let tree = PortalTree::build(pool, structural, params.selection);
+    let tree = PortalTree::build(pool, structural, params.selection, params.max_depth);
     report.max_depth = tree.max_depth;
     for node in &tree.nodes {
         if node.leaf {
@@ -1572,8 +1758,33 @@ pub fn generate_bsp_portals(
         if winding_area(&winding) < params.min_area {
             continue;
         }
+        // PortalSide: IW orients the active face toward the larger cell.
+        // March open space behind both caps; the deeper run wins. With
+        // the inward-normal convention Negative faces the +normal (front)
+        // leaf, Positive the back leaf; ties keep Negative.
+        let face_side = if params.auto_side {
+            let centroid = winding.iter().copied().sum::<Vec3>() * (1.0 / winding.len() as f32);
+            let off = params.thickness * 0.5 + 2.0;
+            let front_open = open_run_length(&tree, centroid + plane.n * off, plane.n);
+            let back_open = open_run_length(&tree, centroid - plane.n * off, -plane.n);
+            let picked = if front_open > back_open {
+                crate::portals::PortalSide::Negative
+            } else {
+                crate::portals::PortalSide::Positive
+            };
+            if std::env::var("BSP_DEBUG").is_ok() {
+                eprintln!(
+                    "side: n=({},{},{}) d={:.0} centroid=({:.0},{:.0},{:.0}) front_run={} back_run={} -> {:?}",
+                    plane.n.x, plane.n.y, plane.n.z, plane.d,
+                    centroid.x, centroid.y, centroid.z, front_open, back_open, picked
+                );
+            }
+            picked
+        } else {
+            side
+        };
         let brush =
-            portal_brush_from_winding(BrushId(next_id), &winding, plane, params.thickness, textures, side);
+            portal_brush_from_winding(BrushId(next_id), &winding, plane, params.thickness, textures, face_side);
         next_id += 1;
         let Some(brush) = brush else { continue };
         let id = brush.id;
@@ -1586,12 +1797,13 @@ pub fn generate_bsp_portals(
                 entity: 0,
                 id,
                 aabb,
+                side: face_side,
             });
         }
     }
 
     // Over-cover like the originals: union coplanar near-touching portals.
-    let merged = crate::portals::merge_placed_portals_public(map, &mut placed, crate::portals::PORTAL_MERGE_GAP, side, textures);
+    let merged = crate::portals::merge_placed_portals_public(map, &mut placed, params.merge_gap, side, textures);
     report.portals_merged = merged;
     report.portals_created = placed.len();
     let _ = world_brush_count;
@@ -1653,6 +1865,74 @@ mod tests {
         // Front = the +plane side (x 32..64), back = x 0..32.
         assert!((f.bounds.min.x - 32.0).abs() < 0.2 && (f.bounds.max.x - 64.0).abs() < 0.2);
         assert!((bk.bounds.min.x - 0.0).abs() < 0.2 && (bk.bounds.max.x - 32.0).abs() < 0.2);
+    }
+
+    #[test]
+    fn plane_pool_snaps_near_axial_normals() {
+        let mut pool = PlanePool::default();
+        // Float-error axial (the dawnville x=-2048 sliver-loop plane).
+        let a = pool.find(Vec3::new(0.99999994, 0.0, 0.0), -2048.0);
+        assert_eq!(pool.planes[a].n, Vec3::X);
+        // The exact grid plane merges into it instead of coexisting.
+        let b = pool.find(Vec3::X, -2048.0);
+        assert_eq!(a, b);
+        // Genuinely rotated walls are untouched.
+        let c = pool.find(Vec3::new(0.116835214, -0.9931513, 0.0), 16871.91);
+        assert!((pool.planes[c].n.x - 0.116835214).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn visible_hull_consumes_abutting_faces() {
+        // Two boxes sharing the x=64 plane with identical footprints:
+        // the touching faces are interior and must vanish, while the far
+        // faces survive whole.
+        let mut pool = PlanePool::default();
+        let a = bsp_brush_from_map_brush(&box_brush((0.0, 0.0, 0.0), (64.0, 64.0, 64.0)), 0, &mut pool)
+            .expect("box a");
+        let b = bsp_brush_from_map_brush(&box_brush((64.0, 0.0, 0.0), (128.0, 64.0, 64.0)), 0, &mut pool)
+            .expect("box b");
+        let b_planes: Vec<Plane> = b.sides.iter().filter_map(|(_, w)| winding_plane(w)).collect();
+        assert_eq!(b_planes.len(), 6);
+        let side_at = |brush: &BspBrush, n: Vec3| -> Winding {
+            brush
+                .sides
+                .iter()
+                .find(|(_, w)| {
+                    winding_plane(w).map_or(false, |p| (p.n - n).length() < 0.01)
+                })
+                .map(|(_, w)| w.clone())
+                .expect("side")
+        };
+        // Touching face (a's +x at x=64): buried inside b -> nothing.
+        let touching = side_at(&a, Vec3::X);
+        assert!((winding_area(&touching) - 64.0 * 64.0).abs() < 1.0);
+        assert!(subtract_brush(&touching, &b_planes, 0.1).is_empty());
+        // Far face (a's -x at x=0): fully outside -> one identical piece.
+        let far = side_at(&a, -Vec3::X);
+        let kept = subtract_brush(&far, &b_planes, 0.1);
+        assert_eq!(kept.len(), 1);
+        assert!((winding_area(&kept[0]) - 64.0 * 64.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn visible_hull_keeps_exposed_overhang() {
+        // Box b covers only half of a's +x face in y: the exposed half
+        // must survive as one piece of half the area.
+        let mut pool = PlanePool::default();
+        let a = bsp_brush_from_map_brush(&box_brush((0.0, 0.0, 0.0), (64.0, 64.0, 64.0)), 0, &mut pool)
+            .expect("box a");
+        let b = bsp_brush_from_map_brush(&box_brush((64.0, 32.0, 0.0), (128.0, 96.0, 64.0)), 0, &mut pool)
+            .expect("box b");
+        let b_planes: Vec<Plane> = b.sides.iter().filter_map(|(_, w)| winding_plane(w)).collect();
+        let face = a
+            .sides
+            .iter()
+            .find(|(_, w)| winding_plane(w).map_or(false, |p| (p.n - Vec3::X).length() < 0.01))
+            .map(|(_, w)| w.clone())
+            .expect("+x side");
+        let kept = subtract_brush(&face, &b_planes, 0.1);
+        assert_eq!(kept.len(), 1);
+        assert!((winding_area(&kept[0]) - 64.0 * 32.0).abs() < 2.0);
     }
 
     /// A sealed room with an interior wall that has a doorway. The BSP must
@@ -1732,6 +2012,127 @@ mod tests {
         );
     }
 
+    /// Two rooms of different sizes sharing a doorway wall: with
+    /// `auto_side` the emitted portal's active face must point toward the
+    /// larger room (IW orients portals toward the larger cell).
+    #[test]
+    fn auto_side_faces_the_larger_room() {
+        // Small room x -28..0, big room x 8..108, doorway wall x 0..8
+        // with a doorway y 48..112, z 0..88.
+        let rooms = || {
+            vec![
+                box_brush((-28.0, -64.0, -16.0), (108.0, 192.0, 0.0)),
+                box_brush((-28.0, -64.0, 128.0), (108.0, 192.0, 144.0)),
+                box_brush((-36.0, -80.0, 0.0), (-28.0, 208.0, 128.0)),
+                box_brush((108.0, -80.0, 0.0), (116.0, 208.0, 128.0)),
+                box_brush((-36.0, -80.0, 0.0), (116.0, -64.0, 128.0)),
+                box_brush((-36.0, 192.0, 0.0), (116.0, 208.0, 128.0)),
+                box_brush((0.0, -64.0, 0.0), (8.0, 48.0, 128.0)),
+                box_brush((0.0, 112.0, 0.0), (8.0, 192.0, 128.0)),
+                box_brush((0.0, 48.0, 88.0), (8.0, 112.0, 128.0)),
+            ]
+        };
+        let run = |auto_side: bool, side: crate::portals::PortalSide| {
+            let mut map = crate::map::Map::default();
+            map.entities.push(crate::map::Entity {
+                id: crate::map::EntityId(0),
+                classname: "worldspawn".to_string(),
+                properties: Default::default(),
+                brushes: rooms(),
+                model: None,
+            });
+            let mut params = BspPortalParams::default();
+            params.auto_side = auto_side;
+            generate_bsp_portals(
+                &mut map,
+                side,
+                &crate::portals::PortalTextures::default(),
+                &params,
+            )
+            .expect("bsp portals");
+            // Portal-textured face inward normals of brushes sitting thin
+            // along x inside the doorway column.
+            let mut normals = Vec::new();
+            for b in &map.entities[0].brushes {
+                let Some(aabb) = crate::portals::aabb_of_brush_pub(b) else {
+                    continue;
+                };
+                // Overlap with the doorway column, thin along x.
+                if aabb.max.x < -1.0
+                    || aabb.min.x > 9.0
+                    || aabb.max.x - aabb.min.x > 16.0
+                {
+                    continue;
+                }
+                if aabb.max.y < 48.0 || aabb.min.y > 112.0 {
+                    continue;
+                }
+                if aabb.max.z < 0.0 || aabb.min.z > 88.0 {
+                    continue;
+                }
+                if let BrushContent::Convex(faces) = &b.content {
+                    for f in faces {
+                        if f.texture == "common/portal" {
+                            normals.push(crate::texmap::face_plane_normal(f));
+                        }
+                    }
+                }
+            }
+            normals
+        };
+        // Auto: active face points toward the big room (+x). With the
+        // inward-normal convention that cap's inward normal points -x.
+        let auto_normals = run(true, crate::portals::PortalSide::Negative);
+        assert!(!auto_normals.is_empty(), "doorway portal emitted");
+        for n in &auto_normals {
+            assert!(
+                (n + Vec3::X).length() < 0.1,
+                "auto side faces +x, inward normal {n:?}"
+            );
+        }
+        // Fixed Positive is the opposite cap (inward +x).
+        let fixed_normals = run(false, crate::portals::PortalSide::Positive);
+        assert!(!fixed_normals.is_empty(), "doorway portal emitted");
+        for n in &fixed_normals {
+            assert!(
+                (n - Vec3::X).length() < 0.1,
+                "fixed Positive keeps inward normal {n:?}"
+            );
+        }
+    }
+
+    /// Regression baseline on the in-repo training_outside map: pins the
+    /// BSP pass against silent collapse (exact numbers live in
+    /// PORTALS-STATUS.md). training_outside is an open arena, so most
+    /// portals are area separators.
+    #[test]
+    fn training_outside_bsp_baseline() {
+        let text = include_str!("../test/training_outside.map");
+        let mut map = crate::parser::parse_map_string(text).expect("parse");
+        let brushes_before = map.entities.iter().map(|e| e.brushes.len()).sum::<usize>();
+        let textures = crate::portals::PortalTextures::default();
+        let report = generate_bsp_portals(
+            &mut map,
+            crate::portals::PortalSide::Negative,
+            &textures,
+            &BspPortalParams::default(),
+        )
+        .expect("bsp portals");
+        eprintln!("training_outside bsp ({brushes_before} brushes): {report:?}");
+        // Loose guardrails: catch structural collapse (empty trees, zero
+        // emission, runaway depth), not exact tuning. As of the CodFaces
+        // reland: 633 leaves, 1065 candidates, 140 created, depth 31.
+        assert!((300..1500).contains(&report.leaves), "leaves {}", report.leaves);
+        assert!((50..300).contains(&report.portals_created), "created {}", report.portals_created);
+        assert!(report.max_depth <= 100, "depth {}", report.max_depth);
+        // Every emitted brush must survive a geometry round-trip.
+        for b in &map.entities[0].brushes[brushes_before..] {
+            let mut owned = b.clone();
+            owned.invalidate_geometry();
+            assert!(crate::geometry::brush_to_polygons(&owned).is_ok());
+        }
+    }
+
     #[test]
     fn emitted_portal_brush_is_convex_and_portal_textured() {
         let winding = vec![
@@ -1794,7 +2195,7 @@ pub fn dbg_framing_histogram(map: &Map) -> Vec<(usize, usize)> {
             }
         }
     }
-    let tree = PortalTree::build(pool, structural, SplitterSelection::default());
+    let tree = PortalTree::build(pool, structural, SplitterSelection::default(), BspPortalParams::default().max_depth);
     let cands = collect_candidates(&tree);
     let mut buckets = [0usize; 11];
     for (winding, _plane) in &cands {
@@ -1833,7 +2234,7 @@ pub fn dbg_probe_planes(map: &mut Map, planes: &[(f32, usize)], u_range: (f32, f
             }
         }
     }
-    let tree = PortalTree::build(pool, structural, SplitterSelection::default());
+    let tree = PortalTree::build(pool, structural, SplitterSelection::default(), BspPortalParams::default().max_depth);
     eprintln!("bsp: {} leaves, {} portals", tree.nodes.iter().filter(|n| n.leaf).count(), tree.portals.len());
     for p in &tree.portals {
         let [a, b] = p.nodes;
@@ -1906,7 +2307,7 @@ pub fn dbg_trace_point(map: &mut Map, pt: Vec3) {
             }
         }
     }
-    let tree = PortalTree::build(pool, structural, SplitterSelection::default());
+    let tree = PortalTree::build(pool, structural, SplitterSelection::default(), BspPortalParams::default().max_depth);
     eprintln!(
         "trace point ({:.0},{:.0},{:.0}): leaves {} portals {}",
         pt.x, pt.y, pt.z,

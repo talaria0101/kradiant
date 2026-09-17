@@ -740,6 +740,24 @@ fn merge_placed_portals(
             aabb.min = aabb.min.min(placed[i].aabb.min);
             aabb.max = aabb.max.max(placed[i].aabb.max);
         }
+        // Majority side by member volume (ties keep the caller's side).
+        let mut neg_vol = 0.0f32;
+        let mut pos_vol = 0.0f32;
+        for &i in group.iter() {
+            let e = placed[i].aabb.max - placed[i].aabb.min;
+            let vol = (e.x.max(0.0) * e.y.max(0.0) * e.z.max(0.0)).max(0.0);
+            match placed[i].side {
+                PortalSide::Negative => neg_vol += vol,
+                PortalSide::Positive => pos_vol += vol,
+            }
+        }
+        let group_side = if pos_vol > neg_vol {
+            PortalSide::Positive
+        } else if neg_vol > pos_vol {
+            PortalSide::Negative
+        } else {
+            side
+        };
         let entity_idx = placed[first].entity;
         let Some(entity) = map.entities.get_mut(entity_idx) else {
             continue;
@@ -752,12 +770,13 @@ fn merge_placed_portals(
             .map(|id| id.wrapping_add(1))
             .unwrap_or(0);
         let id = BrushId(next_id);
-        let brush = generate_opening_portal_brush(id, &aabb, side, textures);
+        let brush = generate_opening_portal_brush(id, &aabb, group_side, textures);
         entity.brushes.push(brush);
         next.push(PlacedPortal {
             entity: entity_idx,
             id,
             aabb,
+            side: group_side,
         });
     }
     *placed = next;
@@ -849,11 +868,14 @@ const CROSS_MARGIN: f32 = 1.0;
 pub(crate) const PORTAL_MERGE_GAP: f32 = 16.0;
 
 /// A generated portal brush, tracked so the merge pass can replace it.
+/// `side` is the active-face side the brush was emitted with; merges keep
+/// the majority side by member volume.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlacedPortal {
     pub(crate) entity: usize,
     pub(crate) id: BrushId,
     pub(crate) aabb: Aabb,
+    pub(crate) side: PortalSide,
 }
 
 /// Snap ascending, deduplicated grid coordinates DOWN onto a lattice of
@@ -1215,6 +1237,7 @@ pub fn generate_auto_opening_portals(
                         entity: entity_idx,
                         id,
                         aabb,
+                        side,
                     });
                     report.portals_created += 1;
                 }
@@ -2018,7 +2041,32 @@ mod dbg_bsp_tests {
         if std::env::var("BSP_COD").is_ok() {
             params.selection = crate::bsp::SplitterSelection::CodFaces;
         }
-        println!("selection: {:?}", params.selection);
+        if std::env::var("BSP_BRUSH").is_ok() {
+            params.selection = crate::bsp::SplitterSelection::BrushScoring;
+        }
+        if let Ok(gap) = std::env::var("BSP_MERGE_GAP") {
+            if let Ok(gap) = gap.parse::<f32>() {
+                params.merge_gap = gap;
+            }
+        }
+        if let Ok(depth) = std::env::var("BSP_MAX_DEPTH") {
+            if let Ok(depth) = depth.parse::<usize>() {
+                params.max_depth = depth;
+            }
+        }
+        println!("selection: {:?} merge_gap={} max_depth={}", params.selection, params.merge_gap, params.max_depth);
+        // Size profile of the originals (face-rect area of each portal
+        // brush): wall passages are small, district/sky separators large.
+        let mut area_hist = [0usize; 6];
+        for o in &originals {
+            let ext = [o.max[0] - o.min[0], o.max[1] - o.min[1], o.max[2] - o.min[2]];
+            let mut e = ext;
+            e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let area = e[1] * e[2];
+            let b = if area < 8_000.0 { 0 } else if area < 32_000.0 { 1 } else if area < 128_000.0 { 2 } else if area < 512_000.0 { 3 } else if area < 2_000_000.0 { 4 } else { 5 };
+            area_hist[b] += 1;
+        }
+        println!("original face areas [<8k, <32k, <128k, <512k, <2M, >=2M]: {area_hist:?}");
         let hist = crate::bsp::dbg_framing_histogram(&map);
         println!("framing histogram (0.0..1.0 by 0.1): {hist:?}");
         let t1 = std::time::Instant::now();
@@ -2090,6 +2138,22 @@ mod dbg_bsp_tests {
             fracs.iter().sum::<f32>() / n.max(1.0),
             fracs.len()
         );
+        println!("--- untouched originals (frac < 0.05) ---");
+        for (o, &f) in originals.iter().zip(fracs.iter()) {
+            if f >= 0.05 {
+                continue;
+            }
+            let ext = [o.max[0] - o.min[0], o.max[1] - o.min[1], o.max[2] - o.min[2]];
+            let mut e = ext;
+            e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "  center ({:.0},{:.0},{:.0}) ext {:.0}x{:.0}x{:.0} (sorted {:.0}/{:.0}/{:.0}) frac {:.2}",
+                (o.min[0] + o.max[0]) * 0.5,
+                (o.min[1] + o.max[1]) * 0.5,
+                (o.min[2] + o.max[2]) * 0.5,
+                ext[0], ext[1], ext[2], e[0], e[1], e[2], f
+            );
+        }
 
         crate::parser::save_map(&map, "/workspace/dawnville_portals_bsp.map").expect("save");
         let text2 = std::fs::read_to_string("/workspace/dawnville_portals_bsp.map").expect("read back");
