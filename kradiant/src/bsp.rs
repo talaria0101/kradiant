@@ -114,6 +114,9 @@ pub struct BspPortalReport {
     pub candidates: usize,
     pub portals_created: usize,
     pub portals_merged: usize,
+    /// Portals dropped by the prune pass (buried in solid, or twin of a
+    /// larger portal through the same wall).
+    pub portals_pruned: usize,
     pub max_depth: usize,
 }
 
@@ -1653,6 +1656,209 @@ fn is_flat_degenerate(a: Vec3, b: Vec3, c: Vec3) -> bool {
     (b - a).cross(c - a).length_squared() < 1.0e-8
 }
 
+/// Prune-pass thresholds (tuned on dawnville; see PORTALS-STATUS.md).
+/// Drop a portal only when EVERY face sample sits inside solid world on
+/// both sides: partially buried slabs still cover a real opening on their
+/// open samples, and the tutorials over-cover on purpose (the compiler
+/// trims the portal to the enclosed volume).
+const PRUNE_MAX_BLOCKED: f32 = 1.0;
+/// Twin portals through one wall are at most this far apart plane-wise.
+const TWIN_MAX_PLANE_DIST: f32 = 16.0;
+/// Twins must overlap this much of the smaller face rect (same-wall
+/// twins from one opening overlap ~fully; lower values strand offset
+/// neighbours covering distinct originals).
+const TWIN_MIN_OVERLAP: f32 = 0.8;
+/// ...and their volumes must touch within this tolerance (stacked
+/// openings on different floors have disjoint volumes and stay).
+const TWIN_VOLUME_TOL: f32 = 1.0;
+
+fn extents_of(aabb: &Aabb) -> [f32; 3] {
+    [
+        aabb.max.x - aabb.min.x,
+        aabb.max.y - aabb.min.y,
+        aabb.max.z - aabb.min.z,
+    ]
+}
+
+fn thin_axis_of(e: &[f32; 3]) -> usize {
+    let mut axis = 0usize;
+    if e[1] < e[axis] {
+        axis = 1;
+    }
+    if e[2] < e[axis] {
+        axis = 2;
+    }
+    axis
+}
+
+fn in_plane_axes(axis: usize) -> (usize, usize) {
+    match axis {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    }
+}
+
+/// Fraction of a portal slab's face-rect samples that sit inside solid
+/// world on BOTH sides (merges can swallow piers; fragments are clean by
+/// construction, so this runs on the merged set). Sampled on a 16-unit
+/// grid through the slab centre plane.
+fn portal_blocked_fraction(tree: &PortalTree, aabb: &Aabb) -> f32 {
+    let e = extents_of(aabb);
+    let axis = thin_axis_of(&e);
+    let (u, v) = in_plane_axes(axis);
+    let mid = (aabb.min[axis] + aabb.max[axis]) * 0.5;
+    let half = e[axis] * 0.5;
+    let nu = ((e[u] / 16.0).ceil() as usize).clamp(1, 32);
+    let nv = ((e[v] / 16.0).ceil() as usize).clamp(1, 32);
+    let mut blocked = 0usize;
+    let mut total = 0usize;
+    for iu in 0..nu {
+        for iv in 0..nv {
+            let mut c = Vec3::ZERO;
+            c[u] = aabb.min[u] + e[u] * (iu as f32 + 0.5) / nu as f32;
+            c[v] = aabb.min[v] + e[v] * (iv as f32 + 0.5) / nv as f32;
+            c[axis] = mid;
+            let mut pa = c;
+            pa[axis] += half + 1.0;
+            let mut pb = c;
+            pb[axis] -= half + 1.0;
+            total += 1;
+            if leaf_kind(tree, locate_leaf(tree, pa)) == LeafKind::Solid
+                && leaf_kind(tree, locate_leaf(tree, pb)) == LeafKind::Solid
+            {
+                blocked += 1;
+            }
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        blocked as f32 / total as f32
+    }
+}
+
+/// Two portal slabs covering the same opening from parallel planes
+/// (typically both faces of one wall): same thin axis, planes close,
+/// face rects mostly overlapping, volumes touching. Stacked openings on
+/// different floors have disjoint volumes and never match.
+fn portals_are_twins(a: &Aabb, b: &Aabb) -> bool {
+    let ea = extents_of(a);
+    let eb = extents_of(b);
+    if thin_axis_of(&ea) != thin_axis_of(&eb) {
+        return false;
+    }
+    let axis = thin_axis_of(&ea);
+    let (u, v) = in_plane_axes(axis);
+    let mida = (a.min[axis] + a.max[axis]) * 0.5;
+    let midb = (b.min[axis] + b.max[axis]) * 0.5;
+    if (mida - midb).abs() > TWIN_MAX_PLANE_DIST {
+        return false;
+    }
+    // Volumes must touch: same-wall twins do, stacked floors do not.
+    if a.min.x > b.max.x + TWIN_VOLUME_TOL
+        || b.min.x > a.max.x + TWIN_VOLUME_TOL
+        || a.min.y > b.max.y + TWIN_VOLUME_TOL
+        || b.min.y > a.max.y + TWIN_VOLUME_TOL
+        || a.min.z > b.max.z + TWIN_VOLUME_TOL
+        || b.min.z > a.max.z + TWIN_VOLUME_TOL
+    {
+        return false;
+    }
+    let area_a = ea[u] * ea[v];
+    let area_b = eb[u] * eb[v];
+    let smaller = area_a.min(area_b);
+    if smaller < 1.0 {
+        return false;
+    }
+    let iu = (a.max[u].min(b.max[u]) - a.min[u].max(b.min[u])).max(0.0);
+    let iv = (a.max[v].min(b.max[v]) - a.min[v].max(b.min[v])).max(0.0);
+    iu * iv / smaller > TWIN_MIN_OVERLAP
+}
+
+fn rect_area(aabb: &Aabb) -> f32 {
+    let e = extents_of(aabb);
+    let (u, v) = in_plane_axes(thin_axis_of(&e));
+    e[u] * e[v]
+}
+
+/// Second pass over the merged portals: drop slabs buried in solid and
+/// collapse twin slabs covering one opening from parallel planes (keeps
+/// the larger rect). Removes the dropped brushes from the map. Returns
+/// how many portals were pruned.
+fn prune_placed_portals(
+    map: &mut Map,
+    placed: &mut Vec<crate::portals::PlacedPortal>,
+    tree: &PortalTree,
+) -> usize {
+    let before = placed.len();
+    let mut dropped: std::collections::HashSet<BrushId> = std::collections::HashSet::new();
+    // Buried slabs first: merges can swallow piers and wall chunks.
+    // (Partition manually: Vec::retain would drop the tracking entries
+    // without recording their brush ids for removal below.)
+    let mut visible = Vec::with_capacity(placed.len());
+    for p in placed.drain(..) {
+        let blocked = portal_blocked_fraction(tree, &p.aabb);
+        // Strictly below 1.0: at least one sample stands in open air on
+        // some side, so the slab may cover a real opening. Fully buried
+        // slabs cover nothing and go.
+        if blocked < PRUNE_MAX_BLOCKED {
+            visible.push(p);
+        } else {
+            if std::env::var("PRUNE_DEBUG").is_ok() {
+                let b = &p.aabb;
+                eprintln!(
+                    "prune buried frac={:.2} x[{:.0},{:.0}] y[{:.0},{:.0}] z[{:.0},{:.0}]",
+                    blocked, b.min.x, b.max.x, b.min.y, b.max.y, b.min.z, b.max.z
+                );
+            }
+            dropped.insert(p.id);
+        }
+    }
+    *placed = visible;
+    // Twins, largest rect first (emission order is deterministic, so ties
+    // keep the earlier portal).
+    let mut order: Vec<usize> = (0..placed.len()).collect();
+    order.sort_by(|&i, &j| {
+        rect_area(&placed[j].aabb)
+            .partial_cmp(&rect_area(&placed[i].aabb))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut keep = vec![false; placed.len()];
+    for &i in &order {
+        let mut twin = false;
+        for (j, k) in keep.iter().enumerate() {
+            if *k && portals_are_twins(&placed[i].aabb, &placed[j].aabb) {
+                twin = true;
+                break;
+            }
+        }
+        if !twin {
+            keep[i] = true;
+        }
+    }
+    let mut survivors = Vec::with_capacity(placed.len());
+    for (p, k) in placed.drain(..).zip(keep.iter()) {
+        if *k {
+            survivors.push(p);
+        } else {
+            if std::env::var("PRUNE_DEBUG").is_ok() {
+                let b = &p.aabb;
+                eprintln!(
+                    "prune twin x[{:.0},{:.0}] y[{:.0},{:.0}] z[{:.0},{:.0}]",
+                    b.min.x, b.max.x, b.min.y, b.max.y, b.min.z, b.max.z
+                );
+            }
+            dropped.insert(p.id);
+        }
+    }
+    *placed = survivors;
+    for entity in map.entities.iter_mut() {
+        entity.brushes.retain(|b| !dropped.contains(&b.id));
+    }
+    before - placed.len()
+}
+
 // ---------------------------------------------------------------------------
 
 /// Build the BSP for the map's worldspawn structural brushes and emit a
@@ -1805,6 +2011,9 @@ pub fn generate_bsp_portals(
     // Over-cover like the originals: union coplanar near-touching portals.
     let merged = crate::portals::merge_placed_portals_public(map, &mut placed, params.merge_gap, side, textures);
     report.portals_merged = merged;
+    // Second pass: drop slabs buried in solid and collapse twin slabs
+    // covering one opening from parallel planes.
+    report.portals_pruned = prune_placed_portals(map, &mut placed, &tree);
     report.portals_created = placed.len();
     let _ = world_brush_count;
 
@@ -2010,6 +2219,37 @@ mod tests {
             best >= 48.0 * 64.0 * 0.5,
             "doorway coverage too small: {best}"
         );
+    }
+
+    #[test]
+    fn prune_helpers_burial_and_twins() {
+        // One solid wall box: slabs inside it read fully blocked, slabs
+        // in open air read clean.
+        let mut pool = PlanePool::default();
+        let wall = bsp_brush_from_map_brush(&box_brush((0.0, 0.0, 0.0), (8.0, 64.0, 64.0)), 0, &mut pool)
+            .expect("wall");
+        let tree = PortalTree::build(pool, vec![wall], SplitterSelection::CodFaces, 200);
+        let buried = Aabb::from_points(Vec3::new(2.0, 8.0, 8.0), Vec3::new(6.0, 56.0, 56.0));
+        assert!((portal_blocked_fraction(&tree, &buried) - 1.0).abs() < 1.0e-6);
+        let open = Aabb::from_points(Vec3::new(16.0, 8.0, 8.0), Vec3::new(24.0, 56.0, 56.0));
+        assert!((portal_blocked_fraction(&tree, &open)).abs() < 1.0e-6);
+
+        // Twins: same opening from both wall faces.
+        let a = Aabb::from_points(Vec3::new(0.0, 0.0, 0.0), Vec3::new(8.0, 64.0, 64.0));
+        let b = Aabb::from_points(Vec3::new(8.0, 0.0, 0.0), Vec3::new(16.0, 64.0, 64.0));
+        assert!(portals_are_twins(&a, &b));
+        // Same plane but disjoint rect: separate openings.
+        let c = Aabb::from_points(Vec3::new(0.0, 100.0, 0.0), Vec3::new(8.0, 164.0, 64.0));
+        assert!(!portals_are_twins(&a, &c));
+        // Stacked floors: disjoint volumes.
+        let d = Aabb::from_points(Vec3::new(0.0, 0.0, 200.0), Vec3::new(8.0, 64.0, 264.0));
+        assert!(!portals_are_twins(&a, &d));
+        // Different axis.
+        let e = Aabb::from_points(Vec3::new(0.0, 0.0, 0.0), Vec3::new(64.0, 8.0, 64.0));
+        assert!(!portals_are_twins(&a, &e));
+        // Parallel but a wall apart.
+        let f = Aabb::from_points(Vec3::new(64.0, 0.0, 0.0), Vec3::new(72.0, 64.0, 64.0));
+        assert!(!portals_are_twins(&a, &f));
     }
 
     /// Two rooms of different sizes sharing a doorway wall: with
