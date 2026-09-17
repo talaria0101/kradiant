@@ -641,8 +641,9 @@ pub(crate) fn merge_placed_portals_public(
     gap: f32,
     side: PortalSide,
     textures: &PortalTextures,
+    max_extent: f32,
 ) -> usize {
-    merge_placed_portals(map, placed, gap, side, textures)
+    merge_placed_portals(map, placed, gap, side, textures, max_extent)
 }
 
 fn merge_placed_portals(
@@ -651,6 +652,10 @@ fn merge_placed_portals(
     gap: f32,
     side: PortalSide,
     textures: &PortalTextures,
+    // Largest allowed union extent along any axis: coplanar fragments
+    // chain without bound through void tiling otherwise (a 75k-unit
+    // continent slab on dawnville). Pass infinity to disable.
+    max_extent: f32,
 ) -> usize {
     if placed.len() < 2 {
         return 0;
@@ -703,7 +708,23 @@ fn merge_placed_portals(
                         && bu0 - gap <= au1
                         && av0 - gap <= bv1
                         && bv0 - gap <= av1;
-                    if near {
+                    // Cap the union extent: near chaining through void
+                    // tiling would otherwise grow continent slabs.
+                    let uu0 = au0.min(bu0);
+                    let uu1 = au1.max(bu1);
+                    let uv0 = av0.min(bv0);
+                    let uv1 = av1.max(bv1);
+                    let thin = (placed[sets[a][0]].aabb.max[axis_of(&placed[sets[a][0]])]
+                        - placed[sets[a][0]].aabb.min[axis_of(&placed[sets[a][0]])])
+                    .max(
+                        placed[sets[b][0]].aabb.max[axis_of(&placed[sets[b][0]])]
+                            - placed[sets[b][0]].aabb.min[axis_of(&placed[sets[b][0]])],
+                    );
+                    if near
+                        && (uu1 - uu0) <= max_extent
+                        && (uv1 - uv0) <= max_extent
+                        && thin <= max_extent
+                    {
                         let mut union = sets[a].clone();
                         union.extend(sets[b].iter().copied());
                         let (lo, hi) = if a < b { (a, b) } else { (b, a) };
@@ -1250,7 +1271,7 @@ pub fn generate_auto_opening_portals(
     // volume. Union coplanar portals that touch or sit within a small gap
     // of each other, so trim between windows does not fragment the result.
     report.portals_merged =
-        merge_placed_portals(map, &mut created, PORTAL_MERGE_GAP, side, textures);
+        merge_placed_portals(map, &mut created, PORTAL_MERGE_GAP, side, textures, f32::INFINITY);
     report.portals_created = created.len();
 
     Ok(report)
@@ -1627,6 +1648,60 @@ mod tests {
             8.0
         )
         .is_err());
+    }
+
+    /// Merge unions coplanar portals within the gap, but a chained union
+    /// never grows past max_extent (void tiling would otherwise chain
+    /// continent slabs). Four slabs 30 apart: uncapped they become one
+    /// 346-long union, capped at 200 they stay two pairs.
+    #[test]
+    fn merge_caps_chained_union_extent() {
+        let textures = PortalTextures::default();
+        let setup = || {
+            let mut map = Map::default();
+            map.entities.push(crate::map::Entity {
+                id: crate::map::EntityId(0),
+                classname: "worldspawn".to_string(),
+                properties: Default::default(),
+                brushes: Vec::new(),
+                model: None,
+            });
+            let mut placed = Vec::new();
+            for (n, y0) in [0.0, 94.0, 188.0, 282.0].iter().enumerate() {
+                let aabb = Aabb::from_points(
+                    Vec3::new(-4.0, *y0, 0.0),
+                    Vec3::new(4.0, *y0 + 64.0, 64.0),
+                );
+                let brush = generate_opening_portal_brush(
+                    BrushId(n as u32),
+                    &aabb,
+                    PortalSide::Negative,
+                    &textures,
+                );
+                map.entities[0].brushes.push(brush);
+                placed.push(PlacedPortal {
+                    entity: 0,
+                    id: BrushId(n as u32),
+                    aabb,
+                    side: PortalSide::Negative,
+                });
+            }
+            (map, placed)
+        };
+        let (mut map, mut placed) = setup();
+        let removed =
+            merge_placed_portals(&mut map, &mut placed, 32.0, PortalSide::Negative, &textures, f32::INFINITY);
+        assert_eq!(removed, 3, "uncapped: one union");
+        assert_eq!(placed.len(), 1);
+        let (mut map, mut placed) = setup();
+        let removed =
+            merge_placed_portals(&mut map, &mut placed, 32.0, PortalSide::Negative, &textures, 200.0);
+        assert_eq!(removed, 2, "capped: two pairs, chain blocked");
+        assert_eq!(placed.len(), 2);
+        for p in &placed {
+            let e = p.aabb.max.y - p.aabb.min.y;
+            assert!(e <= 200.0, "union extent {e}");
+        }
     }
 
     /// Demo on the real training_outside map: the mapper splits the arena
@@ -2052,6 +2127,11 @@ mod dbg_bsp_tests {
         if let Ok(depth) = std::env::var("BSP_MAX_DEPTH") {
             if let Ok(depth) = depth.parse::<usize>() {
                 params.max_depth = depth;
+            }
+        }
+        if let Ok(cap) = std::env::var("BSP_MAX_UNION") {
+            if let Ok(cap) = cap.parse::<f32>() {
+                params.max_union = cap;
             }
         }
         println!("selection: {:?} merge_gap={} max_depth={}", params.selection, params.merge_gap, params.max_depth);
