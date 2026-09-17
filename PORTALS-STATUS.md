@@ -10,8 +10,8 @@ original's face rect against generated portal AABBs, 16-unit tolerance).
 | path | portals | full | partial | untouched | mean area | center-hit | time |
 |---|---|---|---|---|---|---|---|
 | plane-scan auto pass | 3441 | 86 | 83 | 28 | 0.61 | 117/197 | ~10 s |
-| BSP generator, CodFaces (default) | 2746 | 103 | 88 | 6 | 0.71 | 139/197 | ~7 s |
-| BSP generator, BrushScoring (fallback) | 5215 | 86 | 106 | 5 | 0.69 | 125/197 | ~5 s |
+| BSP generator, CodFaces (default) | 2148 | 103 | 88 | 6 | 0.71 | 139/197 | ~8 s |
+| BSP generator, BrushScoring (fallback) | 4168 | 86 | 104 | 7 | 0.68 | 125/197 | ~5 s |
 
 training_outside BSP baseline (in-repo map, pinned by
 `bsp::tests::training_outside_bsp_baseline`): 97 structural brushes,
@@ -76,6 +76,20 @@ from `generate_opening_portal_brush` for the same `PortalSide` (sign error
 against its own comment), so every merged BSP portal silently flipped its
 facing. Fixed to match; merges keep the majority side by member volume
 (`PlacedPortal::side`), ties keep the caller's side.
+
+### Second pass: prune (landed)
+Emission over-generates (~2.7k/5.2k brushes for 197 originals), so
+`prune_placed_portals` runs after the merge: drop slabs fully buried in
+solid (face samples solid on both sides; partial burials stay, the
+tutorials over-cover on purpose) and collapse twin slabs covering one
+opening from parallel planes (same axis, planes within 16, rect overlap
+> 0.8, volumes touching, so stacked floors never match; keeps the
+larger rect). CodFaces: 2746 -> 2148 portals (-22%) at identical
+coverage. BrushScoring: 5215 -> 4168 (-20%), fulls intact (86),
+untouched 5 -> 7, mean 0.69 -> 0.68. Debugged one real incident along
+the way: the burial step used `Vec::retain`, dropping tracking entries
+without recording brush ids (25 phantom brushes); it partitions
+manually now. `PRUNE_DEBUG=1` logs every dropped slab with its cause.
 
 ### 7. Merge gap tested
 BSP default `merge_gap` is now 32.0 (was 16): CodFaces full 101 -> 103,

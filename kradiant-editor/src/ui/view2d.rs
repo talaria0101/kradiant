@@ -2197,8 +2197,9 @@ impl View2D {
                                     ) {
                                         Ok(report) => log_info!(
                                             console,
-                                            "BSP portals: {} portal brush(es) created ({} leaves, {} candidates, max depth {})",
+                                            "BSP portals: {} portal brush(es) created ({} pruned, {} leaves, {} candidates, max depth {})",
                                             report.portals_created,
+                                            report.portals_pruned,
                                             report.leaves,
                                             report.candidates,
                                             report.max_depth
