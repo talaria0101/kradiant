@@ -68,6 +68,10 @@ pub struct BspPortalParams {
     /// originals top out around 5200; anything near the 131072 world bound
     /// is an uncarved void cross-section, not a mappable portal.
     pub max_extent: f32,
+    /// Largest allowed union extent (merge + absorption) along any axis.
+    /// Chained fragments tile void without bound; this keeps unions at
+    /// district scale while still covering multi-window facades.
+    pub max_union: f32,
     /// Coplanar portals within this gap (world units) are unioned into one
     /// brush after emission (the originals over-cover through trim and let
     /// the compiler trim the portal to the enclosed volume).
@@ -97,9 +101,16 @@ impl Default for BspPortalParams {
             area_separators: true,
             max_extent: 8192.0,
             merge_gap: 32.0,
+            max_union: 16384.0,
             max_depth: 200,
             auto_side: true,
-            selection: SplitterSelection::CodFaces,
+            // BrushScoring is the default: its brush-face-aligned splits
+            // place portals on the architecture (wall faces, openings),
+            // while CodFaces grid peeling optimizes for compilation
+            // balance and spends most of its depth budget slicing skybox
+            // void on town maps. CodFaces stays available for
+            // compiler-coupled placement once cells exist.
+            selection: SplitterSelection::BrushScoring,
         }
     }
 }
@@ -1662,15 +1673,18 @@ fn is_flat_degenerate(a: Vec3, b: Vec3, c: Vec3) -> bool {
 /// open samples, and the tutorials over-cover on purpose (the compiler
 /// trims the portal to the enclosed volume).
 const PRUNE_MAX_BLOCKED: f32 = 1.0;
-/// Twin portals through one wall are at most this far apart plane-wise.
-const TWIN_MAX_PLANE_DIST: f32 = 16.0;
-/// Twins must overlap this much of the smaller face rect (same-wall
-/// twins from one opening overlap ~fully; lower values strand offset
-/// neighbours covering distinct originals).
-const TWIN_MIN_OVERLAP: f32 = 0.8;
-/// ...and their volumes must touch within this tolerance (stacked
+/// Absorption: a portal folds into a larger nearby one at most this far
+/// away plane-wise (opposite wall faces are 8-16 apart; stacked floors
+/// are 100+ apart and never match).
+const ABSORB_MAX_PLANE_DIST: f32 = 24.0;
+/// ...whose dilated face rect (this margin) must contain the small
+/// portal's rect. Dilation is merge-gap scale: coplanar neighbours were
+/// already unioned by the merge, so this reaches stepped trim and the
+/// opposite wall face, not distant openings.
+const ABSORB_DILATION: f32 = 32.0;
+/// ...and whose volumes must touch within this tolerance (stacked
 /// openings on different floors have disjoint volumes and stay).
-const TWIN_VOLUME_TOL: f32 = 1.0;
+const ABSORB_VOLUME_TOL: f32 = 1.0;
 
 fn extents_of(aabb: &Aabb) -> [f32; 3] {
     [
@@ -1738,42 +1752,36 @@ fn portal_blocked_fraction(tree: &PortalTree, aabb: &Aabb) -> f32 {
     }
 }
 
-/// Two portal slabs covering the same opening from parallel planes
-/// (typically both faces of one wall): same thin axis, planes close,
-/// face rects mostly overlapping, volumes touching. Stacked openings on
-/// different floors have disjoint volumes and never match.
-fn portals_are_twins(a: &Aabb, b: &Aabb) -> bool {
-    let ea = extents_of(a);
-    let eb = extents_of(b);
-    if thin_axis_of(&ea) != thin_axis_of(&eb) {
+/// Whether portal `small` folds into portal `large`: same thin axis,
+/// planes close, volumes touching, and the small face rect contained in
+/// the large rect dilated by the absorb margin. Same-wall twins (both
+/// faces of one opening) always match; stacked floors never do.
+fn can_absorb(large: &Aabb, small: &Aabb) -> bool {
+    let el = extents_of(large);
+    let es = extents_of(small);
+    if thin_axis_of(&el) != thin_axis_of(&es) {
         return false;
     }
-    let axis = thin_axis_of(&ea);
+    let axis = thin_axis_of(&el);
     let (u, v) = in_plane_axes(axis);
-    let mida = (a.min[axis] + a.max[axis]) * 0.5;
-    let midb = (b.min[axis] + b.max[axis]) * 0.5;
-    if (mida - midb).abs() > TWIN_MAX_PLANE_DIST {
+    let midl = (large.min[axis] + large.max[axis]) * 0.5;
+    let mids = (small.min[axis] + small.max[axis]) * 0.5;
+    if (midl - mids).abs() > ABSORB_MAX_PLANE_DIST {
         return false;
     }
-    // Volumes must touch: same-wall twins do, stacked floors do not.
-    if a.min.x > b.max.x + TWIN_VOLUME_TOL
-        || b.min.x > a.max.x + TWIN_VOLUME_TOL
-        || a.min.y > b.max.y + TWIN_VOLUME_TOL
-        || b.min.y > a.max.y + TWIN_VOLUME_TOL
-        || a.min.z > b.max.z + TWIN_VOLUME_TOL
-        || b.min.z > a.max.z + TWIN_VOLUME_TOL
+    if large.min.x > small.max.x + ABSORB_VOLUME_TOL
+        || small.min.x > large.max.x + ABSORB_VOLUME_TOL
+        || large.min.y > small.max.y + ABSORB_VOLUME_TOL
+        || small.min.y > large.max.y + ABSORB_VOLUME_TOL
+        || large.min.z > small.max.z + ABSORB_VOLUME_TOL
+        || small.min.z > large.max.z + ABSORB_VOLUME_TOL
     {
         return false;
     }
-    let area_a = ea[u] * ea[v];
-    let area_b = eb[u] * eb[v];
-    let smaller = area_a.min(area_b);
-    if smaller < 1.0 {
-        return false;
-    }
-    let iu = (a.max[u].min(b.max[u]) - a.min[u].max(b.min[u])).max(0.0);
-    let iv = (a.max[v].min(b.max[v]) - a.min[v].max(b.min[v])).max(0.0);
-    iu * iv / smaller > TWIN_MIN_OVERLAP
+    small.min[u] >= large.min[u] - ABSORB_DILATION
+        && small.max[u] <= large.max[u] + ABSORB_DILATION
+        && small.min[v] >= large.min[v] - ABSORB_DILATION
+        && small.max[v] <= large.max[v] + ABSORB_DILATION
 }
 
 fn rect_area(aabb: &Aabb) -> f32 {
@@ -1782,26 +1790,31 @@ fn rect_area(aabb: &Aabb) -> f32 {
     e[u] * e[v]
 }
 
-/// Second pass over the merged portals: drop slabs buried in solid and
-/// collapse twin slabs covering one opening from parallel planes (keeps
-/// the larger rect). Removes the dropped brushes from the map. Returns
-/// how many portals were pruned.
+/// Second pass over the merged portals: fold small slabs into larger
+/// nearby ones (which expand to cover them), then drop slabs buried in
+/// solid. Coverage only grows through absorption (unions), so unlike
+/// dropping it cannot strand an opening. Removes the dropped brushes
+/// from the map. Returns how many portals were pruned.
 fn prune_placed_portals(
     map: &mut Map,
     placed: &mut Vec<crate::portals::PlacedPortal>,
     tree: &PortalTree,
+    textures: &crate::portals::PortalTextures,
+    // Largest allowed absorption union extent: chains propagate through
+    // neighboring fragments, so cap them like the merge does.
+    max_extent: f32,
 ) -> usize {
     let before = placed.len();
     let mut dropped: std::collections::HashSet<BrushId> = std::collections::HashSet::new();
-    // Buried slabs first: merges can swallow piers and wall chunks.
-    // (Partition manually: Vec::retain would drop the tracking entries
-    // without recording their brush ids for removal below.)
+    // Buried slabs first, on the merged set: fully inside solid on both
+    // sides at every sample. Absorption runs second so expanded keepers
+    // (supersets, still carrying their open samples) never face this
+    // test; sampling an expanded rect could otherwise dodge its notch
+    // and kill real coverage. (Partition manually: Vec::retain would
+    // drop the tracking entries without recording their brush ids.)
     let mut visible = Vec::with_capacity(placed.len());
     for p in placed.drain(..) {
         let blocked = portal_blocked_fraction(tree, &p.aabb);
-        // Strictly below 1.0: at least one sample stands in open air on
-        // some side, so the slab may cover a real opening. Fully buried
-        // slabs cover nothing and go.
         if blocked < PRUNE_MAX_BLOCKED {
             visible.push(p);
         } else {
@@ -1816,40 +1829,84 @@ fn prune_placed_portals(
         }
     }
     *placed = visible;
-    // Twins, largest rect first (emission order is deterministic, so ties
-    // keep the earlier portal).
+    // Absorption, smallest rect first: each portal folds into the
+    // smallest larger-or-equal portal (by rect area, then index) that
+    // contains it, which expands to the union. Equal-area twins fold in
+    // index order; emission order is deterministic. Each portal takes
+    // part in at most one event (as either side): keepers freeze after
+    // expanding, so folds stay local and cannot chain across districts.
     let mut order: Vec<usize> = (0..placed.len()).collect();
     order.sort_by(|&i, &j| {
-        rect_area(&placed[j].aabb)
-            .partial_cmp(&rect_area(&placed[i].aabb))
+        rect_area(&placed[i].aabb)
+            .partial_cmp(&rect_area(&placed[j].aabb))
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| i.cmp(&j))
     });
-    let mut keep = vec![false; placed.len()];
-    for &i in &order {
-        let mut twin = false;
-        for (j, k) in keep.iter().enumerate() {
-            if *k && portals_are_twins(&placed[i].aabb, &placed[j].aabb) {
-                twin = true;
+    let mut gone = vec![false; placed.len()];
+    let mut done = vec![false; placed.len()];
+    for pos in 0..order.len() {
+        let i = order[pos];
+        if gone[i] || done[i] {
+            continue;
+        }
+        // First fit scanning upward = smallest sufficient absorber.
+        let mut absorber: Option<usize> = None;
+        for &j in order.iter().skip(pos + 1) {
+            if gone[j] || done[j] {
+                continue;
+            }
+            if can_absorb(&placed[j].aabb, &placed[i].aabb) {
+                absorber = Some(j);
                 break;
             }
         }
-        if !twin {
-            keep[i] = true;
+        let Some(j) = absorber else {
+            continue;
+        };
+        // Expand the absorber to the union and rebuild its brush (same
+        // id keeps tracking stable); the small portal's brush goes.
+        // Unions stay capped like the merge step: no continent chains.
+        let mut aabb = placed[j].aabb;
+        aabb.min = aabb.min.min(placed[i].aabb.min);
+        aabb.max = aabb.max.max(placed[i].aabb.max);
+        let ue = [
+            aabb.max.x - aabb.min.x,
+            aabb.max.y - aabb.min.y,
+            aabb.max.z - aabb.min.z,
+        ];
+        if ue[0].max(ue[1].max(ue[2])) > max_extent {
+            continue;
         }
+        let id = placed[j].id;
+        let entity_idx = placed[j].entity;
+        let brush = crate::portals::generate_opening_portal_brush(
+            id,
+            &aabb,
+            placed[j].side,
+            textures,
+        );
+        if let Some(entity) = map.entities.get_mut(entity_idx) {
+            entity.brushes.retain(|b| b.id != id && b.id != placed[i].id);
+            entity.brushes.push(brush);
+        }
+        if std::env::var("PRUNE_DEBUG").is_ok() {
+            let s = &placed[i].aabb;
+            eprintln!(
+                "prune absorb x[{:.0},{:.0}] y[{:.0},{:.0}] z[{:.0},{:.0}] into id={}",
+                s.min.x, s.max.x, s.min.y, s.max.y, s.min.z, s.max.z, id.0
+            );
+        }
+        placed[j].aabb = aabb;
+        gone[i] = true;
+        done[i] = true;
+        done[j] = true;
+        dropped.insert(placed[i].id);
     }
+    // Survivors, preserving order.
     let mut survivors = Vec::with_capacity(placed.len());
-    for (p, k) in placed.drain(..).zip(keep.iter()) {
-        if *k {
+    for (idx, p) in placed.drain(..).enumerate() {
+        if !gone[idx] {
             survivors.push(p);
-        } else {
-            if std::env::var("PRUNE_DEBUG").is_ok() {
-                let b = &p.aabb;
-                eprintln!(
-                    "prune twin x[{:.0},{:.0}] y[{:.0},{:.0}] z[{:.0},{:.0}]",
-                    b.min.x, b.max.x, b.min.y, b.max.y, b.min.z, b.max.z
-                );
-            }
-            dropped.insert(p.id);
         }
     }
     *placed = survivors;
@@ -1993,12 +2050,13 @@ pub fn generate_bsp_portals(
             portal_brush_from_winding(BrushId(next_id), &winding, plane, params.thickness, textures, face_side);
         next_id += 1;
         let Some(brush) = brush else { continue };
+        // Track the analytic prism bounds (exact), not a kernel-derived
+        // AABB: the constructor above already rejected brushes whose
+        // kernel geometry disagrees with them.
         let id = brush.id;
-        let aabb = crate::portals::aabb_of_brush_pub(&brush);
+        let aabb = brush.aabb;
         if let Some(world) = map.entities.first_mut() {
             world.brushes.push(brush);
-        }
-        if let Some(aabb) = aabb {
             placed.push(crate::portals::PlacedPortal {
                 entity: 0,
                 id,
@@ -2009,11 +2067,11 @@ pub fn generate_bsp_portals(
     }
 
     // Over-cover like the originals: union coplanar near-touching portals.
-    let merged = crate::portals::merge_placed_portals_public(map, &mut placed, params.merge_gap, side, textures);
+    let merged = crate::portals::merge_placed_portals_public(map, &mut placed, params.merge_gap, side, textures, params.max_union);
     report.portals_merged = merged;
     // Second pass: drop slabs buried in solid and collapse twin slabs
     // covering one opening from parallel planes.
-    report.portals_pruned = prune_placed_portals(map, &mut placed, &tree);
+    report.portals_pruned = prune_placed_portals(map, &mut placed, &tree, textures, params.max_union);
     report.portals_created = placed.len();
     let _ = world_brush_count;
 
@@ -2222,7 +2280,58 @@ mod tests {
     }
 
     #[test]
-    fn prune_helpers_burial_and_twins() {
+    fn kernel_holds_thin_sliver_at_dawnville_scale() {
+        // Repro for a 75k-unit bogus AABB seen on dawnville: a thin flat
+        // winding at large coordinates must round-trip through the
+        // geometry kernel with its true bounds, not base-winding
+        // remnants or far intersections.
+        let winding = vec![
+            Vec3::new(-3398.0, -17397.0, 88.0),
+            Vec3::new(-3296.0, -17397.0, 88.0),
+            Vec3::new(-3296.0, -17376.0, 88.0),
+            Vec3::new(-3398.0, -17376.0, 88.0),
+        ];
+        let textures = crate::portals::PortalTextures::default();
+        let brush = portal_brush_from_winding(
+            BrushId(99),
+            &winding,
+            Plane { n: Vec3::Z, d: 88.0 },
+            8.0,
+            &textures,
+            crate::portals::PortalSide::Negative,
+        )
+        .expect("brush");
+        let aabb = crate::portals::aabb_of_brush_pub(&brush).expect("aabb");
+        let e = [aabb.max.x - aabb.min.x, aabb.max.y - aabb.min.y, aabb.max.z - aabb.min.z];
+        eprintln!("sliver aabb ext={e:?}");
+        assert!(e[0] < 1000.0 && e[1] < 1000.0 && e[2] < 100.0, "no blowup: {e:?}");
+    }
+
+    /// Scale limits of the geometry kernel at dawnville coordinates:
+    /// axis boxes must round-trip exactly. Documents how far union
+    /// extents can be trusted (coverage reads kernel AABBs).
+    #[test]
+    fn kernel_box_scale_limits() {
+        for (name, min, max) in [
+            ("8k box", (-3398.0, -17397.0, 88.0), (4794.0, -9205.0, 96.0)),
+            ("16k box", (-8000.0, -17000.0, 80.0), (8000.0, -1000.0, 96.0)),
+        ] {
+            let b = box_brush(min, max);
+            let mut owned = b.clone();
+            owned.invalidate_geometry();
+            let polys = crate::geometry::brush_to_polygons(&owned).expect("polys");
+            let aabb = crate::editing::aabb_from_polys(&polys);
+            let e = [aabb.max.x - aabb.min.x, aabb.max.y - aabb.min.y, aabb.max.z - aabb.min.z];
+            let want = [max.0 - min.0, max.1 - min.1, max.2 - min.2];
+            eprintln!("{name}: got {e:?} want {want:?}");
+            for k in 0..3 {
+                assert!((e[k] - want[k]).abs() < 2.0, "{name} axis {k}: {e:?} vs {want:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn prune_helpers_burial_and_absorb() {
         // One solid wall box: slabs inside it read fully blocked, slabs
         // in open air read clean.
         let mut pool = PlanePool::default();
@@ -2234,22 +2343,94 @@ mod tests {
         let open = Aabb::from_points(Vec3::new(16.0, 8.0, 8.0), Vec3::new(24.0, 56.0, 56.0));
         assert!((portal_blocked_fraction(&tree, &open)).abs() < 1.0e-6);
 
-        // Twins: same opening from both wall faces.
-        let a = Aabb::from_points(Vec3::new(0.0, 0.0, 0.0), Vec3::new(8.0, 64.0, 64.0));
-        let b = Aabb::from_points(Vec3::new(8.0, 0.0, 0.0), Vec3::new(16.0, 64.0, 64.0));
-        assert!(portals_are_twins(&a, &b));
+        // Absorption predicate: same-wall neighbours fold (either
+        // direction by size), stacked floors and far planes do not.
+        let big = Aabb::from_points(Vec3::new(0.0, 0.0, 0.0), Vec3::new(8.0, 64.0, 64.0));
+        let face = Aabb::from_points(Vec3::new(8.0, 0.0, 0.0), Vec3::new(16.0, 64.0, 64.0));
+        assert!(can_absorb(&big, &face));
+        assert!(can_absorb(&face, &big));
+        let cube = Aabb::from_points(Vec3::new(8.0, 0.0, 0.0), Vec3::new(16.0, 8.0, 8.0));
+        assert!(can_absorb(&big, &cube));
+        assert!(!can_absorb(&cube, &big));
         // Same plane but disjoint rect: separate openings.
         let c = Aabb::from_points(Vec3::new(0.0, 100.0, 0.0), Vec3::new(8.0, 164.0, 64.0));
-        assert!(!portals_are_twins(&a, &c));
+        assert!(!can_absorb(&big, &c));
+        assert!(!can_absorb(&c, &big));
         // Stacked floors: disjoint volumes.
         let d = Aabb::from_points(Vec3::new(0.0, 0.0, 200.0), Vec3::new(8.0, 64.0, 264.0));
-        assert!(!portals_are_twins(&a, &d));
+        assert!(!can_absorb(&big, &d));
         // Different axis.
         let e = Aabb::from_points(Vec3::new(0.0, 0.0, 0.0), Vec3::new(64.0, 8.0, 64.0));
-        assert!(!portals_are_twins(&a, &e));
+        assert!(!can_absorb(&big, &e));
         // Parallel but a wall apart.
         let f = Aabb::from_points(Vec3::new(64.0, 0.0, 0.0), Vec3::new(72.0, 64.0, 64.0));
-        assert!(!portals_are_twins(&a, &f));
+        assert!(!can_absorb(&big, &f));
+        assert!(!can_absorb(&f, &big));
+    }
+
+    /// End to end through prune: a trim cube beside a wall slab folds
+    /// into it (one portal left, expanded to cover the cube); a
+    /// stacked-slab pair on another floor survives untouched.
+    #[test]
+    fn prune_absorb_expands_keeper() {
+        use crate::map::{BrushId, Entity, EntityId};
+        let mut pool = PlanePool::default();
+        // Distant solid box so the tree has solid leaves for the burial
+        // sampler; test slabs sit in open air near the origin.
+        let far = bsp_brush_from_map_brush(
+            &box_brush((1000.0, 1000.0, 1000.0), (1064.0, 1064.0, 1064.0)),
+            0,
+            &mut pool,
+        )
+        .expect("far box");
+        let tree = PortalTree::build(pool, vec![far], SplitterSelection::CodFaces, 200);
+        let textures = crate::portals::PortalTextures::default();
+        let mut map = crate::map::Map::default();
+        map.entities.push(Entity {
+            id: EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: Default::default(),
+            brushes: Vec::new(),
+            model: None,
+        });
+        let mut next_id = 0u32;
+        let mut placed = Vec::new();
+        // Wall slab (thin x) + trim cube touching its +x face + a
+        // stacked pair far above (disjoint volumes).
+        let slabs = vec![
+            Aabb::from_points(Vec3::new(0.0, 0.0, 0.0), Vec3::new(8.0, 64.0, 64.0)),
+            Aabb::from_points(Vec3::new(8.0, 0.0, 0.0), Vec3::new(16.0, 8.0, 8.0)),
+            Aabb::from_points(Vec3::new(0.0, 0.0, 200.0), Vec3::new(8.0, 64.0, 264.0)),
+            Aabb::from_points(Vec3::new(0.0, 0.0, 300.0), Vec3::new(8.0, 64.0, 364.0)),
+        ];
+        for aabb in &slabs {
+            let brush = crate::portals::generate_opening_portal_brush(
+                BrushId(next_id),
+                aabb,
+                crate::portals::PortalSide::Negative,
+                &textures,
+            );
+            map.entities[0].brushes.push(brush);
+            placed.push(crate::portals::PlacedPortal {
+                entity: 0,
+                id: BrushId(next_id),
+                aabb: *aabb,
+                side: crate::portals::PortalSide::Negative,
+            });
+            next_id += 1;
+        }
+        let pruned = prune_placed_portals(&mut map, &mut placed, &tree, &textures, 8192.0);
+        // Only the cube folds (into the wall slab); the stacked pair has
+        // disjoint volumes and survives.
+        assert_eq!(pruned, 1, "cube absorbed");
+        assert_eq!(placed.len(), 3);
+        assert_eq!(map.entities[0].brushes.len(), 3);
+        // The keeper expanded over the cube's bounds.
+        let keeper = placed
+            .iter()
+            .find(|p| p.aabb.min.y == 0.0 && p.aabb.max.y == 64.0 && p.aabb.max.z == 64.0)
+            .expect("expanded wall slab");
+        assert!(keeper.aabb.max.x >= 16.0 && keeper.aabb.min.x <= 0.0);
     }
 
     /// Two rooms of different sizes sharing a doorway wall: with
@@ -2360,8 +2541,8 @@ mod tests {
         .expect("bsp portals");
         eprintln!("training_outside bsp ({brushes_before} brushes): {report:?}");
         // Loose guardrails: catch structural collapse (empty trees, zero
-        // emission, runaway depth), not exact tuning. As of the CodFaces
-        // reland: 633 leaves, 1065 candidates, 140 created, depth 31.
+        // emission, runaway depth), not exact tuning. As of the prune
+        // pass: 1118 leaves, 1808 candidates, 168 created, depth 18.
         assert!((300..1500).contains(&report.leaves), "leaves {}", report.leaves);
         assert!((50..300).contains(&report.portals_created), "created {}", report.portals_created);
         assert!(report.max_depth <= 100, "depth {}", report.max_depth);
