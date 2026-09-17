@@ -2178,6 +2178,40 @@ impl View2D {
                                     "Scan every wall plane of the map and place a portal brush in each rectangular opening (doorways, windows)",
                                 );
                             }
+                            if ui.menu_item("BSP portals (whole map)") {
+                                undo.push(
+                                    "Generate BSP portals",
+                                    map,
+                                    selected_brushes,
+                                    selected_faces,
+                                    selected_edges,
+                                    selected_patch_vertices,
+                                    selected_entities,
+                                );
+                                if let Some(map) = map.as_mut() {
+                                    match kradiant::bsp::generate_bsp_portals(
+                                        map,
+                                        portals::PortalSide::Negative,
+                                        &portals::PortalTextures::default(),
+                                        &kradiant::bsp::BspPortalParams::default(),
+                                    ) {
+                                        Ok(report) => log_info!(
+                                            console,
+                                            "BSP portals: {} portal brush(es) created ({} leaves, {} candidates, max depth {})",
+                                            report.portals_created,
+                                            report.leaves,
+                                            report.candidates,
+                                            report.max_depth
+                                        ),
+                                        Err(e) => log_warn!(console, "Portal generation: {e}"),
+                                    }
+                                }
+                            }
+                            if ui.is_item_hovered() {
+                                ui.tooltip_text(
+                                    "Build the structural BSP and place a portal brush on every framed leaf portal (doorways, windows, arches, area separators)",
+                                );
+                            }
                             if ui.menu_item("Cell portal walls from selection") {
                                 undo.push(
                                     "Generate cell portal walls",
