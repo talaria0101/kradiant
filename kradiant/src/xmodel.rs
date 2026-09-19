@@ -6,6 +6,9 @@
 
 use std::path::Path;
 
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
 use thiserror::Error;
 
 use crate::assets::{
@@ -214,12 +217,17 @@ impl XModel {
             .unwrap_or(Vec3::ZERO);
         let mut surfaces = load_surfaces(asset_db, &lod0.name, &bones, lod0)?;
 
-        for surface in &mut surfaces {
+        // Phase 1: parallel texture name resolution (pure string work, no &mut needed).
+        surfaces.par_iter_mut().for_each(|surface| {
             if surface.material_name.is_empty() {
-                continue;
+                return;
             }
             surface.texture_name =
                 resolve_xmodel_texture_name(&surface.material_name, shader_db, asset_db);
+        });
+
+        // Phase 2: sequential texture asset resolution (needs &mut AssetDb for case-insensitive fallback).
+        for surface in &mut surfaces {
             if let Some(texture_name) = &surface.texture_name {
                 surface.texture_asset = asset_db.resolve_texture(texture_name);
             }
@@ -239,42 +247,35 @@ impl XModel {
 }
 
 pub fn model_wireframe_lines(model: &XModel, origin: Vec3, rot: Option<Quat>) -> Vec<Vec3> {
-    let mut out = Vec::new();
-    for surface in &model.surfaces {
-        for tri in surface.indices.chunks_exact(3) {
-            let i0 = tri[0] as usize;
-            let i1 = tri[1] as usize;
-            let i2 = tri[2] as usize;
-            if i0 >= surface.vertices.len()
-                || i1 >= surface.vertices.len()
-                || i2 >= surface.vertices.len()
-            {
-                continue;
-            }
-            let p0 = rot
-                .map(|r| origin + r * surface.vertices[i0].position)
-                .unwrap_or(origin + surface.vertices[i0].position);
-            let p1 = rot
-                .map(|r| origin + r * surface.vertices[i1].position)
-                .unwrap_or(origin + surface.vertices[i1].position);
-            let p2 = rot
-                .map(|r| origin + r * surface.vertices[i2].position)
-                .unwrap_or(origin + surface.vertices[i2].position);
-            out.push(p0);
-            out.push(p1);
-            out.push(p1);
-            out.push(p2);
-            out.push(p2);
-            out.push(p0);
-        }
-    }
-    out
+    model
+        .surfaces
+        .par_iter()
+        .flat_map_iter(|surf| {
+            let verts = &surf.vertices;
+            surf.indices
+                .chunks_exact(3)
+                .filter_map(move |tri| {
+                    let i0 = tri[0] as usize;
+                    let i1 = tri[1] as usize;
+                    let i2 = tri[2] as usize;
+                    if i0 >= verts.len() || i1 >= verts.len() || i2 >= verts.len() {
+                        return None;
+                    }
+                    let transform = |p: Vec3| origin + rot.map_or(p, |r| r * p);
+                    let p0 = transform(verts[i0].position);
+                    let p1 = transform(verts[i1].position);
+                    let p2 = transform(verts[i2].position);
+                    Some([p0, p1, p1, p2, p2, p0])
+                })
+                .flatten()
+        })
+        .collect()
 }
 
 pub fn resolve_xmodel_texture_name(
     material_name: &str,
     shader_db: Option<&ShaderDb>,
-    asset_db: &mut AssetDb,
+    asset_db: &AssetDb,
 ) -> Option<String> {
     let key = normalize_material_name(material_name).to_ascii_lowercase();
 
@@ -297,9 +298,9 @@ pub fn resolve_xmodel_texture_name(
     None
 }
 
-fn resolve_texture_alias(asset_db: &mut AssetDb, name: &str) -> Option<String> {
+fn resolve_texture_alias(asset_db: &AssetDb, name: &str) -> Option<String> {
     let normalized = normalize_material_name(name);
-    let resolved = asset_db.resolve_texture(&normalized)?;
+    let resolved = asset_db.resolve_texture_fast(&normalized)?;
     Some(match &resolved {
         ResolvedAsset::Loose(path) => path
             .strip_prefix(asset_db.roots().maindir())
@@ -445,7 +446,7 @@ fn load_surfaces(
         }
 
         let mut weight_counts = vec![0usize; vert_count];
-        let mut vertices = Vec::with_capacity(vert_count);
+        let mut raw_vertices = Vec::with_capacity(vert_count);
 
         for weight_count in &mut weight_counts {
             let local_normal = reader.vec3();
@@ -464,13 +465,7 @@ fn load_surfaces(
             }
             *weight_count = extra_weights;
 
-            let (position, normal) =
-                transform_vertex(bones, bone_index, local_position, local_normal);
-            vertices.push(XModelVertex {
-                position,
-                normal,
-                uv,
-            });
+            raw_vertices.push((bone_index, local_position, local_normal, uv));
         }
 
         for extra_weights in weight_counts {
@@ -480,6 +475,21 @@ fn load_surfaces(
                 let _weight = reader.f32();
             }
         }
+
+        // Phase 2: parallel bone transformation (pure computation, no I/O).
+        let vertices: Vec<XModelVertex> = raw_vertices
+            .par_iter()
+            .with_min_len(64)
+            .map(|&(bone_index, local_position, local_normal, uv)| {
+                let (position, normal) =
+                    transform_vertex(bones, bone_index, local_position, local_normal);
+                XModelVertex {
+                    position,
+                    normal,
+                    uv,
+                }
+            })
+            .collect();
 
         // CoD xmodel surfaces come in opposite winding to the renderer's front-face
         // convention, so flip each triangle here instead of disabling culling globally.
@@ -570,15 +580,22 @@ fn compute_bounds(
     header_mins: Vec3,
     header_maxs: Vec3,
 ) -> (Vec3, Vec3, f32) {
-    let mut mins = Vec3::splat(f32::INFINITY);
-    let mut maxs = Vec3::splat(f32::NEG_INFINITY);
-    for surface in surfaces.iter() {
-        for vertex in &surface.vertices {
-            let position = vertex.position - origin;
-            mins = mins.min(position);
-            maxs = maxs.max(position);
-        }
-    }
+    let (mins, maxs) = surfaces
+        .par_iter()
+        .flat_map_iter(|s| s.vertices.iter())
+        .map(|v| v.position - origin)
+        .fold(
+            || (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(mut mn, mut mx), pos| {
+                mn = mn.min(pos);
+                mx = mx.max(pos);
+                (mn, mx)
+            },
+        )
+        .reduce(
+            || (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(mn_a, mx_a), (mn_b, mx_b)| (mn_a.min(mn_b), mx_a.max(mx_b)),
+        );
 
     if !mins.is_finite() || !maxs.is_finite() {
         return (header_mins - origin, header_maxs - origin, 10.0);

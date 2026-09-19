@@ -3,6 +3,10 @@
 
 use crate::map::{Brush, BrushContent, Face, Patch, PatchType};
 use glam::{Vec2, Vec3, Vec4};
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
+use rayon::slice::ParallelSlice;
 use thiserror::Error;
 
 /// Errors produced while generating renderable geometry from map data.
@@ -75,7 +79,7 @@ pub fn brush_to_polygons(brush: &Brush) -> Result<Vec<(Vec<Vec3>, Vec<u32>)>, Ge
     // Fast path: trust Radiant plane point ordering (common for .map) and avoid the expensive
     // "enumerate all 3-plane intersections" orientation step.
     let out = build_polys_for_planes(&planes_raw, base_size, CLIP_EPS, DEDUP_EPS, COLINEAR_EPS);
-    if out.iter().any(|(w, _)| w.len() >= 3) {
+    if out.par_iter().any(|(w, _)| w.len() >= 3) {
         return Ok(out);
     }
 
@@ -88,7 +92,7 @@ pub fn brush_to_polygons(brush: &Brush) -> Result<Vec<(Vec<Vec3>, Vec<u32>)>, Ge
 
     let (planes, _interior) = orient_planes(&planes_raw, &candidates, ORIENT_EPS)?;
     let out = build_polys_for_planes(&planes, base_size, CLIP_EPS, DEDUP_EPS, COLINEAR_EPS);
-    if out.iter().any(|(w, _)| w.len() >= 3) {
+    if out.par_iter().any(|(w, _)| w.len() >= 3) {
         Ok(out)
     } else {
         Err(GeometryError::IntersectionFailed)
@@ -196,39 +200,39 @@ fn build_polys_for_planes(
     dedup_eps: f32,
     colinear_eps: f32,
 ) -> Vec<(Vec<Vec3>, Vec<u32>)> {
-    let mut out: Vec<(Vec<Vec3>, Vec<u32>)> = Vec::with_capacity(planes.len());
-    for (i, face_plane) in planes.iter().enumerate() {
-        let mut winding = base_winding_for_plane(*face_plane, base_size);
+    planes
+        .par_iter()
+        .with_min_len(1)
+        .enumerate()
+        .map(|(i, face_plane)| {
+            let mut winding = base_winding_for_plane(*face_plane, base_size);
 
-        for (j, clip_plane) in planes.iter().enumerate() {
-            if i == j {
-                continue;
+            for (j, clip_plane) in planes.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                if is_same_plane(*face_plane, *clip_plane, 1e-4) {
+                    continue;
+                }
+                winding = clip_winding_epsilon(&winding, *clip_plane, clip_eps);
+                if winding.len() < 3 {
+                    return (Vec::new(), Vec::new());
+                }
             }
-            if is_same_plane(*face_plane, *clip_plane, 1e-4) {
-                continue;
+
+            if winding.len() >= 3 {
+                dedup_consecutive(&mut winding, dedup_eps);
+                remove_colinear(&mut winding, colinear_eps);
             }
-            winding = clip_winding_epsilon(&winding, *clip_plane, clip_eps);
+
             if winding.len() < 3 {
-                winding.clear();
-                break;
+                return (Vec::new(), Vec::new());
             }
-        }
 
-        if winding.len() >= 3 {
-            // Remove numerical junk (tiny edges / colinear points).
-            dedup_consecutive(&mut winding, dedup_eps);
-            remove_colinear(&mut winding, colinear_eps);
-        }
-
-        if winding.len() < 3 {
-            out.push((Vec::new(), Vec::new()));
-            continue;
-        }
-
-        let indices = triangulate_fan(winding.len());
-        out.push((winding, indices));
-    }
-    out
+            let indices = triangulate_fan(winding.len());
+            (winding, indices)
+        })
+        .collect()
 }
 
 fn orient_planes(
@@ -524,19 +528,26 @@ fn tessellate_curve_patch(patch: &Patch) -> Result<PatchMesh, GeometryError> {
     let tess_rows = seg_r * subdiv + 1;
     let tess_cols = seg_c * subdiv + 1;
 
+    // Parallel evaluation: each (tr, tc) vertex is independent.
     let mut positions = Vec::with_capacity(tess_rows * tess_cols);
     let mut uvs = Vec::with_capacity(tess_rows * tess_cols);
     let mut colors = Vec::with_capacity(tess_rows * tess_cols);
 
-    for tr in 0..tess_rows {
-        let (sr, tv) = if tr + 1 == tess_rows {
-            (seg_r - 1, 1.0f32)
-        } else {
-            (tr / subdiv, (tr % subdiv) as f32 / subdiv as f32)
-        };
-        let base_r = sr * 2;
+    let flat: Vec<(usize, usize)> = (0..tess_rows)
+        .flat_map(|tr| (0..tess_cols).map(move |tc| (tr, tc)))
+        .collect();
 
-        for tc in 0..tess_cols {
+    let results: Vec<(Vec3, Vec2, [u8; 4])> = flat
+        .par_iter()
+        .with_min_len(64)
+        .map(|&(tr, tc)| {
+            let (sr, tv) = if tr + 1 == tess_rows {
+                (seg_r - 1, 1.0f32)
+            } else {
+                (tr / subdiv, (tr % subdiv) as f32 / subdiv as f32)
+            };
+            let base_r = sr * 2;
+
             let (sc, tu) = if tc + 1 == tess_cols {
                 (seg_c - 1, 1.0f32)
             } else {
@@ -544,11 +555,14 @@ fn tessellate_curve_patch(patch: &Patch) -> Result<PatchMesh, GeometryError> {
             };
             let base_c = sc * 2;
 
-            let (pos, uv, col) = eval_quadratic_patch_attributes(patch, base_r, base_c, tu, tv)?;
-            positions.push(pos);
-            uvs.push(uv);
-            colors.push(col);
-        }
+            eval_quadratic_patch_attributes(patch, base_r, base_c, tu, tv)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (pos, uv, col) in results {
+        positions.push(pos);
+        uvs.push(uv);
+        colors.push(col);
     }
 
     let mut indices: Vec<u32> = Vec::with_capacity((tess_rows - 1) * (tess_cols - 1) * 6);
@@ -748,36 +762,58 @@ fn append_reverse_winding(indices: &mut Vec<u32>) {
 }
 
 fn compute_vertex_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
-    let mut normals = vec![Vec3::ZERO; positions.len()];
-    for tri in indices.chunks(3) {
-        if tri.len() != 3 {
-            break;
-        }
-        let i0 = tri[0] as usize;
-        let i1 = tri[1] as usize;
-        let i2 = tri[2] as usize;
-        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
-            continue;
-        }
-        let p0 = positions[i0];
-        let p1 = positions[i1];
-        let p2 = positions[i2];
-        let n = (p1 - p0).cross(p2 - p0);
-        if n.length_squared() < 1e-12 {
-            continue;
-        }
-        normals[i0] += n;
-        normals[i1] += n;
-        normals[i2] += n;
+    let n_verts = positions.len();
+    if n_verts == 0 || indices.len() < 3 {
+        return vec![Vec3::Z; n_verts];
     }
-    for n in &mut normals {
+
+    // Parallel accumulation: each chunk builds a local normal buffer, then merge.
+    const CHUNK: usize = 256;
+    let mut acc: Vec<Vec3> = indices
+        .par_chunks(CHUNK)
+        .with_min_len(1)
+        .map(|chunk| {
+            let mut local = vec![Vec3::ZERO; n_verts];
+            for tri in chunk.chunks(3) {
+                if tri.len() != 3 {
+                    break;
+                }
+                let i0 = tri[0] as usize;
+                let i1 = tri[1] as usize;
+                let i2 = tri[2] as usize;
+                if i0 >= n_verts || i1 >= n_verts || i2 >= n_verts {
+                    continue;
+                }
+                let n = (positions[i1] - positions[i0]).cross(positions[i2] - positions[i0]);
+                if n.length_squared() < 1e-12 {
+                    continue;
+                }
+                local[i0] += n;
+                local[i1] += n;
+                local[i2] += n;
+            }
+            local
+        })
+        .reduce(
+            || vec![Vec3::ZERO; n_verts],
+            |mut a, b| {
+                for (ai, bi) in a.iter_mut().zip(b) {
+                    *ai += bi;
+                }
+                a
+            },
+        );
+
+    // Parallel normalization.
+    acc.par_iter_mut().with_min_len(64).for_each(|n| {
         if n.length_squared() < 1e-12 {
             *n = Vec3::Z;
         } else {
             *n = n.normalize();
         }
-    }
-    normals
+    });
+
+    acc
 }
 
 // ========================= Tests =========================

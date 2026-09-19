@@ -219,6 +219,121 @@ unsafe fn upload_texture_mipmaps(
     }
 }
 
+/// Upload a DDS compressed texture directly to the GPU via `glCompressedTexImage2D`.
+///
+/// This skips CPU-side DXT decompression entirely — the GPU decompresses blocks
+/// on the fly, which is significantly faster for the large DDS textures in CoD1.
+unsafe fn upload_compressed_texture_mipmaps(
+    gl: &glow::Context,
+    ctex: &kradiant::texture::CompressedTexture,
+    mode: &RenderMode,
+) -> glow::Texture {
+    unsafe {
+        let tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+
+        let gl_format = ctex.gpu_format.gl_format() as i32;
+
+        for (level, mip_data) in ctex.mips.iter().enumerate() {
+            let mw = (ctex.width >> level).max(1) as i32;
+            let mh = (ctex.height >> level).max(1) as i32;
+            gl.compressed_tex_image_2d(
+                glow::TEXTURE_2D,
+                level as i32,
+                gl_format,
+                mw,
+                mh,
+                0,
+                mip_data.len() as i32,
+                mip_data,
+            );
+        }
+
+        match mode {
+            RenderMode::Nearest => {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::NEAREST as i32,
+                );
+            }
+            RenderMode::NearestMipmap => {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST_MIPMAP_NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::NEAREST as i32,
+                );
+            }
+            RenderMode::Linear => {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST_MIPMAP_LINEAR as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+            }
+            RenderMode::Bilinear => {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+            }
+            RenderMode::BilinearMipmap => {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR_MIPMAP_NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+            }
+            RenderMode::Trilinear => {
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR_MIPMAP_LINEAR as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+            }
+            _ => {
+                return tex;
+            }
+        }
+
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::REPEAT as i32);
+
+        tex
+    }
+}
+
 /// Compile the 2D wire shader program (GL 2.1 compatible).
 /// Returns (program, mvp_uniform_location, color_uniform_location).
 fn compile_wire_shader(
@@ -878,7 +993,14 @@ impl AppState {
             upload_texture_mipmaps,
             &mut self.editor.core.tex_registry,
         );
-        if inserted_render_textures {
+        let inserted_compressed = self.editor.tex_browser.process_pending_compressed_uploads(
+            &self.gl,
+            uploads_per_frame,
+            &self.editor.core.config.view.rendermode,
+            upload_compressed_texture_mipmaps,
+            &mut self.editor.core.tex_registry,
+        );
+        if inserted_render_textures || inserted_compressed {
             self.editor.core.view_config_rev = self.editor.core.view_config_rev.wrapping_add(1);
         }
 

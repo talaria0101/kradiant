@@ -30,15 +30,13 @@ pub fn get_config_dir() -> io::Result<PathBuf> {
 }
 
 pub fn read_cfg(f: &str) -> io::Result<String> {
-    let user_path = dirs::config_home()
-    .join("kradiant_editor")
-    .join(f);
+    let user_path = dirs::config_home().join("kradiant_editor").join(f);
 
     match read_to_string(&user_path) {
         Ok(s) if !s.is_empty() => return Ok(s),
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e)
+        Err(e) => return Err(e),
     }
 
     // system config dirs
@@ -52,7 +50,10 @@ pub fn read_cfg(f: &str) -> io::Result<String> {
         }
     }
 
-    Err(io::Error::new(io::ErrorKind::NotFound, "Config not found anywhere"))
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "Config not found anywhere",
+    ))
 }
 
 pub fn write_cfg(f: &str, c: &str) -> io::Result<()> {
@@ -70,16 +71,23 @@ pub fn load_themes() -> Vec<ThemeEntry> {
         if !seen.insert(theme_dir.clone()) {
             return;
         }
-        let Ok(r) = fs::read_dir(&theme_dir) else { return; };
+        let Ok(r) = fs::read_dir(&theme_dir) else {
+            return;
+        };
         println!("searching for themes in {}", theme_dir.display());
         r.for_each(|e| {
-            let Ok(entry) = e else { return; };
+            let Ok(entry) = e else {
+                return;
+            };
             let name = entry.file_name().to_string_lossy().to_string();
             let path = entry.path();
             if let Ok(s) = fs::read_to_string(&path) {
                 if let Ok(t) = theme_from_str(&s) {
                     println!("adding {name} from {}", path.display());
-                    themes.push(ThemeEntry { name: name.replace(".toml", ""), data: t });
+                    themes.push(ThemeEntry {
+                        name: name.replace(".toml", ""),
+                        data: t,
+                    });
                 }
             }
         });

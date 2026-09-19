@@ -17,7 +17,7 @@ pub fn load() -> io::Result<EditorConfig> {
 
     match toml::from_str(&cfg_str) {
         Ok(c) => Ok(c),
-        Err(e) => Err(io::Error::other(e))
+        Err(e) => Err(io::Error::other(e)),
     }
 }
 

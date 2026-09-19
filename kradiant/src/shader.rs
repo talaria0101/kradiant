@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use rayon::iter::{ParallelBridge, ParallelIterator};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Default)]
@@ -56,6 +57,12 @@ impl ShaderDb {
         self.by_name.insert(normalize_name(&shader.name), shader);
     }
 
+    pub fn extend<D: IntoIterator<Item = ShaderDef>>(&mut self, defs: D) {
+        defs.into_iter().for_each(|d| {
+            self.by_name.insert(normalize_name(&d.name), d);
+        });
+    }
+
     pub fn len(&self) -> usize {
         self.by_name.len()
     }
@@ -65,17 +72,28 @@ impl ShaderDb {
     }
 }
 
+impl From<Vec<ShaderDef>> for ShaderDb {
+    fn from(value: Vec<ShaderDef>) -> Self {
+        let hmap: HashMap<String, ShaderDef> = value
+            .into_iter()
+            .map(|d| (normalize_name(&d.name), d))
+            .collect();
+        Self { by_name: hmap }
+    }
+}
+
+impl From<ShaderDef> for ShaderDb {
+    fn from(value: ShaderDef) -> Self {
+        Self {
+            by_name: [(normalize_name(&value.name), value)].into(),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ShaderError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-
-    #[error("utf-8 decoding error in {path}: {source}")]
-    Utf8 {
-        path: PathBuf,
-        #[source]
-        source: std::string::FromUtf8Error,
-    },
 
     #[error("syntax error in {path}:{line}: {msg}")]
     Syntax {
@@ -97,33 +115,50 @@ pub fn load_shader_db_from_scripts_dir(
     scripts_dir: impl AsRef<Path>,
 ) -> Result<ShaderDb, ShaderError> {
     let scripts_dir = scripts_dir.as_ref();
-    let mut db = ShaderDb::default();
 
     if !scripts_dir.exists() {
-        return Ok(db);
+        return Ok(ShaderDb::default());
     }
 
-    for entry in std::fs::read_dir(scripts_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if !ext.eq_ignore_ascii_case("shader") {
-            continue;
-        }
+    let defs: Vec<ShaderDef> = std::fs::read_dir(scripts_dir)?
+        .par_bridge()
+        .filter_map(|e| {
+            let entry = match e {
+                Ok(e) => e,
+                Err(e) => {
+                    log::warn!("read_dir error: {e}");
+                    return None;
+                }
+            };
+            let path = entry.path();
+            if !path.is_file() {
+                return None;
+            }
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if !ext.eq_ignore_ascii_case("shader") {
+                return None;
+            }
 
-        let bytes = std::fs::read(&path)?;
-        let src = String::from_utf8(bytes).map_err(|e| ShaderError::Utf8 {
-            path: path.clone(),
-            source: e,
-        })?;
+            let src = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("failed to read {}: {e}", path.display());
+                    return None;
+                }
+            };
 
-        parse_shader_file_into_db(&src, &path, &mut db)?;
-    }
+            match parse_shader_file(&src, &path) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::warn!("failed to parse {}: {e}", path.display());
+                    None
+                }
+            }
+        })
+        .flatten_iter()
+        .collect();
 
-    Ok(db)
+    Ok(defs.into())
 }
 
 /// Convenience wrapper around [`load_shader_db_from_scripts_dir`] for a game root directory.
@@ -137,9 +172,10 @@ struct Tok {
     line: usize,
 }
 
-fn parse_shader_file_into_db(src: &str, path: &Path, db: &mut ShaderDb) -> Result<(), ShaderError> {
+pub fn parse_shader_file(src: &str, path: &Path) -> Result<Vec<ShaderDef>, ShaderError> {
     let tokens = tokenize(src);
     let mut i = 0usize;
+    let mut defs = Vec::new();
 
     while i < tokens.len() {
         // Skip stray braces/empties.
@@ -243,14 +279,14 @@ fn parse_shader_file_into_db(src: &str, path: &Path, db: &mut ShaderDb) -> Resul
             });
         }
 
-        db.insert(ShaderDef {
+        defs.push(ShaderDef {
             name: shader_name,
             qer,
             diffuse_map,
         });
     }
 
-    Ok(())
+    Ok(defs)
 }
 
 /// Parse a `.shader` source string and merge its `qer_*` parameters into an existing database.
@@ -262,7 +298,8 @@ pub fn parse_shader_source_into_db(
     path: &Path,
     db: &mut ShaderDb,
 ) -> Result<(), ShaderError> {
-    parse_shader_file_into_db(src, path, db)
+    db.extend(parse_shader_file(src, path)?);
+    Ok(())
 }
 
 fn apply_qer(
@@ -428,8 +465,9 @@ textures/common/caulk
     }
 }
 "#;
-        let mut db = ShaderDb::default();
-        parse_shader_file_into_db(src, Path::new("test.shader"), &mut db).unwrap();
+        let db: ShaderDb = parse_shader_file(src, Path::new("test.shader"))
+            .unwrap()
+            .into();
         let sh = db.get("textures/common/caulk").unwrap();
         assert_eq!(
             sh.qer.editor_image.as_deref(),
@@ -442,13 +480,12 @@ textures/common/caulk
 
     #[test]
     fn lookup_falls_back_to_textures_prefix() {
-        let mut db = ShaderDb::default();
-        parse_shader_file_into_db(
+        let db: ShaderDb = parse_shader_file(
             "textures/common/trigger\n{\nqer_trans 0.5\n}",
             Path::new("test.shader"),
-            &mut db,
         )
-        .unwrap();
+        .unwrap()
+        .into();
         // map faces store material without "textures/" prefix
         let sh = db.get("common/trigger").expect("lookup should fall back");
         assert_eq!(sh.qer.trans, Some(0.5));
@@ -469,8 +506,9 @@ skins/test/example
     }
 }
 "#;
-        let mut db = ShaderDb::default();
-        parse_shader_file_into_db(src, Path::new("test.shader"), &mut db).unwrap();
+        let db: ShaderDb = parse_shader_file(src, Path::new("test.shader"))
+            .unwrap()
+            .into();
         let sh = db.get("skins/test/example").unwrap();
         assert_eq!(
             sh.diffuse_map.as_deref(),

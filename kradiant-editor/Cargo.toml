@@ -5,21 +5,22 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-kradiant = { path = "../kradiant" }
+kradiant.workspace = true
 dear-imgui-rs = "0.13"
 dear-imgui-glow = { version = "0.13", features = ["gl_extensions_support"] }
-glow = "0.17"
+glow.workspace = true
 dear-imgui-winit = "0.13"
 winit = "0.30.12"
 glutin = { git = "https://github.com/rust-windowing/glutin.git", branch = "0.32.x", version = "0.32.3" }
 raw-window-handle = "0.6.2"
 glutin-winit = { git = "https://github.com/rust-windowing/glutin.git", branch = "0.32.x", version = "0.5.0" }
 rfd = "0.17.2"
-glam = { version = "0.32.1", features = ["bytemuck"] }
-bytemuck = { version = "1.25.0", features = ["derive"] }
-toml = "1.0.7"
-serde = { version = "1.0.228", features = ["derive"] }
-num-traits = "0.2.19"
-strum_macros = "0.28.0"
-strum = "0.28.0"
-#image = { version = "0.25.10", features = ["dds"], default-features = false }
+glam = { workspace = true, features = ["bytemuck"] }
+bytemuck = { workspace = true, features = ["derive"] }
+toml.workspace = true
+serde = { workspace = true, features = ["derive"] }
+num-traits.workspace = true
+strum_macros.workspace = true
+strum.workspace = true
+rayon.workspace = true
+log.workspace = true

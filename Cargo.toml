@@ -1,3 +1,16 @@
 [workspace]
 resolver = "3"
 members = ["kradiant","kradiant-editor"]
+
+[workspace.dependencies]
+kradiant = { version = "0.1.0", path = "./kradiant" }
+glow = "0.17"
+glam = { version = "0.32.1", features = ["bytemuck"] }
+bytemuck = { version = "1.25.0", features = ["derive"] }
+toml = "1.0.7"
+serde = { version = "1.0.228", features = ["derive"] }
+num-traits = "0.2.19"
+strum_macros = "0.28.0"
+strum = "0.28.0"
+rayon = "1.12.0"
+log = "0.4"

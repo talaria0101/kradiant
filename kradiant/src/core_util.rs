@@ -1,4 +1,9 @@
-use crate::{Quat, Vec3, editing::{AffineRotate, AffineScale}, editor::viewport::{DragMode, Ortho, StretchMode}, map_utils::format_float_trim};
+use crate::{
+    Quat, Vec3,
+    editing::{AffineRotate, AffineScale},
+    editor::viewport::{DragMode, Ortho, StretchMode},
+    map_utils::format_float_trim,
+};
 
 pub fn project_to_2d(v: Vec3, axis: Ortho) -> [f32; 2] {
     match axis {
@@ -105,9 +110,7 @@ pub fn proxy_box_center(
     size: Vec3,
 ) -> Vec3 {
     match anchor {
-        crate::editor::config::EntityDrawAnchor::Base => {
-            origin + Vec3::new(0.0, 0.0, size.z * 0.5)
-        }
+        crate::editor::config::EntityDrawAnchor::Base => origin + Vec3::new(0.0, 0.0, size.z * 0.5),
         crate::editor::config::EntityDrawAnchor::Center => origin,
     }
 }
@@ -166,8 +169,7 @@ pub fn box_line_vertices_from_base(base: Vec3, size: Vec3, rot: Option<Quat>) ->
     box_line_vertices(center, size, rot)
 }
 
-fn model_bounds_corners(origin: Vec3, mins: Vec3, maxs: Vec3, rot: Option<Quat>) -> [Vec3; 8]
-{
+fn model_bounds_corners(origin: Vec3, mins: Vec3, maxs: Vec3, rot: Option<Quat>) -> [Vec3; 8] {
     let corners = [
         Vec3::new(mins.x, mins.y, mins.z),
         Vec3::new(maxs.x, mins.y, mins.z),
@@ -209,12 +211,7 @@ pub fn model_bounds_line_vertices(
 /// The mesh spins about its root bone (`origin`) by `rot`; returns the
 /// world-space AABB that contains the rotated model (matches the wireframe
 /// box used for clickable/selectable area).
-pub fn model_bounds_aabb(
-    origin: Vec3,
-    mins: Vec3,
-    maxs: Vec3,
-    rot: Option<Quat>,
-) -> (Vec3, Vec3) {
+pub fn model_bounds_aabb(origin: Vec3, mins: Vec3, maxs: Vec3, rot: Option<Quat>) -> (Vec3, Vec3) {
     let corners = model_bounds_corners(origin, mins, maxs, rot);
     let mut min_out = Vec3::splat(f32::MAX);
     let mut max_out = Vec3::splat(f32::MIN);
@@ -329,25 +326,27 @@ pub fn resolved_arrow_length(style: &crate::editor::config::EntityDrawStyle, fal
     }
 }
 
-pub(crate) fn preview_point(dmode: DragMode, offset: Vec3, stretch_mode: Option<StretchMode>, stretch: Option<AffineScale>, rotate: Option<AffineRotate>, p: Vec3) -> Vec3
-{
+pub(crate) fn preview_point(
+    dmode: DragMode,
+    offset: Vec3,
+    stretch_mode: Option<StretchMode>,
+    stretch: Option<AffineScale>,
+    rotate: Option<AffineRotate>,
+    p: Vec3,
+) -> Vec3 {
     match dmode {
         DragMode::MoveSelection | DragMode::MoveVertices | DragMode::MoveEdges => p + offset,
         DragMode::StretchSelection if stretch_mode.is_some() => {
             let stretch_mode = stretch_mode.unwrap();
             if stretch_mode == StretchMode::Scale {
-                stretch
-                .map(|x: AffineScale| x.apply_point(p))
-                .unwrap_or(p)
+                stretch.map(|x: AffineScale| x.apply_point(p)).unwrap_or(p)
             } else {
                 p
             }
         }
         DragMode::NewBrush | DragMode::RectangularSelection => p,
-        DragMode::RotateSelection => {
-            rotate.map(|r| r.apply_point(p)).unwrap_or(p)
-        }
-        _ => p
+        DragMode::RotateSelection => rotate.map(|r| r.apply_point(p)).unwrap_or(p),
+        _ => p,
     }
 }
 

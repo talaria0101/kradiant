@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::editor::EditorState;
 use crate::editing;
+use crate::editor::EditorState;
 use crate::editor::config::{EntityDrawAnchor, EntityDrawKind, RenderMode};
 use crate::editor::viewport::DragMode;
 use crate::render::RenderBackend;
@@ -60,7 +60,12 @@ pub struct TexVertex {
     pub uv: [f32; 2],
 }
 
-fn solid_box_lit_vertices_from_base<F: Fn(Vec3) -> Vec3>(base: Vec3, size: Vec3, rot: Option<Quat>, preview_fn: F) -> Vec<LitVertex> {
+fn solid_box_lit_vertices_from_base<F: Fn(Vec3) -> Vec3>(
+    base: Vec3,
+    size: Vec3,
+    rot: Option<Quat>,
+    preview_fn: F,
+) -> Vec<LitVertex> {
     let min = base;
     let max = base + size;
     let center = base + size * 0.5;
@@ -299,8 +304,8 @@ impl Viewport3D {
                         let has_model = ent.model.is_some();
                         let style = editor.entity_drawing.resolve(&ent.classname, has_model);
 
-                        let draw_entity_visual = ent.brushes.is_empty()
-                            && !matches!(style.kind, EntityDrawKind::Hidden);
+                        let draw_entity_visual =
+                            ent.brushes.is_empty() && !matches!(style.kind, EntityDrawKind::Hidden);
 
                         let mut model_ref: Option<&crate::xmodel::XModel> = None;
                         if draw_entity_visual && has_model_prop {
@@ -355,13 +360,12 @@ impl Viewport3D {
                                             ),
                                         ));
                                         // Vertical center guide line (top to bottom)
-                                        let (min_b, max_b) = crate::core_util::
-                                            model_bounds_aabb(
-                                                model_origin,
-                                                model.mins,
-                                                model.maxs,
-                                                model_rot,
-                                            );
+                                        let (min_b, max_b) = crate::core_util::model_bounds_aabb(
+                                            model_origin,
+                                            model.mins,
+                                            model.maxs,
+                                            model_rot,
+                                        );
                                         let cx = (min_b.x + max_b.x) * 0.5;
                                         let cy = (min_b.y + max_b.y) * 0.5;
                                         self.entity_line_batches.push((
@@ -387,8 +391,10 @@ impl Viewport3D {
                                             {
                                                 let forward =
                                                     crate::core_util::entity_angles_forward(angles);
-                                                let arrow_len =
-                                                    core_util::resolved_arrow_length(&style, model.radius);
+                                                let arrow_len = core_util::resolved_arrow_length(
+                                                    &style,
+                                                    model.radius,
+                                                );
                                                 self.entity_line_batches.push((
                                                     style.color,
                                                     crate::core_util::arrow_line_vertices(
@@ -407,20 +413,22 @@ impl Viewport3D {
                                         }
                                     } else {
                                         let size = Vec3::from_array(style.size);
-                                        let dumb_fn = |p: Vec3| -> Vec3 {p};
+                                        let dumb_fn = |p: Vec3| -> Vec3 { p };
                                         let tris = solid_box_lit_vertices_from_base(
                                             entity_solid_box_base(pivot, size, style.anchor),
                                             size,
                                             model_rot,
-                                            dumb_fn
+                                            dumb_fn,
                                         );
                                         self.entity_solid_batches.push((style.color, tris));
                                         if style.show_arrow {
                                             if let Some(angles) =
                                                 angles.filter(|a| a.length_squared() > 1.0e-6)
                                             {
-                                                let arrow_len =
-                                                    core_util::resolved_arrow_length(&style, size.length());
+                                                let arrow_len = core_util::resolved_arrow_length(
+                                                    &style,
+                                                    size.length(),
+                                                );
                                                 self.entity_line_batches.push((
                                                     style.color,
                                                     crate::core_util::arrow_line_vertices(
@@ -799,7 +807,9 @@ impl Viewport3D {
             // Include the preview transform in the rebuild condition.
             let preview_hash = {
                 let mut h: u64 = 5381;
-                h = h.wrapping_mul(31).wrapping_add(editor.view3d.drag_mode as u64);
+                h = h
+                    .wrapping_mul(31)
+                    .wrapping_add(editor.view3d.drag_mode as u64);
                 let o = editor.view3d.move_offset;
                 for b in [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()] {
                     h = h.wrapping_mul(31).wrapping_add(b as u64);
@@ -821,7 +831,14 @@ impl Viewport3D {
                 let preview_move_offset = editor.view3d.move_offset;
                 let preview_rotate = editor.view3d.rotate_preview_xform();
                 let preview_point = |p: Vec3| -> Vec3 {
-                    core_util::preview_point(preview_drag_mode, preview_move_offset, None, None, preview_rotate, p)
+                    core_util::preview_point(
+                        preview_drag_mode,
+                        preview_move_offset,
+                        None,
+                        None,
+                        preview_rotate,
+                        p,
+                    )
                 };
 
                 if let Some(map) = editor.map.as_mut() {
@@ -832,8 +849,7 @@ impl Viewport3D {
                         .collect();
 
                     for (entity_idx, ent) in map.entities.iter_mut().enumerate() {
-                        if editor.selected_entities.contains(&entity_idx)
-                            && ent.brushes.is_empty()
+                        if editor.selected_entities.contains(&entity_idx) && ent.brushes.is_empty()
                         {
                             let style = editor
                                 .entity_drawing
@@ -911,7 +927,12 @@ impl Viewport3D {
                                     .get("angles")
                                     .and_then(|s| core_util::vec3_from_whitespace_triplet(s));
                                 let rot = angles.map(core_util::entity_angles_to_quat);
-                                let tris = solid_box_lit_vertices_from_base(base, size, rot, preview_point);
+                                let tris = solid_box_lit_vertices_from_base(
+                                    base,
+                                    size,
+                                    rot,
+                                    preview_point,
+                                );
                                 self.tri_vertices_selected.extend(tris);
                             }
                         }
@@ -955,16 +976,27 @@ impl Viewport3D {
                                 BrushContent::Convex(_) => {
                                     // For stretch preview, compute polygons from a hypothetical stretched brush
                                     let stretched_polys;
-                                    let polys = if editor.view3d.drag_mode == DragMode::StretchSelection {
+                                    let polys = if editor.view3d.drag_mode
+                                        == DragMode::StretchSelection
+                                    {
                                         let mut probe = brush.clone();
-                                        if let BrushContent::Convex(probe_faces) = &mut probe.content {
+                                        if let BrushContent::Convex(probe_faces) =
+                                            &mut probe.content
+                                        {
                                             if let Some(stretch) = editor.view3d.stretch.as_ref() {
-                                                for (ent_idx, br_idx, face_indices) in &stretch.side_faces {
-                                                    if *ent_idx == entity_idx && *br_idx == brush_idx {
+                                                for (ent_idx, br_idx, face_indices) in
+                                                    &stretch.side_faces
+                                                {
+                                                    if *ent_idx == entity_idx
+                                                        && *br_idx == brush_idx
+                                                    {
                                                         for &face_idx in face_indices {
-                                                            if let Some(face) = probe_faces.get_mut(face_idx) {
+                                                            if let Some(face) =
+                                                                probe_faces.get_mut(face_idx)
+                                                            {
                                                                 for p in &mut face.plane_points {
-                                                                    *p += editor.view3d.stretch_delta;
+                                                                    *p +=
+                                                                        editor.view3d.stretch_delta;
                                                                 }
                                                             }
                                                         }
@@ -1209,7 +1241,13 @@ impl Viewport3D {
                         let factor = editor
                             .map
                             .as_ref()
-                            .map(|m| editing::edge_move_clamp_factor(m, &editor.selected_edges, raw_delta))
+                            .map(|m| {
+                                editing::edge_move_clamp_factor(
+                                    m,
+                                    &editor.selected_edges,
+                                    raw_delta,
+                                )
+                            })
                             .unwrap_or(0.0);
                         self.last_edge_clamp_offset = raw_delta;
                         self.last_edge_clamp_selection_hash = sel_hash;
@@ -1288,7 +1326,8 @@ impl Viewport3D {
                                 }
                                 if !editor.config.view.show.convex
                                     || (brush.is_clip() && !editor.config.view.show.clip_brushes)
-                                    || (brush.is_portal() && !editor.config.view.show.portal_brushes)
+                                    || (brush.is_portal()
+                                        && !editor.config.view.show.portal_brushes)
                                     || (brush.is_hint() && !editor.config.view.show.hint_brushes)
                                 {
                                     continue;
@@ -1297,7 +1336,8 @@ impl Viewport3D {
                                 let polys = brush.get_polygons().unwrap_or(&[]);
                                 for fa in 0..polys.len() {
                                     for fb in (fa + 1)..polys.len() {
-                                        let Some((a, b)) = core_util::shared_edge_points(polys, fa, fb)
+                                        let Some((a, b)) =
+                                            core_util::shared_edge_points(polys, fa, fb)
                                         else {
                                             continue;
                                         };
@@ -1324,7 +1364,9 @@ impl Viewport3D {
                 let mut sel_edges: Vec<Vec3> = Vec::new();
                 if let Some(map) = editor.map.as_mut() {
                     // Only iterate brushes that have selected edges.
-                    let selected_brushes: Vec<(usize, usize)> = editor.selected_edges.iter()
+                    let selected_brushes: Vec<(usize, usize)> = editor
+                        .selected_edges
+                        .iter()
                         .map(|e| (e.entity_idx, e.brush_idx))
                         .collect::<HashSet<_>>()
                         .into_iter()
@@ -1344,8 +1386,9 @@ impl Viewport3D {
                         let polys: &[(Vec<Vec3>, Vec<u32>)] = if previewing {
                             match sel_by_brush.get(&(entity_idx, brush_idx)) {
                                 Some(pairs) => {
-                                    match editing::preview_edge_moved_polys(brush, pairs, drag_delta)
-                                    {
+                                    match editing::preview_edge_moved_polys(
+                                        brush, pairs, drag_delta,
+                                    ) {
                                         Some(p) => {
                                             owned_polys = Some(p);
                                             owned_polys.as_deref().unwrap_or(&[])

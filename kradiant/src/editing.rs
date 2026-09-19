@@ -1,3 +1,5 @@
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+
 use crate::editor::config::{EntityDef, EntityDrawAnchor, EntityDrawKind, EntityDrawStyle};
 use crate::editor::selection::EdgeSelection;
 use crate::map::{
@@ -857,27 +859,24 @@ pub struct Aabb {
 }
 
 pub fn aabb_from_polys(polys: &[(Vec<Vec3>, Vec<u32>)]) -> Aabb {
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-
-    for (verts, _) in polys {
-        for v in verts {
-            min = min.min(*v);
-            max = max.max(*v);
-        }
-    }
+    let (min, max) = polys
+        .par_iter()
+        .with_min_len(64)
+        .map(|(verts, _)| {
+            let mut mn = Vec3::splat(f32::INFINITY);
+            let mut mx = Vec3::splat(f32::NEG_INFINITY);
+            for v in verts {
+                mn = mn.min(*v);
+                mx = mx.max(*v);
+            }
+            (mn, mx)
+        })
+        .reduce(
+            || (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(a_min, a_max), (b_min, b_max)| (a_min.min(b_min), a_max.max(b_max)),
+        );
 
     Aabb {
-        /*min: IVec3::new(
-            aabb_floor_eps(min.x),
-            aabb_floor_eps(min.y),
-            aabb_floor_eps(min.z),
-        ),
-        max: IVec3::new(
-            aabb_ceil_eps(max.x),
-            aabb_ceil_eps(max.y),
-            aabb_ceil_eps(max.z),
-        ),*/
         min: Vec3::new(min.x, min.y, min.z),
         max: Vec3::new(max.x, max.y, max.z),
     }
@@ -893,16 +892,6 @@ pub fn aabb_from_positions(positions: &[Vec3]) -> Aabb {
     }
 
     Aabb {
-        /*min: IVec3::new(
-            aabb_floor_eps(min.x),
-            aabb_floor_eps(min.y),
-            aabb_floor_eps(min.z),
-        ),
-        max: IVec3::new(
-            aabb_ceil_eps(max.x),
-            aabb_ceil_eps(max.y),
-            aabb_ceil_eps(max.z),
-        ),*/
         min: Vec3::new(min.x, min.y, min.z),
         max: Vec3::new(max.x, max.y, max.z),
     }
@@ -1226,7 +1215,8 @@ impl PickMask {
     pub const CLIP: PickMask = PickMask(1 << 2);
     pub const PORTAL: PickMask = PickMask(1 << 3);
     pub const HINT: PickMask = PickMask(1 << 4);
-    pub const ALL: PickMask = PickMask(Self::CONVEX.0 | Self::PATCH.0 | Self::CLIP.0 | Self::PORTAL.0 | Self::HINT.0);
+    pub const ALL: PickMask =
+        PickMask(Self::CONVEX.0 | Self::PATCH.0 | Self::CLIP.0 | Self::PORTAL.0 | Self::HINT.0);
 
     pub fn contains(self, other: PickMask) -> bool {
         (self.0 & other.0) != 0
@@ -1406,9 +1396,8 @@ pub fn pick_edge_by_ray(
                     // Find all edges in this brush
                     for face_a_idx in 0..polys.len() {
                         for face_b_idx in face_a_idx + 1..polys.len() {
-                            if let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
-                                polys, face_a_idx, face_b_idx,
-                            )
+                            if let Some((edge_start, edge_end)) =
+                                crate::core_util::shared_edge_points(polys, face_a_idx, face_b_idx)
                             {
                                 let edge_dir = edge_end - edge_start;
                                 let edge_len = edge_dir.length();
@@ -1732,9 +1721,7 @@ fn group_edges_by_brush(
         std::collections::BTreeMap::new();
     for sel in selected_edges {
         let pair = normalized_edge_pair(sel);
-        let pairs = grouped
-            .entry((sel.entity_idx, sel.brush_idx))
-            .or_default();
+        let pairs = grouped.entry((sel.entity_idx, sel.brush_idx)).or_default();
         if !pairs.contains(&pair) {
             pairs.push(pair);
         }
@@ -1770,17 +1757,28 @@ pub fn edge_move_plane_updates(
     // the anchor is truly stationary across every moved edge.
     let mut edge_endpoints_per_face: Vec<(usize, Vec<Vec3>)> = Vec::new();
     for &(face_a_idx, face_b_idx) in edge_face_pairs {
-        let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
-            polys, face_a_idx, face_b_idx,
-        ) else {
+        let Some((edge_start, edge_end)) =
+            crate::core_util::shared_edge_points(polys, face_a_idx, face_b_idx)
+        else {
             return None;
         };
         for face_idx in [face_a_idx, face_b_idx] {
-            if let Some(entry) = edge_endpoints_per_face.iter_mut().find(|(i, _)| *i == face_idx) {
-                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, edge_start)) {
+            if let Some(entry) = edge_endpoints_per_face
+                .iter_mut()
+                .find(|(i, _)| *i == face_idx)
+            {
+                if !entry
+                    .1
+                    .iter()
+                    .any(|p| crate::core_util::same_point(*p, edge_start))
+                {
                     entry.1.push(edge_start);
                 }
-                if !entry.1.iter().any(|p| crate::core_util::same_point(*p, edge_end)) {
+                if !entry
+                    .1
+                    .iter()
+                    .any(|p| crate::core_util::same_point(*p, edge_end))
+                {
                     entry.1.push(edge_end);
                 }
             } else {
@@ -1793,9 +1791,9 @@ pub fn edge_move_plane_updates(
     let mut updated_faces: Vec<usize> = Vec::new();
 
     for &(face_a_idx, face_b_idx) in edge_face_pairs {
-        let Some((edge_start, edge_end)) = crate::core_util::shared_edge_points(
-            polys, face_a_idx, face_b_idx,
-        ) else {
+        let Some((edge_start, edge_end)) =
+            crate::core_util::shared_edge_points(polys, face_a_idx, face_b_idx)
+        else {
             return None;
         };
 
@@ -1814,12 +1812,11 @@ pub fn edge_move_plane_updates(
                 .map(|(_, v)| v.as_slice())
                 .unwrap_or(&[]);
 
-            let Some(&reference) = verts
-                .iter()
-                .find(|&&v| {
-                    !face_endpoints.iter().any(|ep| crate::core_util::same_point(v, *ep))
-                })
-            else {
+            let Some(&reference) = verts.iter().find(|&&v| {
+                !face_endpoints
+                    .iter()
+                    .any(|ep| crate::core_util::same_point(v, *ep))
+            }) else {
                 return None;
             };
 
@@ -1914,11 +1911,7 @@ pub fn preview_edge_moved_polys(
 ///
 /// Uses bisection, assuming validity degrades monotonically along the drag
 /// (true for the practical degeneration modes).
-pub fn edge_move_clamp_factor(
-    map: &Map,
-    selected_edges: &[EdgeSelection],
-    delta: Vec3,
-) -> f32 {
+pub fn edge_move_clamp_factor(map: &Map, selected_edges: &[EdgeSelection], delta: Vec3) -> f32 {
     if selected_edges.is_empty() || delta == Vec3::ZERO {
         return 1.0;
     }
@@ -2003,6 +1996,7 @@ pub fn translate_selected_edges(
     let grouped = group_edges_by_brush(selected_edges);
 
     let mut any = false;
+    // grouped.into_par_iter().for_each(|((entity_idx, brush_idx), pairs)| {});
     for ((entity_idx, brush_idx), pairs) in grouped {
         let Some(entity) = map.entities.get_mut(entity_idx) else {
             continue;
@@ -2922,12 +2916,19 @@ mod tests {
         };
 
         let before = map.entities[0].brushes[0].clone();
-        assert!(!translate_selected_edges(&mut map, &[sel], Vec3::new(0.0, 0.0, -8.0)));
+        assert!(!translate_selected_edges(
+            &mut map,
+            &[sel],
+            Vec3::new(0.0, 0.0, -8.0)
+        ));
         // Nothing was modified.
         let mut before = before;
         before.invalidate_geometry();
         assert_eq!(
-            before.get_polygons().map(|p| p.to_vec()).unwrap_or_default(),
+            before
+                .get_polygons()
+                .map(|p| p.to_vec())
+                .unwrap_or_default(),
             crate::geometry::brush_to_polygons(&map.entities[0].brushes[0]).unwrap()
         );
     }
@@ -2958,7 +2959,11 @@ mod tests {
         let polys = crate::geometry::brush_to_polygons(brush).unwrap();
         let (na, _nb) = crate::core_util::shared_edge_points(&polys, fa, fb).unwrap();
         let expected_z = a.z + delta.z * factor;
-        assert!((na.z - expected_z).abs() < 1.0, "moved to {} want {expected_z}", na.z);
+        assert!(
+            (na.z - expected_z).abs() < 1.0,
+            "moved to {} want {expected_z}",
+            na.z
+        );
     }
 
     #[test]
@@ -2974,8 +2979,8 @@ mod tests {
         let delta = Vec3::new(16.0, 0.0, 8.0);
 
         let brush = map.entities[0].brushes[0].clone();
-        let preview = preview_edge_moved_polys(&brush, &[(fa, fb)], delta)
-            .expect("preview should succeed");
+        let preview =
+            preview_edge_moved_polys(&brush, &[(fa, fb)], delta).expect("preview should succeed");
 
         assert!(translate_selected_edges(&mut map, &[sel], delta));
         let applied = crate::geometry::brush_to_polygons(&map.entities[0].brushes[0]).unwrap();

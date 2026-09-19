@@ -21,8 +21,7 @@ pub fn user_home() -> &'static PathBuf {
     static HOME_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
         if let Some(h) = env::home_dir() {
             h
-        }
-        else {
+        } else {
             env::current_exe().unwrap().with_extension(".home")
         }
     });
@@ -34,11 +33,9 @@ pub fn config_home() -> &'static PathBuf {
     static CONFIG_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
         if let Ok(s) = env::var("XDG_CONFIG_HOME") {
             PathBuf::from(s)
-        }
-        else if let Some(s) = env::home_dir() {
+        } else if let Some(s) = env::home_dir() {
             s.join(".config")
-        }
-        else {
+        } else {
             env::current_exe().unwrap().with_extension(".config")
         }
     });
@@ -49,9 +46,11 @@ pub fn config_home() -> &'static PathBuf {
 pub fn config_dirs() -> &'static Vec<PathBuf> {
     static CONFIG_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
         if let Ok(s) = env::var("XDG_CONFIG_DIRS") {
-            s.split(":").filter(|p| *p != "=").map(|p| PathBuf::from(p)).collect()
-        }
-        else {
+            s.split(":")
+                .filter(|p| *p != "=")
+                .map(|p| PathBuf::from(p))
+                .collect()
+        } else {
             vec![PathBuf::from("/etc/xdg")]
         }
     });
@@ -63,8 +62,7 @@ pub fn data_home() -> &'static PathBuf {
     static DATA_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
         if let Ok(s) = env::var("XDG_DATA_HOME") {
             PathBuf::from(s)
-        }
-        else {
+        } else {
             user_home().join(".local").join("share")
         }
     });
@@ -75,10 +73,15 @@ pub fn data_home() -> &'static PathBuf {
 pub fn data_dirs() -> &'static Vec<PathBuf> {
     static DATA_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
         if let Ok(s) = env::var("XDG_DATA_DIRS") {
-            s.split(":").filter(|p| *p != "=").map(|p| PathBuf::from(p)).collect()
-        }
-        else {
-            vec![PathBuf::from("/usr/local/share"), PathBuf::from("/usr/share")]
+            s.split(":")
+                .filter(|p| *p != "=")
+                .map(|p| PathBuf::from(p))
+                .collect()
+        } else {
+            vec![
+                PathBuf::from("/usr/local/share"),
+                PathBuf::from("/usr/share"),
+            ]
         }
     });
 
@@ -89,8 +92,7 @@ pub fn cache_home() -> &'static PathBuf {
     static CACHE_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
         if let Ok(s) = env::var("XDG_CACHE_HOME") {
             PathBuf::from(s)
-        }
-        else {
+        } else {
             user_home().join(".cache")
         }
     });

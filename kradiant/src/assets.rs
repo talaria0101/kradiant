@@ -4,12 +4,14 @@
 //! archives, and decodes image bytes, but it does not create GPU resources. Callers are expected
 //! to upload the returned RGBA8 data to their rendering backend of choice.
 
-use crate::shader::{ShaderDb, parse_shader_source_into_db};
+use crate::shader::{ShaderDb, ShaderDef, parse_shader_file, parse_shader_source_into_db};
 use crate::texture::{TextureError, TextureImage, decode_texture_rgba8, load_texture_rgba8};
 use crate::xmodel::{XModel, XModelError, resolve_xmodel_texture_name};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use thiserror::Error;
 use zip::ZipArchive;
 
@@ -163,7 +165,7 @@ pub struct AssetDb {
     roots: AssetRoots,
     pk3_paths: Vec<PathBuf>,
     // key is normalized (lowercase, forward slashes, no leading slash)
-    pk3_index: HashMap<String, Pk3EntryRef>,
+    pk3_index: RwLock<HashMap<String, Pk3EntryRef>>,
     // Per-archive case-insensitive lookup table: normalized virtual path -> exact zip entry name.
     pk3_case_index: HashMap<PathBuf, HashMap<String, String>>,
     // Open pk3 archives, so repeated reads don't re-parse the central directory.
@@ -220,42 +222,44 @@ impl AssetDb {
         pk3_paths.sort();
         log.push(format!("[AssetDb] Total {} pk3 files", pk3_paths.len()));
 
-        // Build index in ascending order so later filenames (e.g. pak1.pk3) override earlier (pak0.pk3).
-        let mut pk3_index: HashMap<String, Pk3EntryRef> = HashMap::new();
-        if opts.full_index || opts.index_shaders || opts.index_textures {
-            for pk3_path in &pk3_paths {
-                let mut count: usize = 0;
-                let f = File::open(pk3_path)?;
-                let zip = ZipArchive::new(f)?;
-
-                // Fast path: avoid indexing everything. For editor preview we only need:
-                // - textures: textures/**.(dds|tga|jpg|jpeg)
-                // - shader scripts: scripts/*.shader
-                //
-                // Full indexing is available for future expansion (models, sounds, etc.).
+        let pk3_indices: Vec<(HashMap<String, Pk3EntryRef>, &PathBuf, usize)> = pk3_paths
+            .par_iter()
+            .with_min_len(1)
+            .map(|p| {
+                let mut local = HashMap::new();
+                let f = File::open(p)?;
+                let zip = ZipArchive::new(&f)?;
+                let mut count = 0;
                 for name in zip.file_names() {
-                    count += 1;
                     if !opts.full_index && !is_useful_index_entry_raw(name, &opts) {
                         continue;
                     }
-
                     let key = normalize_asset_path(name);
-
-                    // Keep the last one (highest priority) when duplicates exist.
-                    pk3_index.insert(
+                    local.insert(
                         key,
                         Pk3EntryRef {
-                            pk3_path: pk3_path.clone(),
+                            pk3_path: p.clone(),
                             entry_name: name.to_string(),
                         },
                     );
+                    count += 1;
                 }
-                log.push(format!(
-                    "    {:6} files in {}",
-                    count,
-                    pk3_path.file_name().unwrap().display()
-                ));
+
+                Ok::<_, AssetDbError>((local, p, count))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Build index in ascending order so later filenames (e.g. pak1.pk3) override earlier (pak0.pk3).
+        let mut pk3_index: HashMap<String, Pk3EntryRef> = HashMap::new();
+        for (local, pk3_path, count) in pk3_indices {
+            for (k, v) in local {
+                pk3_index.insert(k, v);
             }
+            log.push(format!(
+                "    {:6} files read from {}",
+                count,
+                pk3_path.display()
+            ));
         }
 
         // Pre-build the per-archive case-insensitive file list index from the on-disk cache
@@ -269,7 +273,7 @@ impl AssetDb {
             Self {
                 roots,
                 pk3_paths,
-                pk3_index,
+                pk3_index: RwLock::new(pk3_index),
                 pk3_case_index,
                 pk3_open: HashMap::new(),
             },
@@ -309,8 +313,26 @@ impl AssetDb {
     }
 
     /// Iterate normalized virtual paths provided by indexed `.pk3` files.
-    pub fn iter_pk3_virtual_paths(&self) -> impl Iterator<Item = &str> {
-        self.pk3_index.keys().map(|s| s.as_str())
+    pub fn iter_pk3_virtual_paths(&self) -> Vec<String> {
+        self.pk3_index.read().unwrap().keys().cloned().collect()
+    }
+
+    /// Fast path: resolve a virtual path using only the pre-built index (no lazy I/O).
+    fn resolve_virtual_path_fast(&self, virtual_path: &str) -> Option<ResolvedAsset> {
+        let v_zip = canonical_virtual_path(virtual_path);
+        let v_key = normalize_asset_path(&v_zip);
+        let loose = self.roots.maindir.join(&v_zip);
+        if loose.is_file() {
+            return Some(ResolvedAsset::Loose(loose));
+        }
+        if let Some(pk3) = self.pk3_index.read().unwrap().get(&v_key) {
+            return Some(ResolvedAsset::Pk3 {
+                pk3_path: pk3.pk3_path.clone(),
+                entry_name: pk3.entry_name.clone(),
+                virtual_path: v_key,
+            });
+        }
+        None
     }
 
     /// Resolve an arbitrary virtual path (e.g. `scripts/common.shader`, `textures/common/caulk.tga`)
@@ -318,27 +340,19 @@ impl AssetDb {
     ///
     /// Loose files have priority.
     pub fn resolve_virtual_path(&mut self, virtual_path: &str) -> Option<ResolvedAsset> {
-        let v_zip = canonical_virtual_path(virtual_path);
-        let v_key = normalize_asset_path(&v_zip);
-        let loose = self.roots.maindir.join(&v_zip);
-        if loose.is_file() {
-            return Some(ResolvedAsset::Loose(loose));
+        if let Some(r) = self.resolve_virtual_path_fast(virtual_path) {
+            return Some(r);
         }
 
-        if let Some(pk3) = self.pk3_index.get(&v_key) {
-            return Some(ResolvedAsset::Pk3 {
-                pk3_path: pk3.pk3_path.clone(),
-                entry_name: pk3.entry_name.clone(),
-                virtual_path: v_key,
-            });
-        }
+        let v_zip = canonical_virtual_path(virtual_path);
+        let v_key = normalize_asset_path(&v_zip);
 
         // Slow path (on-demand): search `.pk3` archives from highest priority to lowest.
         // When found, memoize into the index so subsequent lookups are fast.
         let pk3s: Vec<PathBuf> = self.pk3_paths.iter().cloned().collect();
         for pk3_path in pk3s.iter().rev() {
             if let Some(entry_name) = self.pk3_lookup_case_insensitive(pk3_path, &v_zip) {
-                self.pk3_index.insert(
+                self.pk3_index.write().unwrap().insert(
                     v_key.clone(),
                     Pk3EntryRef {
                         pk3_path: pk3_path.clone(),
@@ -373,6 +387,41 @@ impl AssetDb {
                 Ok(buf)
             }
         }
+    }
+
+    /// Fast path: resolve a material using only the pre-built index (no lazy I/O).
+    /// Used in parallel contexts where `&mut self` is unavailable.
+    pub fn resolve_texture_fast(&self, material: &str) -> Option<ResolvedAsset> {
+        let rel = canonical_virtual_path(&normalize_material_name(material));
+
+        if Path::new(&rel).extension().is_some() {
+            if !rel.starts_with("textures/") {
+                let cand = format!("textures/{rel}");
+                if let Some(a) = self.resolve_virtual_path_fast(&cand) {
+                    return Some(a);
+                }
+            }
+            if let Some(a) = self.resolve_virtual_path_fast(&rel) {
+                return Some(a);
+            }
+            return None;
+        }
+
+        let preferred = ["dds", "tga", "jpg", "jpeg"];
+        for ext in preferred {
+            if !rel.starts_with("textures/") {
+                let cand = format!("textures/{rel}.{ext}");
+                if let Some(a) = self.resolve_virtual_path_fast(&cand) {
+                    return Some(a);
+                }
+            }
+            let cand = format!("{rel}.{ext}");
+            if let Some(a) = self.resolve_virtual_path_fast(&cand) {
+                return Some(a);
+            }
+        }
+
+        self.find_first_supported_loose(&rel)
     }
 
     /// Resolve a material name (as used in `.map`/shader references) to a texture asset.
@@ -468,49 +517,55 @@ impl AssetDb {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        // Build candidate virtual paths for each material in resolve order.
         #[derive(Debug)]
         struct Mat {
-            // Candidate virtual paths to check, in priority order.
             candidates: Vec<String>,
         }
 
+        use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
         use std::collections::HashSet;
 
+        // Phase 1a: deduplicate materials (fast, sequential).
         let mut seen = HashSet::<String>::new();
-        let mut mats: Vec<Mat> = Vec::new();
-
-        for m in materials {
-            let m_zip = canonical_virtual_path(&normalize_material_name(m));
-            let m_key = normalize_asset_path(&m_zip);
-            if !seen.insert(m_key.clone()) {
-                continue;
-            }
-
-            let mut candidates = Vec::<String>::new();
-            let rel = m_zip;
-
-            if Path::new(&rel).extension().is_some() {
-                if !rel.starts_with("textures/") {
-                    candidates.push(format!("textures/{rel}"));
+        let unique: Vec<String> = materials
+            .into_iter()
+            .filter_map(|m| {
+                let m_zip = canonical_virtual_path(&normalize_material_name(m));
+                let m_key = normalize_asset_path(&m_zip);
+                if seen.insert(m_key) {
+                    Some(m_zip)
+                } else {
+                    None
                 }
-                candidates.push(rel);
-            } else {
-                let preferred = ["dds", "tga", "jpg", "jpeg"];
-                for ext in preferred {
-                    if !rel.starts_with("textures/") {
-                        candidates.push(format!("textures/{rel}.{ext}"));
-                    }
-                    candidates.push(format!("{rel}.{ext}"));
-                }
-            }
+            })
+            .collect();
 
-            mats.push(Mat { candidates });
-        }
-
-        if mats.is_empty() || self.pk3_paths.is_empty() {
+        if unique.is_empty() || self.pk3_paths.is_empty() {
             return;
         }
+
+        // Phase 1b: generate candidate virtual paths in parallel (pure computation).
+        let mats: Vec<Mat> = unique
+            .par_iter()
+            .map(|rel| {
+                let mut candidates = Vec::<String>::new();
+                if Path::new(rel).extension().is_some() {
+                    if !rel.starts_with("textures/") {
+                        candidates.push(format!("textures/{rel}"));
+                    }
+                    candidates.push(rel.clone());
+                } else {
+                    let preferred = ["dds", "tga", "jpg", "jpeg"];
+                    for ext in preferred {
+                        if !rel.starts_with("textures/") {
+                            candidates.push(format!("textures/{rel}.{ext}"));
+                        }
+                        candidates.push(format!("{rel}.{ext}"));
+                    }
+                }
+                Mat { candidates }
+            })
+            .collect();
 
         // Search pk3s from highest priority to lowest. Once a material is resolved, stop searching it.
         let mut unresolved = vec![true; mats.len()];
@@ -547,7 +602,7 @@ impl AssetDb {
             }
 
             for (key, entry_name) in updates {
-                self.pk3_index.insert(
+                self.pk3_index.write().unwrap().insert(
                     key,
                     Pk3EntryRef {
                         pk3_path: pk3_path.clone(),
@@ -560,12 +615,10 @@ impl AssetDb {
 
     /// Load all `.shader` files from `scripts/` (loose + `.pk3`) and extract `qer_*` params.
     pub fn load_shader_db(&self) -> Result<ShaderDb, AssetDbError> {
-        let mut db = ShaderDb::default();
-
         // 1) pk3 scripts first (lower priority). Prefer the pk3 index if it contains scripts entries
         // to avoid scanning every zip entry again.
         let mut scripts_by_pk3: HashMap<PathBuf, Vec<(String, String)>> = HashMap::new();
-        for (vpath, pref) in &self.pk3_index {
+        for (vpath, pref) in self.pk3_index.read().unwrap().iter() {
             if vpath.starts_with("scripts/") && vpath.ends_with(".shader") {
                 scripts_by_pk3
                     .entry(pref.pk3_path.clone())
@@ -574,49 +627,79 @@ impl AssetDb {
             }
         }
 
-        if !scripts_by_pk3.is_empty() {
-            for pk3_path in &self.pk3_paths {
-                let Some(list) = scripts_by_pk3.get(pk3_path) else {
-                    continue;
-                };
-                let f = File::open(pk3_path)?;
-                let mut zip = ZipArchive::new(f)?;
-                for (vpath, entry_name) in list {
-                    let mut file = zip.by_name(entry_name)?;
-                    use std::io::Read;
-                    let mut bytes = Vec::with_capacity(file.size() as usize);
-                    file.read_to_end(&mut bytes)?;
-                    let src = String::from_utf8(bytes).map_err(|e| AssetDbError::Utf8 {
-                        path: vpath.clone(),
-                        source: e,
-                    })?;
-                    parse_shader_source_into_db(&src, Path::new(vpath), &mut db)?;
-                }
-            }
+        let pk3_shaders: Vec<Vec<ShaderDef>> = if !scripts_by_pk3.is_empty() {
+            self.pk3_paths
+                .par_iter()
+                .with_min_len(1)
+                .filter_map(|pk3_path| {
+                    let list = scripts_by_pk3.get(pk3_path)?;
+                    let f = File::open(pk3_path).ok()?;
+                    let mut zip = ZipArchive::new(f).ok()?;
+                    let mut defs = Vec::new();
+                    for (vpath, entry_name) in list {
+                        let mut file = match zip.by_name(entry_name) {
+                            Ok(f) => f,
+                            Err(_) => continue,
+                        };
+                        use std::io::Read;
+                        let mut bytes = Vec::with_capacity(file.size() as usize);
+                        if file.read_to_end(&mut bytes).is_err() {
+                            continue;
+                        }
+                        let Ok(src) = String::from_utf8(bytes) else {
+                            continue;
+                        };
+                        if let Ok(v) = parse_shader_file(&src, Path::new(vpath)) {
+                            defs.extend(v);
+                        }
+                    }
+                    Some(defs)
+                })
+                .collect()
         } else {
             // Fallback: scan pk3s directly.
-            for pk3_path in &self.pk3_paths {
-                let f = File::open(pk3_path)?;
-                let mut zip = ZipArchive::new(f)?;
-                for i in 0..zip.len() {
-                    let mut file = zip.by_index(i)?;
-                    if file.is_dir() {
-                        continue;
+            self.pk3_paths
+                .par_iter()
+                .with_min_len(1)
+                .filter_map(|pk3_path| {
+                    let f = File::open(pk3_path).ok()?;
+                    let mut zip = ZipArchive::new(f).ok()?;
+                    let mut defs = Vec::new();
+                    for i in 0..zip.len() {
+                        let mut file = match zip.by_index(i) {
+                            Ok(f) => f,
+                            Err(_) => continue,
+                        };
+                        if file.is_dir() {
+                            continue;
+                        }
+                        let name = file.name().to_string();
+                        let vpath = normalize_asset_path(&name);
+                        if !vpath.starts_with("scripts/") || !vpath.ends_with(".shader") {
+                            continue;
+                        }
+                        use std::io::Read;
+                        let mut bytes = Vec::with_capacity(file.size() as usize);
+                        if file.read_to_end(&mut bytes).is_err() {
+                            continue;
+                        }
+                        let Ok(src) = String::from_utf8(bytes) else {
+                            continue;
+                        };
+                        if let Ok(v) = parse_shader_file(&src, Path::new(&vpath)) {
+                            defs.extend(v);
+                        }
                     }
-                    let name = file.name().to_string();
-                    let vpath = normalize_asset_path(&name);
-                    if !vpath.starts_with("scripts/") || !vpath.ends_with(".shader") {
-                        continue;
-                    }
-                    use std::io::Read;
-                    let mut bytes = Vec::with_capacity(file.size() as usize);
-                    file.read_to_end(&mut bytes)?;
-                    let src = String::from_utf8(bytes).map_err(|e| AssetDbError::Utf8 {
-                        path: vpath.clone(),
-                        source: e,
-                    })?;
-                    parse_shader_source_into_db(&src, Path::new(&vpath), &mut db)?;
-                }
+                    Some(defs)
+                })
+                .collect()
+        };
+
+        // Merge sequentially: later pk3s override earlier ones.
+        let mut db = ShaderDb::default();
+        for defs in pk3_shaders {
+            for def in defs {
+                db.insert(def);
             }
         }
 
@@ -706,7 +789,7 @@ impl AssetDb {
     fn pk3_lookup_case_insensitive(&mut self, pk3_path: &Path, target: &str) -> Option<String> {
         let target_key = normalize_asset_path(target);
 
-        if let Some(entry) = self.pk3_index.get(&target_key) {
+        if let Some(entry) = self.pk3_index.read().unwrap().get(&target_key) {
             if entry.pk3_path == pk3_path {
                 return Some(entry.entry_name.clone());
             }
@@ -801,20 +884,22 @@ fn build_pk3_case_index(
 fn scan_pk3_case_index(
     pk3_paths: &[PathBuf],
 ) -> Result<HashMap<PathBuf, HashMap<String, String>>, AssetDbError> {
-    let mut index = HashMap::with_capacity(pk3_paths.len());
-    for pk3_path in pk3_paths {
-        let f = File::open(pk3_path)?;
-        let zip = ZipArchive::new(f)?;
-        let mut entries = HashMap::with_capacity(zip.len());
-        for name in zip.file_names() {
-            if name.ends_with('/') {
-                continue;
+    pk3_paths
+        .par_iter()
+        .with_min_len(1)
+        .map(|p| {
+            let f = File::open(p)?;
+            let zip = ZipArchive::new(f)?;
+            let mut entries = HashMap::with_capacity(zip.len());
+            for name in zip.file_names() {
+                if name.ends_with('/') {
+                    continue;
+                }
+                entries.insert(normalize_asset_path(name), name.to_string());
             }
-            entries.insert(normalize_asset_path(name), name.to_string());
-        }
-        index.insert(pk3_path.clone(), entries);
-    }
-    Ok(index)
+            Ok((p.clone(), entries))
+        })
+        .collect::<Result<HashMap<_, _>, AssetDbError>>()
 }
 
 /// Load `(main)/.kradiant/pk3_file_list.tsv` when its header matches `fingerprint`. Returns
@@ -977,21 +1062,27 @@ fn hash_pk3_signatures(
 ) -> Result<(), std::io::Error> {
     use std::hash::Hash;
 
-    for p in pk3_paths {
-        p.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .hash(hasher);
-        let meta = std::fs::metadata(p)?;
-        meta.len().hash(hasher);
-        let m = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+    let files_meta: Vec<_> = pk3_paths
+        .par_iter()
+        .map(|p| {
+            let meta = std::fs::metadata(p)?;
+            let l = meta.len();
+            let m = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            Ok((p.file_name().and_then(|s| s.to_str()).unwrap_or(""), l, m))
+        })
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+    for (n, l, m) in files_meta {
+        n.hash(hasher);
+        l.hash(hasher);
         m.hash(hasher);
     }
+
     Ok(())
 }
 

@@ -7,7 +7,9 @@
 use crate::core_util::vec3_to_origin;
 use crate::editing::{Aabb, aabb_from_polys, aabb_from_positions};
 use crate::editor::SurfInspector;
-use crate::texmap::{face_plane_normal, q3_texture_axes_from_normal, rotate_texture_axes, translation_offset_shift};
+use crate::texmap::{
+    face_plane_normal, q3_texture_axes_from_normal, rotate_texture_axes, translation_offset_shift,
+};
 use crate::xmodel::XModel;
 use crate::{IVec2, Vec2, Vec3, core_util};
 use std::collections::{HashMap, HashSet};
@@ -199,9 +201,7 @@ impl Face {
         self.params.scale = Vec2::new(s_extent / tex_w, t_extent / tex_h);
         // Shift in texels, wrapped into [0, tex_w)x[0, tex_h) like Q3Radiant's
         // Face_FitTexture (texture repeats, so only the remainder matters).
-        let wrap = |shift: f32, tex_size: f32| -> i32 {
-            shift.rem_euclid(tex_size) as i32
-        };
+        let wrap = |shift: f32, tex_size: f32| -> i32 { shift.rem_euclid(tex_size) as i32 };
         self.params.shift = IVec2::new(
             wrap(-s_min / self.params.scale.x, tex_w),
             wrap(-t_min / self.params.scale.y, tex_h),
@@ -588,10 +588,7 @@ mod tests {
         let mapper = FaceUvMapper::new(&face, 64.0, 64.0);
         let u_min = mapper.uv(Vec3::new(-10.0, 0.0, 0.0)).x;
         let u_max = mapper.uv(Vec3::new(10.0, 0.0, 0.0)).x;
-        assert!(
-            u_min.abs() < 1.0e-3,
-            "expected u(-10) ~= 0, got {u_min}"
-        );
+        assert!(u_min.abs() < 1.0e-3, "expected u(-10) ~= 0, got {u_min}");
         assert!(
             (u_max - 1.0).abs() < 1.0e-3,
             "expected u(10) ~= 1, got {u_max}"

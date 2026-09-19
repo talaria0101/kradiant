@@ -50,7 +50,14 @@ pub struct Show {
 
 impl Default for Show {
     fn default() -> Self {
-        Self { models: true, clip_brushes: true, portal_brushes: true, hint_brushes: true, patches: true, convex: true }
+        Self {
+            models: true,
+            clip_brushes: true,
+            portal_brushes: true,
+            hint_brushes: true,
+            patches: true,
+            convex: true,
+        }
     }
 }
 

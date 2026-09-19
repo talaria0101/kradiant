@@ -10,6 +10,7 @@ pub const KRADIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod assets;
 pub mod core_util;
+pub mod dirs;
 pub mod editing;
 pub mod editor;
 pub mod ffi;
@@ -23,7 +24,6 @@ pub mod shader;
 pub mod texmap;
 pub mod texture;
 pub mod xmodel;
-pub mod dirs;
 
 // Re-export common types for UI layer
 pub use glam::{IVec2, IVec3, Mat4, Quat, Vec2, Vec3, Vec4};

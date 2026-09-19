@@ -4,18 +4,23 @@ use dear_imgui_rs::{Condition, Key, StyleColor, TextureId, Ui, WindowFlags};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use kradiant::editing::Aabb;
 use kradiant::editor::config::EntityDrawAnchor;
-use kradiant::editor::viewport::types::Ortho;
 use kradiant::editor::viewport::DragMode;
 use kradiant::editor::viewport::state::{RotateDrag, SideStretchDrag, View3DState};
+use kradiant::editor::viewport::types::Ortho;
 use kradiant::editor::{EditorConfig, EditorPalette, FaceSelection, PatchVertexSelection};
 use kradiant::map_utils::format_vec3;
 use std::ops::{Deref, DerefMut};
 
 use crate::ui::editing::PickMask;
-use crate::ui::view2d::{self, apply_affine_rotate_to_selected_faces, selection_aabb_active, selection_aabb_faces_from_map, selection_aabb_from_map};
-use crate::util::{self, adjust_color_brightness, imgui_color_to_u32, text_height, text_width, world_to_screen_3d};
-use kradiant::{core_util, editing};
+use crate::ui::view2d::{
+    self, apply_affine_rotate_to_selected_faces, selection_aabb_active,
+    selection_aabb_faces_from_map, selection_aabb_from_map,
+};
+use crate::util::{
+    self, adjust_color_brightness, imgui_color_to_u32, text_height, text_width, world_to_screen_3d,
+};
 use kradiant::editor::selection::EdgeSelection;
+use kradiant::{core_util, editing};
 use std::collections::HashSet;
 
 pub struct View3D {
@@ -1746,9 +1751,9 @@ fn pick_convex_edge_by_screen_3d(
     let mut candidates: Vec<(EdgeSelection, f32, f32)> = Vec::new();
 
     let visit_brush = |entity_idx: usize,
-                           brush_idx: usize,
-                           brush: &mut kradiant::map::Brush,
-                           out: &mut Vec<(EdgeSelection, f32, f32)>| {
+                       brush_idx: usize,
+                       brush: &mut kradiant::map::Brush,
+                       out: &mut Vec<(EdgeSelection, f32, f32)>| {
         if !matches!(brush.content, kradiant::map::BrushContent::Convex(_)) {
             return;
         }
@@ -1875,7 +1880,9 @@ fn ray_front_brush_hit_point(
             if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
                 continue;
             }
-            if let Some(t) = View3D::ray_triangle_t(origin, dir, positions[i0], positions[i1], positions[i2]) {
+            if let Some(t) =
+                View3D::ray_triangle_t(origin, dir, positions[i0], positions[i1], positions[i2])
+            {
                 best = Some(best.map_or(t, |b: f32| b.min(t)));
             }
         }

@@ -2421,7 +2421,8 @@ fn selection_aabb_edges_from_map(
         let Some((_aabb, polys)) = brush.get_polygons_and_aabb() else {
             continue;
         };
-        let Some((a, b)) = core_util::shared_edge_points(polys, sel.face_a_idx, sel.face_b_idx) else {
+        let Some((a, b)) = core_util::shared_edge_points(polys, sel.face_a_idx, sel.face_b_idx)
+        else {
             continue;
         };
         out.min = out.min.min(a).min(b);
@@ -2449,7 +2450,7 @@ pub(crate) fn selection_aabb_active(
     edit_edges: bool,
     ent_draw_config: &EntityDrawingConfig,
 ) -> Option<Aabb> {
-    let Some(map) = map else { return None};
+    let Some(map) = map else { return None };
     if edit_faces {
         selection_aabb_faces(map, selected_faces)
     } else if edit_edges {
@@ -3284,12 +3285,12 @@ pub fn entity_selection_aabb(
     // entity origin / root bone). Entities without a model keep the style box.
     if let Some(model) = entity.model.as_ref() {
         let model_origin = origin + model.origin;
-        let angles = entity.properties.get("angles").and_then(|s| {
-            core_util::vec3_from_whitespace_triplet(s)
-        });
+        let angles = entity
+            .properties
+            .get("angles")
+            .and_then(|s| core_util::vec3_from_whitespace_triplet(s));
         let rot = angles.map(core_util::entity_angles_to_quat);
-        let (min, max) =
-            core_util::model_bounds_aabb(model_origin, model.mins, model.maxs, rot);
+        let (min, max) = core_util::model_bounds_aabb(model_origin, model.mins, model.maxs, rot);
         return Some(Aabb { min, max });
     }
 
@@ -3302,9 +3303,10 @@ pub fn entity_selection_aabb(
         EntityDrawAnchor::Center => origin,
         EntityDrawAnchor::Base => origin + Vec3::new(0.0, 0.0, half_size.z),
     };
-    let angles = entity.properties.get("angles").and_then(|s| {
-        core_util::vec3_from_whitespace_triplet(s)
-    });
+    let angles = entity
+        .properties
+        .get("angles")
+        .and_then(|s| core_util::vec3_from_whitespace_triplet(s));
     let rot = angles.map(core_util::entity_angles_to_quat);
     let corners = core_util::oriented_box_corners(box_center, half_size, rot);
     let mut min = Vec3::splat(f32::MAX);

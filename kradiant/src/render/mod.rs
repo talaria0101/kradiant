@@ -57,12 +57,7 @@ impl RenderBackend<'_> {
         }
     }
 
-    pub unsafe fn draw_triangles(
-        &self,
-        vertices: &[Vec3],
-        color: [f32; 4],
-        mvp: glam::Mat4,
-    ) {
+    pub unsafe fn draw_triangles(&self, vertices: &[Vec3], color: [f32; 4], mvp: glam::Mat4) {
         if vertices.is_empty() {
             return;
         }
@@ -86,7 +81,8 @@ impl RenderBackend<'_> {
                 .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
             self.gl.enable_vertex_attrib_array(0);
 
-            self.gl.draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
+            self.gl
+                .draw_arrays(glow::TRIANGLES, 0, vertices.len() as i32);
         }
     }
 

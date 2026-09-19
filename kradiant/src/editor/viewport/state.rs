@@ -150,7 +150,12 @@ impl View3DState {
     }
 
     /// Check if a specific face is being stretched and return the delta to apply
-    pub fn stretch_face_delta(&self, entity_idx: usize, brush_idx: usize, face_idx: usize) -> Option<Vec3> {
+    pub fn stretch_face_delta(
+        &self,
+        entity_idx: usize,
+        brush_idx: usize,
+        face_idx: usize,
+    ) -> Option<Vec3> {
         let stretch = self.stretch.as_ref()?;
         if self.drag_mode != DragMode::StretchSelection {
             return None;

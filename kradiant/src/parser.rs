@@ -12,6 +12,7 @@ use crate::map::{
 use crate::map_utils::format_float;
 use crate::{IVec2, Vec2, Vec3};
 use log::debug;
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashMap;
 use std::fmt::Write;
 use thiserror::Error;
@@ -38,19 +39,38 @@ struct Parser<'a> {
     lines: Vec<&'a str>,
     pos: usize,
     current_line: usize,
+    range: Range,
+}
+
+#[derive(Clone, Copy)]
+struct Range {
+    start: usize,
+    end: usize,
 }
 
 impl<'a> Parser<'a> {
     fn new(content: &'a str) -> Self {
+        let lines: Vec<&'a str> = content.lines().collect();
+        let end = lines.len();
         Self {
-            lines: content.lines().collect(),
+            lines,
             pos: 0,
             current_line: 0,
+            range: Range { start: 0, end },
+        }
+    }
+
+    fn new_from_range(lines: Vec<&'a str>, range: Range) -> Self {
+        Self {
+            lines,
+            pos: range.start,
+            current_line: range.start,
+            range,
         }
     }
 
     fn next_line(&mut self) -> Option<&'a str> {
-        while self.pos < self.lines.len() {
+        while self.pos < self.lines.len() && self.current_line < self.range.end {
             let line = self.lines[self.pos].trim();
             self.pos += 1;
             self.current_line += 1;
@@ -118,32 +138,63 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /*fn parse_vec4(tokens: &[String], start: usize, line: usize) -> Result<Vec4, ParseError> {
-        if start + 3 >= tokens.len() {
-            return Err(ParseError::InvalidPlane { line });
-        }
-        Ok(Vec4::new(
-            tokens[start].parse().map_err(|_| ParseError::InvalidPlane { line })?,
-                     tokens[start + 1].parse().map_err(|_| ParseError::InvalidPlane { line })?,
-                     tokens[start + 2].parse().map_err(|_| ParseError::InvalidPlane { line })?,
-                     tokens[start + 3].parse().map_err(|_| ParseError::InvalidPlane { line })?,
-        ))
-    }*/
-
     fn parse_map(&mut self) -> Result<Map, ParseError> {
         let mut map = Map::default();
-        let mut entity_id = 0u32;
 
-        while let Some(line) = self.next_line() {
-            if line == "{" {
-                let mut entity = self.parse_entity_body()?;
-                entity.id = EntityId(entity_id);
-                map.entities.push(entity);
-                entity_id += 1;
-            }
-        }
+        let entity_ranges = self.collect_entity_ranges()?;
+
+        let entites: Vec<_> = entity_ranges
+            .par_iter()
+            .with_min_len(12)
+            .map(|(idx, r)| {
+                let mut sub_parser = Self::new_from_range(self.lines.clone(), *r);
+                let mut entity = sub_parser.parse_entity_body()?;
+                entity.id = EntityId(*idx);
+                Ok(entity)
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?;
+
+        map.entities = entites;
+
         debug!("Parsed {} entities (CoD1 .map)", map.entities.len());
         Ok(map)
+    }
+
+    fn collect_entity_ranges(&self) -> Result<Vec<(u32, Range)>, ParseError> {
+        let mut r = Vec::new();
+        let mut idx = 0;
+        let mut depth = 0i32;
+        let mut cur_start = 0;
+        for (i, l) in self.lines.iter().enumerate() {
+            let trimmed = l.trim_start();
+            if trimmed.starts_with("{") {
+                if depth == 0 {
+                    cur_start = i;
+                }
+                depth += 1;
+            } else if trimmed.starts_with("}") {
+                depth -= 1;
+                if depth == 0 {
+                    r.push((
+                        idx,
+                        Range {
+                            start: cur_start + 1,
+                            end: i + 1,
+                        },
+                    ));
+                    idx += 1;
+                }
+            }
+        }
+
+        if r.is_empty() {
+            Err(ParseError::Syntax {
+                line: 0,
+                msg: "No Entities to in map".to_string(),
+            })
+        } else {
+            Ok(r)
+        }
     }
 
     fn parse_entity_body(&mut self) -> Result<Entity, ParseError> {
@@ -154,21 +205,16 @@ impl<'a> Parser<'a> {
             brushes: vec![],
             model: None,
         };
-        let mut brush_id = 0u32;
 
+        // Phase 1: sequential property parsing until first brush or entity end.
         while let Some(line) = self.next_line() {
             let tokens = Self::tokenize(line);
             if tokens.is_empty() {
                 continue;
             }
-
             match tokens[0].as_str() {
-                "{" => {
-                    let content = self.parse_brush_or_primitive()?;
-                    entity.brushes.push(Brush::new(BrushId(brush_id), content));
-                    brush_id += 1;
-                }
-                "}" => break,
+                "{" => break,
+                "}" => return Ok(entity),
                 _ if tokens.len() >= 2 => {
                     let key = tokens[0].clone();
                     let value = tokens[1].clone();
@@ -180,7 +226,48 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
+
+        // Phase 2: collect brush/primitive ranges within the entity range.
+        let brush_ranges = self.collect_brush_ranges();
+
+        // Phase 3: parse each brush in parallel.
+        let brushes: Vec<_> = brush_ranges
+            .par_iter()
+            .with_min_len(1)
+            .enumerate()
+            .map(|(i, r)| {
+                let mut sub = Self::new_from_range(self.lines.clone(), *r);
+                let content = sub.parse_brush_or_primitive()?;
+                Ok(Brush::new(BrushId(i as u32), content))
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?;
+
+        entity.brushes = brushes;
         Ok(entity)
+    }
+
+    fn collect_brush_ranges(&self) -> Vec<Range> {
+        let mut ranges = Vec::new();
+        let mut depth = 0i32;
+        let mut cur_start = 0;
+        for i in self.range.start..self.range.end {
+            let trimmed = self.lines[i].trim_start();
+            if trimmed.starts_with("{") {
+                if depth == 0 {
+                    cur_start = i + 1;
+                }
+                depth += 1;
+            } else if trimmed.starts_with("}") {
+                depth -= 1;
+                if depth == 0 {
+                    ranges.push(Range {
+                        start: cur_start,
+                        end: i + 1,
+                    });
+                }
+            }
+        }
+        ranges
     }
 
     fn parse_brush_or_primitive(&mut self) -> Result<BrushContent, ParseError> {
@@ -334,21 +421,20 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let mut rows: Vec<Vec<PatchVertex>> = Vec::new();
+        let mut row_lines = Vec::new();
+
+        // let mut rows: Vec<Vec<PatchVertex>> = Vec::new();
         while let Some(vline) = self.next_line() {
             if vline == ")" {
                 break;
             }
-            if vline.starts_with('(') {
-                let row = self.parse_patch_vertex_row(vline)?;
-                rows.push(row);
-            } else {
-                return Err(ParseError::Syntax {
-                    line: self.current_line,
-                    msg: format!("unexpected token in patch vertices: {vline}"),
-                });
-            }
+            row_lines.push(vline);
         }
+        let rows: Vec<Vec<PatchVertex>> = row_lines
+            .par_iter()
+            .with_min_len(128)
+            .map(|line| self.parse_patch_vertex_row(line))
+            .collect::<Result<_, _>>()?;
 
         let Some(close) = self.next_line() else {
             return Err(ParseError::Syntax {

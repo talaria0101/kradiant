@@ -4,7 +4,7 @@ use dear_imgui_rs::{Condition, StyleColor, TextureId, Ui};
 use kradiant::loader::asset_loader::{AssetDb, AssetDbOptions};
 use kradiant::map::Map;
 use kradiant::shader::ShaderDb;
-use kradiant::texture::TextureImage;
+use kradiant::texture::{CompressedTexture, TextureImage};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -42,6 +42,9 @@ pub struct TextureBrowser {
     pub pending_render_uploads: Vec<(String, TextureImage)>,
     /// O(1) lookup for pending_render_uploads
     pub pending_render_uploads_set: HashSet<String>,
+    /// DDS textures ready for direct GPU upload (bypass CPU decode).
+    pub pending_compressed_uploads: Vec<(String, CompressedTexture)>,
+    pub pending_compressed_uploads_set: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +181,8 @@ impl Default for TextureBrowser {
             pending_uploads_set: HashSet::new(),
             pending_render_uploads: Vec::new(),
             pending_render_uploads_set: HashSet::new(),
+            pending_compressed_uploads: Vec::new(),
+            pending_compressed_uploads_set: HashSet::new(),
         }
     }
 }
@@ -354,6 +359,8 @@ impl TextureBrowser {
         self.pending_uploads_set.clear();
         self.pending_render_uploads.clear();
         self.pending_render_uploads_set.clear();
+        self.pending_compressed_uploads.clear();
+        self.pending_compressed_uploads_set.clear();
     }
 
     pub fn clear_render_texture_caches(&mut self) {
@@ -399,6 +406,39 @@ impl TextureBrowser {
             }
             return;
         }
+
+        // DDS fast path: load compressed data directly, skip CPU decode.
+        let is_dds = load_path.ends_with(".dds") || load_path.ends_with(".DDS");
+        if is_dds {
+            if let Some(db) = &mut self.asset_db {
+                if let Some(asset) = db.resolve_texture(load_path) {
+                    if let Ok(bytes) = db.read(&asset) {
+                        if let Ok(ctex) = kradiant::texture::parse_dds(&bytes) {
+                            // Browser still needs RGBA8 for ImGui display.
+                            if let Ok(img) = kradiant::texture::decode_texture_rgba8(&bytes, "dds")
+                            {
+                                self.tex_cache.insert(cache_key.to_string(), img.clone());
+                                self.pending_uploads
+                                    .push((cache_key.to_string(), img.clone()));
+                                self.pending_uploads_set.insert(cache_key.to_string());
+                            }
+                            // 3D viewport gets compressed data (no CPU decode).
+                            if tex_registry.get(cache_key).is_none()
+                                && !self.pending_compressed_uploads_set.contains(cache_key)
+                            {
+                                self.pending_compressed_uploads
+                                    .push((cache_key.to_string(), ctex));
+                                self.pending_compressed_uploads_set
+                                    .insert(cache_key.to_string());
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            // Fallback to RGBA8 path if DDS parse fails.
+        }
+
         match self.load_texture(load_path) {
             Ok(img) => {
                 self.tex_cache.insert(cache_key.to_string(), img.clone());
@@ -415,7 +455,7 @@ impl TextureBrowser {
                         .insert(cache_key.to_string());
                 }
             }
-            Err(e) => eprintln!("tex load failed {load_path} (for material {material}): {e}"),
+            Err(e) => log::debug!("tex load failed {load_path} (for material {material}): {e}"),
         }
     }
 
@@ -456,6 +496,49 @@ impl TextureBrowser {
                 kradiant::render::RenderTextureInfo {
                     tex,
                     size: [img.width as f32, img.height as f32],
+                    qer,
+                },
+            );
+            inserted_any = true;
+        }
+
+        inserted_any
+    }
+
+    /// Upload DDS compressed textures directly to the GPU (bypasses CPU DXT decode).
+    pub fn process_pending_compressed_uploads(
+        &mut self,
+        gl: &glow::Context,
+        uploads_per_frame: usize,
+        rendermode: &RenderMode,
+        upload_fn: unsafe fn(
+            &glow::Context,
+            &kradiant::texture::CompressedTexture,
+            &RenderMode,
+        ) -> glow::Texture,
+        tex_registry: &mut kradiant::render::TextureRegistry,
+    ) -> bool {
+        let batch: Vec<_> = self
+            .pending_compressed_uploads
+            .drain(..self.pending_compressed_uploads.len().min(uploads_per_frame))
+            .collect();
+
+        let mut inserted_any = false;
+
+        for (material, ctex) in batch {
+            self.pending_compressed_uploads_set.remove(&material);
+            let tex = unsafe { upload_fn(gl, &ctex, rendermode) };
+            let qer = self
+                .shader_db
+                .as_ref()
+                .and_then(|db| db.get(&material))
+                .map(|sh| sh.qer.clone())
+                .unwrap_or_default();
+            tex_registry.register(
+                material,
+                kradiant::render::RenderTextureInfo {
+                    tex,
+                    size: [ctex.width as f32, ctex.height as f32],
                     qer,
                 },
             );
