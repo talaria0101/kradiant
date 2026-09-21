@@ -2030,7 +2030,7 @@ pub fn generate_bsp_portals(
             let off = params.thickness * 0.5 + 2.0;
             let front_open = open_run_length(&tree, centroid + plane.n * off, plane.n);
             let back_open = open_run_length(&tree, centroid - plane.n * off, -plane.n);
-            let picked = if front_open > back_open {
+            let picked = if front_open >= back_open {
                 crate::portals::PortalSide::Negative
             } else {
                 crate::portals::PortalSide::Positive
