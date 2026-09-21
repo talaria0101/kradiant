@@ -7,6 +7,10 @@ use crate::editor::EditorState;
 use crate::editor::config::{EntityDrawAnchor, EntityDrawKind, RenderMode};
 use crate::editor::viewport::DragMode;
 use crate::render::RenderBackend;
+use crate::render::{LineBatchState, LitBatchState, TexBatchState};
+use crate::render::{flush_lines, flush_lit};
+use crate::render::{CachedLineBatch, CachedLitBatch, CachedTexBatch};
+use crate::render::{draw_line_cached, draw_lit_cached, draw_tex_cached};
 //use crate::ui;
 use crate::assets::normalize_material_name;
 use crate::core_util;
@@ -146,6 +150,17 @@ pub struct Viewport3D {
     last_dim_edges_map_ptr: usize,
     last_dim_edges_map_revision: u64,
     cached_dim_edges: Vec<Vec3>,
+    // Batch collector state — persists across frames
+    pub line_batch_state: LineBatchState,
+    pub lit_batch_state: LitBatchState,
+    pub tex_batch_state: TexBatchState,
+    // VBO cache — populated during geometry rebuild, used for fast draws
+    cached_tex_batches: Vec<CachedTexBatch>,
+    cached_lit_batches: Vec<CachedLitBatch>,
+    cached_line_batches: Vec<CachedLineBatch>,
+    cached_entity_lit_batches: Vec<CachedLitBatch>,
+    cached_entity_line_batches: Vec<CachedLineBatch>,
+    geometry_revision: u64,
 }
 
 impl Viewport3D {
@@ -190,6 +205,15 @@ impl Viewport3D {
             last_dim_edges_map_ptr: 0,
             last_dim_edges_map_revision: 0,
             cached_dim_edges: Vec::new(),
+            line_batch_state: LineBatchState::new(),
+            lit_batch_state: LitBatchState::new(),
+            tex_batch_state: TexBatchState::new(),
+            cached_tex_batches: Vec::new(),
+            cached_lit_batches: Vec::new(),
+            cached_line_batches: Vec::new(),
+            cached_entity_lit_batches: Vec::new(),
+            cached_entity_line_batches: Vec::new(),
+            geometry_revision: 0,
         }
     }
     pub fn render(&mut self, backend: &mut RenderBackend<'_>, editor: &mut EditorState) {
@@ -256,6 +280,9 @@ impl Viewport3D {
                 Some(c) => c.map_ptr != map_ptr || c.map_load_count != map_load_count,
                 None => true,
             };
+
+            let light_dir = Vec3::new(0.5, 0.25, 1.0).normalize();
+            let ambient = 0.4f32;
 
             let mut bounds_min = Vec3::splat(f32::INFINITY);
             let mut bounds_max = Vec3::splat(f32::NEG_INFINITY);
@@ -559,17 +586,18 @@ impl Viewport3D {
                                 bounds_min = bounds_min.min(aabb.min);
                                 bounds_max = bounds_max.max(aabb.max);
 
-                                if editor.config.view.wireframe {
-                                    for (positions, _) in polys {
-                                        if positions.len() < 2 {
-                                            continue;
-                                        }
-                                        for i in 0..positions.len() {
-                                            let a = positions[i];
-                                            let b = positions[(i + 1) % positions.len()];
-                                            self.line_vertices.push(a);
-                                            self.line_vertices.push(b);
-                                        }
+                                // Always generate line vertices (rebuild invariant:
+                                // draw-phase flag wireframe must be able to toggle
+                                // without triggering a rebuild).
+                                for (positions, _) in polys {
+                                    if positions.len() < 2 {
+                                        continue;
+                                    }
+                                    for i in 0..positions.len() {
+                                        let a = positions[i];
+                                        let b = positions[(i + 1) % positions.len()];
+                                        self.line_vertices.push(a);
+                                        self.line_vertices.push(b);
                                     }
                                 }
 
@@ -639,24 +667,23 @@ impl Viewport3D {
                                 if !editor.config.view.show.patches {
                                     continue;
                                 }
-                                if editor.config.view.wireframe {
-                                    let Some((mesh, patch_aabb, edges)) =
-                                        patch.get_mesh_aabb_wire()
-                                    else {
+                                // Always generate patch wireframe lines (rebuild invariant).
+                                let Some((mesh, patch_aabb, edges)) =
+                                    patch.get_mesh_aabb_wire()
+                                else {
+                                    continue;
+                                };
+                                bounds_min = bounds_min.min(patch_aabb.min);
+                                bounds_max = bounds_max.max(patch_aabb.max);
+                                let positions = mesh.positions.as_slice();
+                                for &(a, b) in edges {
+                                    let ia = a as usize;
+                                    let ib = b as usize;
+                                    if ia >= positions.len() || ib >= positions.len() {
                                         continue;
-                                    };
-                                    bounds_min = bounds_min.min(patch_aabb.min);
-                                    bounds_max = bounds_max.max(patch_aabb.max);
-                                    let positions = mesh.positions.as_slice();
-                                    for &(a, b) in edges {
-                                        let ia = a as usize;
-                                        let ib = b as usize;
-                                        if ia >= positions.len() || ib >= positions.len() {
-                                            continue;
-                                        }
-                                        self.line_vertices.push(positions[ia]);
-                                        self.line_vertices.push(positions[ib]);
                                     }
+                                    self.line_vertices.push(positions[ia]);
+                                    self.line_vertices.push(positions[ib]);
                                 }
 
                                 if let Ok(tess) = tessellate_patch(patch) {
@@ -730,7 +757,191 @@ impl Viewport3D {
                     let mut tmp: Vec<_> = tex_batches.into_iter().collect();
                     tmp.sort_by(|a, b| a.0.cmp(&b.0));
                     self.tri_vertices_tex = tmp;
+
+                    // --- Build cached entity batches + VBO ---
+                    self.cached_entity_lit_batches.clear();
+                    self.cached_entity_line_batches.clear();
+                    {
+                        let mut entity_lit_all: Vec<LitVertex> = Vec::new();
+                        let mut entity_line_all: Vec<Vec3> = Vec::new();
+
+                        for &(color, ref tris) in &self.entity_solid_batches {
+                            if tris.is_empty() {
+                                continue;
+                            }
+                            let offset = entity_lit_all.len() as i32;
+                            entity_lit_all.extend_from_slice(tris);
+                            self.cached_entity_lit_batches.push(CachedLitBatch {
+                                offset,
+                                count: tris.len() as i32,
+                                color,
+                                ambient,
+                                light_dir,
+                            });
+                        }
+                        // Entity lit VBO is uploaded together with main lit below.
+
+                        for &(color, ref lines) in &self.entity_line_batches {
+                            if lines.is_empty() {
+                                continue;
+                            }
+                            let offset = entity_line_all.len() as i32;
+                            entity_line_all.extend_from_slice(lines);
+                            self.cached_entity_line_batches.push(CachedLineBatch {
+                                offset,
+                                count: lines.len() as i32,
+                                color,
+                            });
+                        }
+                        // Entity lines share vbo_line with other line geometry;
+                        // append after the main line VBO content below.
+                    }
+                } // end `if let Some(map)`
+
+                // --- Build cached batches for main geometry + VBO upload ---
+                self.cached_tex_batches.clear();
+                self.cached_lit_batches.clear();
+                self.cached_line_batches.clear();
+                let tex_all_count;
+                {
+                    // Textured triangles
+                    let mut tex_all: Vec<TexVertex> = Vec::new();
+                    for (material, batch) in &self.tri_vertices_tex {
+                        if batch.is_empty() {
+                            continue;
+                        }
+                        let alpha = editor
+                            .tex_registry
+                            .get(material)
+                            .map(|rt| 1.0 - rt.qer.trans.unwrap_or(0.0).clamp(0.0, 1.0))
+                            .unwrap_or(1.0);
+                        let color = [1.0, 1.0, 1.0, alpha];
+
+                        // Compute centroid for transparent sort
+                        let mut centroid = Vec3::ZERO;
+                        let mut count = 0.0f32;
+                        for v in batch {
+                            centroid += Vec3::from(v.pos);
+                            count += 1.0;
+                        }
+                        if count > 0.0 {
+                            centroid /= count;
+                        }
+
+                        let offset = tex_all.len() as i32;
+                        tex_all.extend_from_slice(batch);
+                        self.cached_tex_batches.push(CachedTexBatch {
+                            material: material.clone(),
+                            offset,
+                            count: batch.len() as i32,
+                            alpha,
+                            color,
+                            centroid,
+                        });
+                    }
+                    tex_all_count = tex_all.len();
+                    if !tex_all.is_empty() {
+                        backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_tex));
+                        backend.gl.buffer_data_u8_slice(
+                            glow::ARRAY_BUFFER,
+                            bytemuck::cast_slice(&tex_all),
+                            glow::STATIC_DRAW,
+                        );
+                    }
+
+                    // Lit triangles (flat mode + fallback for missing textures)
+                    // Combine main lit + entity lit into a single VBO to avoid overwrite.
+                    let main_lit_count = self.tri_vertices.len() as i32;
+                    if main_lit_count > 0 {
+                        let geom_col = editor.palette.view2d_geometry;
+                        self.cached_lit_batches.push(CachedLitBatch {
+                            offset: 0,
+                            count: main_lit_count,
+                            color: geom_col,
+                            ambient,
+                            light_dir,
+                        });
+                    }
+                    // Adjust entity lit batch offsets to account for main lit prefix.
+                    if main_lit_count > 0 {
+                        for b in &mut self.cached_entity_lit_batches {
+                            b.offset += main_lit_count;
+                        }
+                    }
+                    // Upload combined main + entity lit data.
+                    {
+                        let total = main_lit_count as usize
+                            + self
+                                .entity_solid_batches
+                                .iter()
+                                .map(|(_, t)| t.len())
+                                .sum::<usize>();
+                        if total > 0 {
+                            let mut lit_all: Vec<LitVertex> =
+                                Vec::with_capacity(total);
+                            lit_all.extend_from_slice(&self.tri_vertices);
+                            for &(_, ref tris) in &self.entity_solid_batches {
+                                lit_all.extend_from_slice(tris);
+                            }
+                            backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_lit));
+                            backend.gl.buffer_data_u8_slice(
+                                glow::ARRAY_BUFFER,
+                                bytemuck::cast_slice(&lit_all),
+                                glow::STATIC_DRAW,
+                            );
+                        }
+                    }
+
+                    // Lines (wireframe + patch edges)
+                    if !self.line_vertices.is_empty() {
+                        let geom_col = editor.palette.view2d_geometry;
+                        let offset = 0i32;
+                        self.cached_line_batches.push(CachedLineBatch {
+                            offset,
+                            count: self.line_vertices.len() as i32,
+                            color: geom_col,
+                        });
+                        backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_line));
+                        backend.gl.buffer_data_u8_slice(
+                            glow::ARRAY_BUFFER,
+                            bytemuck::cast_slice(&self.line_vertices),
+                            glow::STATIC_DRAW,
+                        );
+                        // Append entity line data after main lines
+                        if !self.cached_entity_line_batches.is_empty() {
+                            let main_count = self.line_vertices.len() as i32;
+                            for b in &mut self.cached_entity_line_batches {
+                                b.offset += main_count;
+                            }
+                            // Rebuild the full line VBO with entity data appended
+                            let mut line_all = self.line_vertices.clone();
+                            for &(_, ref lines) in &self.entity_line_batches {
+                                line_all.extend_from_slice(lines);
+                            }
+                            backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_line));
+                            backend.gl.buffer_data_u8_slice(
+                                glow::ARRAY_BUFFER,
+                                bytemuck::cast_slice(&line_all),
+                                glow::STATIC_DRAW,
+                            );
+                        }
+                    }
                 }
+
+                let tex_in_registry = self
+                    .cached_tex_batches
+                    .iter()
+                    .filter(|b| editor.tex_registry.get(&b.material).is_some())
+                    .count();
+                log::debug!(
+                    "rebuild: {} tex batches ({} vertices in VBO, {} found in registry, registry has {} entries)",
+                    self.cached_tex_batches.len(),
+                    tex_all_count,
+                    tex_in_registry,
+                    editor.tex_registry.tex_render_cache.len(),
+                );
+
+                self.geometry_revision += 1;
 
                 self.last_selection_hash = 5382;
                 let prev_map_ptr = self.cache.map(|c| c.map_ptr).unwrap_or(0);
@@ -1138,81 +1349,134 @@ impl Viewport3D {
             let mvp = proj * view;
 
             let geom_col = editor.palette.view2d_geometry;
-            let light_dir = Vec3::new(0.5, 0.25, 1.0).normalize();
-            let ambient = 0.4f32;
 
             match editor.config.view.rendermode {
                 RenderMode::None => {}
                 RenderMode::Flat => {
-                    if !self.tri_vertices.is_empty() {
-                        backend.draw_triangles_lit(
-                            &self.tri_vertices,
-                            geom_col,
-                            mvp,
-                            ambient,
-                            light_dir,
-                        );
-                    }
+                    draw_lit_cached(
+                        backend.gl,
+                        &self.cached_lit_batches,
+                        backend.vbo_lit,
+                        backend.lit_program,
+                        &backend.lit_mvp_loc,
+                        &backend.lit_color_loc,
+                        &backend.lit_ldir_loc,
+                        &backend.lit_amb_loc,
+                        mvp,
+                        backend.vao,
+                    );
                 }
                 _ => {
-                    let mut tmp_lit: Vec<LitVertex> = Vec::new();
-                    // First pass: opaque textured faces (no blending).
-                    for (material, batch) in &self.tri_vertices_tex {
-                        if let Some(rt) = editor.tex_registry.get(material) {
-                            let alpha = 1.0 - rt.qer.trans.unwrap_or(0.0).clamp(0.0, 1.0);
-                            if alpha < 1.0 {
-                                continue; // skip transparent for second pass
-                            }
-                            backend.draw_triangles_tex(
-                                batch,
-                                rt.tex,
-                                [1.0, 1.0, 1.0, alpha],
-                                mvp,
-                                ambient,
-                                light_dir,
-                            );
-                        } else {
-                            // Fallback while texture is still loading.
-                            tmp_lit.clear();
-                            tmp_lit.reserve(batch.len());
-                            for v in batch {
-                                tmp_lit.push(LitVertex {
-                                    pos: v.pos,
-                                    normal: v.normal,
-                                });
-                            }
-                            backend.draw_triangles_lit(&tmp_lit, geom_col, mvp, ambient, light_dir);
-                        }
-                    }
-                    // Second pass: transparent textured faces (blending on, no depth write).
+                    // Opaque pass
+                    draw_tex_cached(
+                        backend.gl,
+                        &self.cached_tex_batches,
+                        &editor.tex_registry,
+                        backend.missing_tex,
+                        backend.vbo_tex,
+                        backend.tex_program,
+                        &backend.tex_mvp_loc,
+                        &backend.tex_color_loc,
+                        &backend.tex_ldir_loc,
+                        &backend.tex_amb_loc,
+                        &backend.tex_sampler_loc,
+                        mvp,
+                        ambient,
+                        light_dir,
+                        backend.vao,
+                        false,
+                    );
+
+                    // Transparent pass: sort by distance from camera, then draw
                     backend.gl.enable(glow::BLEND);
                     backend
                         .gl
                         .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
                     backend.gl.depth_mask(false);
-                    for (material, batch) in &self.tri_vertices_tex {
-                        let Some(rt) = editor.tex_registry.get(material) else {
-                            continue;
-                        };
-                        let alpha = 1.0 - rt.qer.trans.unwrap_or(0.0).clamp(0.0, 1.0);
-                        if alpha >= 1.0 {
-                            continue;
+
+                    let cam_pos = editor.view3d.cam.pos;
+                    let mut trans_batches: Vec<&CachedTexBatch> = self
+                        .cached_tex_batches
+                        .iter()
+                        .filter(|b| b.alpha < 1.0)
+                        .collect();
+                    trans_batches.sort_by(|a, b| {
+                        let da = a.centroid.distance_squared(cam_pos);
+                        let db = b.centroid.distance_squared(cam_pos);
+                        db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    if !trans_batches.is_empty() {
+                        backend.gl.use_program(Some(backend.tex_program));
+                        backend.gl.bind_vertex_array(Some(backend.vao));
+                        backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_tex));
+                        backend
+                            .gl
+                            .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 32, 0);
+                        backend.gl.enable_vertex_attrib_array(0);
+                        backend
+                            .gl
+                            .vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, 32, 12);
+                        backend.gl.enable_vertex_attrib_array(1);
+                        backend
+                            .gl
+                            .vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, 32, 24);
+                        backend.gl.enable_vertex_attrib_array(2);
+
+                        for b in &trans_batches {
+                            if let Some(rt) = editor.tex_registry.get(&b.material) {
+                                backend.gl.uniform_matrix_4_f32_slice(
+                                    Some(&backend.tex_mvp_loc),
+                                    false,
+                                    &mvp.to_cols_array(),
+                                );
+                                backend
+                                    .gl
+                                    .uniform_4_f32_slice(Some(&backend.tex_color_loc), &b.color);
+                                backend.gl.uniform_3_f32(
+                                    Some(&backend.tex_ldir_loc),
+                                    light_dir.x,
+                                    light_dir.y,
+                                    light_dir.z,
+                                );
+                                backend
+                                    .gl
+                                    .uniform_1_f32(Some(&backend.tex_amb_loc), ambient);
+                                backend
+                                    .gl
+                                    .uniform_1_i32(Some(&backend.tex_sampler_loc), 0);
+                                backend.gl.active_texture(glow::TEXTURE0);
+                                backend
+                                    .gl
+                                    .bind_texture(glow::TEXTURE_2D, Some(rt.tex));
+                                backend
+                                    .gl
+                                    .draw_arrays(glow::TRIANGLES, b.offset, b.count);
+                            }
                         }
-                        backend.draw_triangles_tex(
-                            batch,
-                            rt.tex,
-                            [1.0, 1.0, 1.0, alpha],
-                            mvp,
-                            ambient,
-                            light_dir,
-                        );
+
+                        backend.gl.disable_vertex_attrib_array(2);
+                        backend.gl.disable_vertex_attrib_array(1);
+                        backend
+                            .gl
+                            .bind_texture(glow::TEXTURE_2D, None);
                     }
+
                     backend.gl.depth_mask(true);
                     backend.gl.disable(glow::BLEND);
                 }
             }
-            if editor.config.view.wireframe && !self.line_vertices.is_empty() {
-                backend.draw_lines(&self.line_vertices, geom_col, mvp);
+            if editor.config.view.wireframe {
+                draw_line_cached(
+                    backend.gl,
+                    &self.cached_line_batches,
+                    backend.vbo_line,
+                    backend.wire_program,
+                    &backend.mvp_loc,
+                    &backend.color_loc,
+                    mvp,
+                    backend.vao,
+                );
             }
 
             // Edge edit mode: draw every convex brush edge, highlight the
@@ -1452,36 +1716,66 @@ impl Viewport3D {
 
                 if !dim_edges.is_empty() {
                     backend.gl.enable(glow::DEPTH_TEST);
-                    backend.draw_lines(&dim_edges, dim_col, mvp);
+                    backend.enqueue_lines(&dim_edges, dim_col, mvp);
+                    flush_lines(
+                        backend.gl,
+                        &mut backend.line_batches,
+                        &mut self.line_batch_state,
+                        backend.vbo_dynamic,
+                        backend.wire_program,
+                        &backend.mvp_loc,
+                        &backend.color_loc,
+                        backend.vao,
+                    );
                 }
                 if !sel_edges.is_empty() {
                     // Selected edges render on top (depth test off), like a
                     // Blender edit-mode selection.
                     backend.gl.disable(glow::DEPTH_TEST);
-                    backend.draw_lines(&sel_edges, editor.selection_rgba, mvp);
+                    backend.enqueue_lines(&sel_edges, editor.selection_rgba, mvp);
                     if !sel_handles.is_empty() {
-                        backend.draw_lines(&sel_handles, editor.selection_rgba, mvp);
+                        backend.enqueue_lines(&sel_handles, editor.selection_rgba, mvp);
                     }
+                    flush_lines(
+                        backend.gl,
+                        &mut backend.line_batches,
+                        &mut self.line_batch_state,
+                        backend.vbo_dynamic,
+                        backend.wire_program,
+                        &backend.mvp_loc,
+                        &backend.color_loc,
+                        backend.vao,
+                    );
                     backend.gl.enable(glow::DEPTH_TEST);
                 }
             }
 
-            if !self.entity_solid_batches.is_empty() {
+            if !self.cached_entity_lit_batches.is_empty() {
                 backend.gl.depth_mask(true);
-                for (color, tris) in &self.entity_solid_batches {
-                    if tris.is_empty() {
-                        continue;
-                    }
-                    backend.draw_triangles_lit(tris, *color, mvp, ambient, light_dir);
-                }
+                draw_lit_cached(
+                    backend.gl,
+                    &self.cached_entity_lit_batches,
+                    backend.vbo_lit,
+                    backend.lit_program,
+                    &backend.lit_mvp_loc,
+                    &backend.lit_color_loc,
+                    &backend.lit_ldir_loc,
+                    &backend.lit_amb_loc,
+                    mvp,
+                    backend.vao,
+                );
             }
 
-            for (color, lines) in &self.entity_line_batches {
-                if lines.is_empty() {
-                    continue;
-                }
-                backend.draw_lines(lines, *color, mvp);
-            }
+            draw_line_cached(
+                backend.gl,
+                &self.cached_entity_line_batches,
+                backend.vbo_line,
+                backend.wire_program,
+                &backend.mvp_loc,
+                &backend.color_loc,
+                mvp,
+                backend.vao,
+            );
 
             if !self.tri_vertices_selected.is_empty() && !editor.edit_vertices {
                 backend.gl.enable(glow::BLEND);
@@ -1498,12 +1792,24 @@ impl Viewport3D {
                     let base = editor.selection_rgba;
                     [base[0], base[1], base[2], base[3] * 0.75]
                 };
-                backend.draw_triangles_lit(
+                backend.enqueue_triangles_lit(
                     &self.tri_vertices_selected,
                     tint,
                     mvp,
                     ambient * 0.7,
                     light_dir,
+                );
+                flush_lit(
+                    backend.gl,
+                    &mut backend.lit_batches,
+                    &mut self.lit_batch_state,
+                    backend.vbo_lit_dynamic,
+                    backend.lit_program,
+                    &backend.lit_mvp_loc,
+                    &backend.lit_color_loc,
+                    &backend.lit_ldir_loc,
+                    &backend.lit_amb_loc,
+                    backend.vao,
                 );
 
                 backend.gl.enable(glow::DEPTH_TEST);
@@ -1567,7 +1873,17 @@ impl Viewport3D {
 
             if !aabb_lines.is_empty() {
                 backend.gl.disable(glow::DEPTH_TEST);
-                backend.draw_lines(&aabb_lines, editor.selection_rgba, mvp);
+                backend.enqueue_lines(&aabb_lines, editor.selection_rgba, mvp);
+                flush_lines(
+                    backend.gl,
+                    &mut backend.line_batches,
+                    &mut self.line_batch_state,
+                    backend.vbo_dynamic,
+                    backend.wire_program,
+                    &backend.mvp_loc,
+                    &backend.color_loc,
+                    backend.vao,
+                );
                 backend.gl.enable(glow::DEPTH_TEST);
             }
 
@@ -1601,7 +1917,7 @@ impl Viewport3D {
                     for &v in &self.control_vertices {
                         push_cube(&mut lines, v, 2.0);
                     }
-                    backend.draw_lines(&lines, [0.8, 0.8, 0.8, 1.0], mvp);
+                    backend.enqueue_lines(&lines, [0.8, 0.8, 0.8, 1.0], mvp);
                     lines.clear();
                 }
 
@@ -1609,8 +1925,19 @@ impl Viewport3D {
                     for &v in &self.control_selected_vertices {
                         push_cube(&mut lines, v, 3.0);
                     }
-                    backend.draw_lines(&lines, editor.selection_rgba, mvp);
+                    backend.enqueue_lines(&lines, editor.selection_rgba, mvp);
                 }
+
+                flush_lines(
+                    backend.gl,
+                    &mut backend.line_batches,
+                    &mut self.line_batch_state,
+                    backend.vbo_dynamic,
+                    backend.wire_program,
+                    &backend.mvp_loc,
+                    &backend.color_loc,
+                    backend.vao,
+                );
 
                 backend.gl.enable(glow::DEPTH_TEST);
             }

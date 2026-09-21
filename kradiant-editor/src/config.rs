@@ -112,7 +112,7 @@ pub fn update(
         "wireframe" => {
             let value_u8: u8 = util::to_num(value);
             cfg.view.wireframe = value_u8 == 1;
-            *view_config_rev = view_config_rev.wrapping_add(1);
+            // No view_config_rev bump — wireframe is a draw-phase flag, not geometry.
             log_info!(console, "Set wireframe to {}", cfg.view.wireframe);
         }
         "rendermode" => {
@@ -122,7 +122,7 @@ pub fn update(
                 .cloned()
                 .unwrap_or(RenderMode::Flat);
             cfg.view.rendermode = mode;
-            *view_config_rev = view_config_rev.wrapping_add(1);
+            // No view_config_rev bump — rendermode is a draw-phase flag, not geometry.
             log_info!(
                 console,
                 "Set rendermode to {}",

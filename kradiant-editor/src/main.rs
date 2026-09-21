@@ -81,7 +81,12 @@ struct AppState {
     tex_ldir_loc: glow::UniformLocation,
     tex_amb_loc: glow::UniformLocation,
     tex_sampler_loc: glow::UniformLocation,
-    vbo: glow::Buffer,
+    vbo_line: glow::Buffer,
+    vbo_lit: glow::Buffer,
+    vbo_tex: glow::Buffer,
+    vbo_dynamic: glow::Buffer,
+    vbo_lit_dynamic: glow::Buffer,
+    missing_tex: glow::Texture,
     vao: glow::NativeVertexArray,
     vp2d: Viewport2D,
     vp3d: Viewport3D,
@@ -640,7 +645,72 @@ impl AppState {
         let (tex_program, tex_mvp_loc, tex_color_loc, tex_ldir_loc, tex_amb_loc, tex_sampler_loc) =
             compile_tex_shader(&gl_for_renderer);
 
-        let vbo = unsafe { gl_for_renderer.create_buffer().unwrap() };
+        let vbo_line = unsafe { gl_for_renderer.create_buffer().unwrap() };
+        let vbo_lit = unsafe { gl_for_renderer.create_buffer().unwrap() };
+        let vbo_tex = unsafe { gl_for_renderer.create_buffer().unwrap() };
+        let vbo_2d = unsafe { gl_for_renderer.create_buffer().unwrap() };
+        let vbo_dynamic = unsafe { gl_for_renderer.create_buffer().unwrap() };
+        let vbo_lit_dynamic = unsafe { gl_for_renderer.create_buffer().unwrap() };
+
+        // Create purple-black checkerboard fallback texture for missing materials
+        let missing_tex = unsafe {
+            let tex = gl_for_renderer.create_texture().unwrap();
+            gl_for_renderer.bind_texture(glow::TEXTURE_2D, Some(tex));
+            let size = 64u32;
+            let mut rgba = vec![0u8; (size * size * 4) as usize];
+            for y in 0..size {
+                for x in 0..size {
+                    let i = ((y * size + x) * 4) as usize;
+                    let checker = (x / 8 + y / 8) % 2 == 0;
+                    if checker {
+                        // Dark purple
+                        rgba[i] = 80;
+                        rgba[i + 1] = 0;
+                        rgba[i + 2] = 80;
+                        rgba[i + 3] = 255;
+                    } else {
+                        // Black
+                        rgba[i] = 0;
+                        rgba[i + 1] = 0;
+                        rgba[i + 2] = 0;
+                        rgba[i + 3] = 255;
+                    }
+                }
+            }
+            gl_for_renderer.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                size as i32,
+                size as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&rgba)),
+            );
+            gl_for_renderer.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl_for_renderer.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::NEAREST as i32,
+            );
+            gl_for_renderer.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::REPEAT as i32,
+            );
+            gl_for_renderer.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::REPEAT as i32,
+            );
+            tex
+        };
+
         //let ebo = unsafe { gl_for_renderer.create_buffer().unwrap() };
         let vao = unsafe { gl_for_renderer.create_vertex_array().unwrap() };
         unsafe {
@@ -851,7 +921,7 @@ impl AppState {
         editor.icons.edit_vertex = icon_ids.get(12).copied();
         editor.icons.donate = icon_ids.get(13).copied();
 
-        let vp2d = Viewport2D::new(view2d_fbo, view2d_fbo_size, view2d_rbo, view2d_tex);
+        let vp2d = Viewport2D::new(view2d_fbo, view2d_fbo_size, view2d_rbo, view2d_tex, vbo_2d);
 
         let vp3d = Viewport3D::new(
             vec![],
@@ -894,7 +964,12 @@ impl AppState {
             tex_ldir_loc,
             tex_amb_loc,
             tex_sampler_loc,
-            vbo,
+            vbo_line,
+            vbo_lit,
+            vbo_tex,
+            vbo_dynamic,
+            vbo_lit_dynamic,
+            missing_tex,
             //ebo,
             vao,
             vp2d,
@@ -1001,6 +1076,14 @@ impl AppState {
             &mut self.editor.core.tex_registry,
         );
         if inserted_render_textures || inserted_compressed {
+            log::debug!(
+                "texture upload: inserted_render={}, inserted_compressed={}, registry_size={}, pending_render={}, pending_compressed={}",
+                inserted_render_textures,
+                inserted_compressed,
+                self.editor.core.tex_registry.tex_render_cache.len(),
+                self.editor.tex_browser.pending_render_uploads.len(),
+                self.editor.tex_browser.pending_compressed_uploads.len(),
+            );
             self.editor.core.view_config_rev = self.editor.core.view_config_rev.wrapping_add(1);
         }
 
@@ -1054,7 +1137,12 @@ impl AppState {
                 mvp_loc: self.mvp_loc.clone(),
                 color_loc: self.color_loc.clone(),
                 vao: self.vao,
-                vbo: self.vbo,
+                vbo_line: self.vbo_line,
+                vbo_lit: self.vbo_lit,
+                vbo_tex: self.vbo_tex,
+                vbo_dynamic: self.vbo_dynamic,
+                vbo_lit_dynamic: self.vbo_lit_dynamic,
+                missing_tex: self.missing_tex,
                 lit_program,
                 lit_mvp_loc,
                 lit_color_loc,
@@ -1066,6 +1154,9 @@ impl AppState {
                 tex_ldir_loc,
                 tex_amb_loc,
                 tex_sampler_loc,
+                line_batches: Vec::new(),
+                lit_batches: Vec::new(),
+                tex_batches: Vec::new(),
             };
             self.vp3d.render(&mut backend, &mut self.editor.core);
             self.vp2d.render(&mut backend, &mut self.editor.core);

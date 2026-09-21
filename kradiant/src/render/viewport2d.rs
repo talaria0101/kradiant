@@ -8,7 +8,7 @@ use crate::editor::EditorState;
 use crate::editor::config::{EntityDrawAnchor, EntityDrawKind};
 use crate::editor::viewport::{DragMode, Ortho, StretchMode};
 use crate::map::BrushContent;
-use crate::render::RenderBackend;
+use crate::render::{CachedLineBatch, RenderBackend};
 use crate::xmodel::XModel;
 use glam::Vec3;
 
@@ -40,6 +40,9 @@ pub struct Viewport2D {
     rbo: glow::Renderbuffer, // depth
     fbo_size: [u32; 2],
     cache: Option<View2dCache>,
+    // VBO cache — populated during geometry rebuild, used for fast draws
+    vbo_2d: glow::Buffer,
+    cached_line_batches: Vec<CachedLineBatch>,
 }
 
 impl Viewport2D {
@@ -48,6 +51,7 @@ impl Viewport2D {
         fbo_size: [u32; 2],
         rbo: glow::Renderbuffer,
         tex: glow::Texture,
+        vbo_2d: glow::Buffer,
     ) -> Self {
         Self {
             line_vertices: vec![],
@@ -61,6 +65,8 @@ impl Viewport2D {
             tex,
             rbo,
             cache: None,
+            vbo_2d,
+            cached_line_batches: Vec::new(),
         }
     }
 
@@ -146,7 +152,7 @@ impl Viewport2D {
             backend.gl.bind_vertex_array(Some(backend.vao));
             backend
                 .gl
-                .bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo));
+                .bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo_2d));
             backend
                 .gl
                 .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
@@ -158,6 +164,12 @@ impl Viewport2D {
                     return;
                 }
                 unsafe {
+                    backend
+                        .gl
+                        .bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_dynamic));
+                    backend
+                        .gl
+                        .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 12, 0);
                     backend
                         .gl
                         .uniform_4_f32_slice(Some(&backend.color_loc), &color);
@@ -692,16 +704,62 @@ impl Viewport2D {
                 }
             }
 
-            if !self.line_vertices.is_empty() {
-                draw_lines(backend, &self.line_vertices, editor.palette.view2d_geometry);
+            if rebuild_view2d {
+                // Build cached line batches and upload to vbo_2d
+                self.cached_line_batches.clear();
+                let mut line_all: Vec<Vec3> = Vec::new();
+
+                // Main geometry
+                if !self.line_vertices.is_empty() {
+                    let offset = line_all.len() as i32;
+                    let count = self.line_vertices.len() as i32;
+                    line_all.extend_from_slice(&self.line_vertices);
+                    self.cached_line_batches.push(CachedLineBatch {
+                        offset,
+                        count,
+                        color: editor.palette.view2d_geometry,
+                    });
+                }
+
+                // Entity batches
+                for &(color, ref lines) in &self.entity_line_batches {
+                    if lines.is_empty() {
+                        continue;
+                    }
+                    let offset = line_all.len() as i32;
+                    let count = lines.len() as i32;
+                    line_all.extend_from_slice(lines);
+                    self.cached_line_batches.push(CachedLineBatch {
+                        offset,
+                        count,
+                        color,
+                    });
+                }
+
+                // Upload to dedicated 2D VBO
+                if !line_all.is_empty() {
+                    backend
+                        .gl
+                        .bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo_2d));
+                    backend.gl.buffer_data_u8_slice(
+                        glow::ARRAY_BUFFER,
+                        bytemuck::cast_slice(&line_all),
+                        glow::STATIC_DRAW,
+                    );
+                }
             }
 
-            for (color, lines) in &self.entity_line_batches {
-                if lines.is_empty() {
-                    continue;
-                }
-                draw_lines(backend, lines, *color);
-            }
+            // Draw cached geometry from vbo_2d
+            crate::render::draw_line_cached(
+                backend.gl,
+                &self.cached_line_batches,
+                self.vbo_2d,
+                backend.wire_program,
+                &backend.mvp_loc,
+                &backend.color_loc,
+                ortho,
+                backend.vao,
+            );
 
             self.selected_vertices.clear();
             if !editor.edit_faces
@@ -1060,7 +1118,7 @@ impl Viewport2D {
                 }
 
                 if !self.selected_vertices.is_empty() {
-                    draw_lines(backend, &self.selected_vertices, editor.selection_rgba);
+                draw_lines(backend, &self.selected_vertices, editor.selection_rgba);
                 }
             }
             // Draw patch control vertices when in vertex editing mode
