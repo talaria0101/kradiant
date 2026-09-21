@@ -2149,6 +2149,11 @@ mod dbg_bsp_tests {
                 params.min_edge = e;
             }
         }
+        if let Ok(e) = std::env::var("BSP_MAX_EXTENT") {
+            if let Ok(e) = e.parse::<f32>() {
+                params.max_extent = e;
+            }
+        }
         println!("selection: {:?} merge_gap={} max_depth={}", params.selection, params.merge_gap, params.max_depth);
         // Size profile of the originals (face-rect area of each portal
         // brush): wall passages are small, district/sky separators large.
@@ -2178,6 +2183,30 @@ mod dbg_bsp_tests {
             .filter_map(|b| aabb_of_brush(b))
             .collect();
         println!("generated portal brushes: {}", generated.len());
+        // Size profile of the generated set on the same buckets (kernel
+        // AABBs, exact for axis boxes).
+        let mut gen_hist = [0usize; 6];
+        let mut gen_thin = [0usize; 3];
+        let mut gen_max_ext = 0.0f32;
+        for g in &generated {
+            let ext = [g.max[0] - g.min[0], g.max[1] - g.min[1], g.max[2] - g.min[2]];
+            let mut e = ext;
+            e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let area = e[1] * e[2];
+            let b = if area < 8_000.0 { 0 } else if area < 32_000.0 { 1 } else if area < 128_000.0 { 2 } else if area < 512_000.0 { 3 } else if area < 2_000_000.0 { 4 } else { 5 };
+            gen_hist[b] += 1;
+            let mut axis = 0usize;
+            if ext[1] < ext[axis] {
+                axis = 1;
+            }
+            if ext[2] < ext[axis] {
+                axis = 2;
+            }
+            gen_thin[axis] += 1;
+            gen_max_ext = gen_max_ext.max(e[2]);
+        }
+        println!("generated face areas [<8k,<32k,<128k,<512k,<2M,>=2M]: {gen_hist:?}");
+        println!("generated thin-axis [x,y,z]: {gen_thin:?}; max extent {gen_max_ext:.0}");
 
         const TOL: f32 = 16.0;
         const N: usize = 32;
