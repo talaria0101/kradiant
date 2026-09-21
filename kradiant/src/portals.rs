@@ -2134,6 +2134,21 @@ mod dbg_bsp_tests {
                 params.max_union = cap;
             }
         }
+        if let Ok(t) = std::env::var("BSP_THICKNESS") {
+            if let Ok(t) = t.parse::<f32>() {
+                params.thickness = t;
+            }
+        }
+        if let Ok(a) = std::env::var("BSP_MIN_AREA") {
+            if let Ok(a) = a.parse::<f32>() {
+                params.min_area = a;
+            }
+        }
+        if let Ok(e) = std::env::var("BSP_MIN_EDGE") {
+            if let Ok(e) = e.parse::<f32>() {
+                params.min_edge = e;
+            }
+        }
         println!("selection: {:?} merge_gap={} max_depth={}", params.selection, params.merge_gap, params.max_depth);
         // Size profile of the originals (face-rect area of each portal
         // brush): wall passages are small, district/sky separators large.
