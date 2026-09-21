@@ -14,7 +14,6 @@ use crate::render::{draw_line_cached, draw_lit_cached, draw_tex_cached};
 //use crate::ui;
 use crate::assets::normalize_material_name;
 use crate::core_util;
-use crate::geometry::tessellate_patch;
 use crate::map::BrushContent;
 use crate::texmap::FaceUvMapper;
 use crate::xmodel::XModel;
@@ -686,7 +685,9 @@ impl Viewport3D {
                                     self.line_vertices.push(positions[ib]);
                                 }
 
-                                if let Ok(tess) = tessellate_patch(patch) {
+                                let ptex = patch.texture.clone();
+
+                                if let Some(tess) = patch.get_mesh() {
                                     let pos = &tess.positions;
                                     let indices = &tess.indices;
                                     let uvs = &tess.uvs;
@@ -732,7 +733,7 @@ impl Viewport3D {
                                         });
 
                                         let batch =
-                                            tex_batches.entry(patch.texture.clone()).or_default();
+                                            tex_batches.entry(ptex.clone()).or_default();
                                         batch.push(TexVertex {
                                             pos: v0.into(),
                                             normal: normals[i0].to_array(),
@@ -1260,7 +1261,7 @@ impl Viewport3D {
                                     }
                                 }
                                 BrushContent::Patch(patch) => {
-                                    if let Ok(tess) = tessellate_patch(patch) {
+                                    if let Some(tess) = patch.get_mesh() {
                                         let pos = &tess.positions;
                                         let indices = &tess.indices;
 

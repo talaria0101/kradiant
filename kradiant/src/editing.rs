@@ -1916,18 +1916,46 @@ pub fn edge_move_clamp_factor(map: &Map, selected_edges: &[EdgeSelection], delta
         return 1.0;
     }
 
-    fn brush_can_move(brush: &Brush, pairs: &[(usize, usize)], delta: Vec3) -> bool {
+    fn brush_can_move(
+        brush: &Brush,
+        pairs: &[(usize, usize)],
+        delta: Vec3,
+        original_polys: &[(Vec<Vec3>, Vec<u32>)],
+    ) -> bool {
         if delta == Vec3::ZERO {
             return true;
         }
-        let Some(polys) = preview_edge_moved_polys(brush, pairs, delta) else {
+        let faces = match &brush.content {
+            BrushContent::Convex(faces) => faces,
+            BrushContent::Patch(_) => return false,
+        };
+        let Some(updates) = edge_move_plane_updates(faces, original_polys, pairs, delta) else {
             return false;
         };
+
+        let mut probe = brush.clone();
+        if let BrushContent::Convex(probe_faces) = &mut probe.content {
+            for (face_idx, plane_points) in updates {
+                probe_faces[face_idx].plane_points = plane_points;
+            }
+        }
+        probe.invalidate_geometry();
+
+        if !is_convex_brush_valid(&probe) {
+            return false;
+        }
+        let new_polys = match crate::geometry::brush_to_polygons(&probe) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        if new_polys.len() != faces.len() || new_polys.iter().any(|(w, _)| w.len() < 3) {
+            return false;
+        }
         // Explosion guard: moving an edge by `delta` may never push geometry
         // further than `|delta|` (+ margin) outside the original AABB.
         let min = brush.aabb.min - delta.abs() - Vec3::splat(1.0);
         let max = brush.aabb.max + delta.abs() + Vec3::splat(1.0);
-        polys.iter().all(|(verts, _)| {
+        new_polys.iter().all(|(verts, _)| {
             verts.iter().all(|v| {
                 v.x >= min.x
                     && v.y >= min.y
@@ -1948,12 +1976,16 @@ pub fn edge_move_clamp_factor(map: &Map, selected_edges: &[EdgeSelection], delta
         let Some(brush) = entity.brushes.get(*brush_idx) else {
             return 0.0;
         };
-        if !brush_can_move(brush, pairs, delta) {
+        // Tessellate the original brush once, then reuse across bisection iterations.
+        let Ok(original_polys) = crate::geometry::brush_to_polygons(brush) else {
+            return 0.0;
+        };
+        if !brush_can_move(brush, pairs, delta, &original_polys) {
             // Bisect the largest valid fraction in [0, 1).
             let (mut lo, mut hi) = (0.0f32, 1.0f32);
             for _ in 0..12 {
                 let mid = (lo + hi) * 0.5;
-                if brush_can_move(brush, pairs, delta * mid) {
+                if brush_can_move(brush, pairs, delta * mid, &original_polys) {
                     lo = mid;
                 } else {
                     hi = mid;
