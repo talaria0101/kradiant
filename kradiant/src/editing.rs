@@ -549,7 +549,7 @@ pub fn preview_convex_face_stretch_polys(
         return None;
     };
 
-    let mut tmp = brush.clone();
+    let mut tmp = brush.clone_for_preview();
     let base_polys = crate::geometry::brush_to_polygons(&tmp).ok()?;
     let mut aabb = tmp.aabb.clone();
 

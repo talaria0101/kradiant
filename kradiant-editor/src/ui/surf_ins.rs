@@ -29,6 +29,7 @@ fn fit_face_on_brush(
         let [tex_w, tex_h] = texture_size_for(&face.texture, tex_registry);
         face.fit_texture(poly, tex_w, tex_h, sample_size);
     }
+    brush.invalidate_gpu();
 }
 
 fn fit_brush_on_texture(
@@ -46,6 +47,7 @@ fn fit_brush_on_texture(
             face.fit_texture(poly, tex_w, tex_h, sample_size);
         }
     }
+    brush.invalidate_gpu();
 }
 
 pub fn draw_surf_inspector(ui: &Ui, state: &mut EditorState) {
@@ -237,6 +239,7 @@ pub fn draw_surf_inspector(ui: &Ui, state: &mut EditorState) {
                                 if let BrushContent::Convex(faces) = &mut brush.content {
                                     faces[face.face_idx].apply_params(&si);
                                 }
+                                brush.invalidate_gpu();
                             }
                         }
                     }

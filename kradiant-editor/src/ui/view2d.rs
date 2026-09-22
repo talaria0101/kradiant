@@ -2552,6 +2552,10 @@ fn translate_selected_patch_vertices(
             if let Some((_mesh, aabb, _edges)) = patch.get_mesh_aabb_wire() {
                 brush.aabb = aabb.clone();
             }
+            // Geometry changed (control vertices moved): clear both the 3D GPU
+            // cache and the 2D projected-line cache. invalidate_gpu alone would
+            // leave cached_lines_2d stale and freeze the ortho wireframe.
+            brush.invalidate_geometry();
             any = true;
         }
     }

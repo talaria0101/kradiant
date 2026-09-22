@@ -138,6 +138,9 @@ pub fn update_brush_plane(brush: &mut Brush, plane_index: usize, new_plane: [Vec
             face.plane_points = new_plane;
         }
     }
+    // Geometry changed: clear tessellation + GPU + 2D line caches so the next
+    // get_polygons_and_aabb rebuilds (and refreshes AABB).
+    brush.invalidate_geometry();
 }
 
 fn face_to_plane(face: &Face) -> Result<PlaneEq, GeometryError> {
@@ -428,7 +431,9 @@ fn dedup_consecutive(w: &mut WindBuf, eps: f32) {
 }
 
 fn remove_colinear(w: &mut WindBuf, eps: f32) {
-    if w.len() < 3 { return; }
+    if w.len() < 3 {
+        return;
+    }
     let eps2 = eps * eps;
     let mut out: WindBuf = SmallVec::new();
     let n = w.len();
@@ -590,36 +595,42 @@ fn tessellate_curve_patch(patch: &Patch) -> Result<PatchMesh, GeometryError> {
         }
     }
 
-    positions.par_iter_mut().zip(uvs.par_iter_mut()).zip(colors.par_iter_mut()).enumerate().with_min_len(64)
-    .for_each(|(idx, ((pos, uv), col))| {
-        let tr = idx / tess_cols;
-        let tc = idx % tess_cols;
+    positions
+        .par_iter_mut()
+        .zip(uvs.par_iter_mut())
+        .zip(colors.par_iter_mut())
+        .enumerate()
+        .with_min_len(64)
+        .for_each(|(idx, ((pos, uv), col))| {
+            let tr = idx / tess_cols;
+            let tc = idx % tess_cols;
 
-        let (sr, tv) = if tr + 1 == tess_rows {
-            (seg_r - 1, 1.0f32)
-        } else {
-            (tr / subdiv, (tr % subdiv) as f32 / subdiv as f32)
-        };
-        let base_r = sr * 2;
+            let (sr, tv) = if tr + 1 == tess_rows {
+                (seg_r - 1, 1.0f32)
+            } else {
+                (tr / subdiv, (tr % subdiv) as f32 / subdiv as f32)
+            };
+            let base_r = sr * 2;
 
-        let (sc, tu) = if tc + 1 == tess_cols {
-            (seg_c - 1, 1.0f32)
-        } else {
-            (tc / subdiv, (tc % subdiv) as f32 / subdiv as f32)
-        };
-        let base_c = sc * 2;
+            let (sc, tu) = if tc + 1 == tess_cols {
+                (seg_c - 1, 1.0f32)
+            } else {
+                (tc / subdiv, (tc % subdiv) as f32 / subdiv as f32)
+            };
+            let base_c = sc * 2;
 
-        let c_ctrl = color_cache.get(&(base_r, base_c)).unwrap();
+            let c_ctrl = color_cache.get(&(base_r, base_c)).unwrap();
 
-        if let Ok((p, u, c)) = eval_quadratic_patch_attributes(patch, base_r, base_c, tu, tv, c_ctrl) {
-            *pos = p;
-            *uv = u;
-            *col = c;
-        }
-        else {
-            log::debug!("Invalid patch");
-        }
-    });
+            if let Ok((p, u, c)) =
+                eval_quadratic_patch_attributes(patch, base_r, base_c, tu, tv, c_ctrl)
+            {
+                *pos = p;
+                *uv = u;
+                *col = c;
+            } else {
+                log::debug!("Invalid patch");
+            }
+        });
 
     // let flat: Vec<(usize, usize)> = (0..tess_rows)
     //     .flat_map(|tr| (0..tess_cols).map(move |tc| (tr, tc)))
@@ -867,26 +878,42 @@ fn compute_vertex_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
     }
 
     // Parallel face computation
-    let face_normals: Vec<Vec3> = indices.par_chunks(3).with_min_len(64).filter_map(|tri| {
-        if tri.len() != 3 { return None; }
-        let i0 = tri[0] as usize;
-        let i1 = tri[1] as usize;
-        let i2 = tri[2] as usize;
-        if i0 >= n_verts || i1 >= n_verts || i2 >= n_verts { return None; }
-        let n = (positions[i1] - positions[i0]).cross(positions[i2] - positions[i0]);
-        if n.length_squared() < 1e-12 { None } else { Some(n) }
-    }).collect();
+    let face_normals: Vec<Vec3> = indices
+        .par_chunks(3)
+        .with_min_len(64)
+        .filter_map(|tri| {
+            if tri.len() != 3 {
+                return None;
+            }
+            let i0 = tri[0] as usize;
+            let i1 = tri[1] as usize;
+            let i2 = tri[2] as usize;
+            if i0 >= n_verts || i1 >= n_verts || i2 >= n_verts {
+                return None;
+            }
+            let n = (positions[i1] - positions[i0]).cross(positions[i2] - positions[i0]);
+            if n.length_squared() < 1e-12 {
+                None
+            } else {
+                Some(n)
+            }
+        })
+        .collect();
 
     // Sequential accumulation into vertex buffer.
     // This is cache-friendly because each triangle's 3 vertices are adjacent in memory
     // for typical mesh layouts, and we avoid the atomic/lock overhead of parallel scatter.
     let mut normals = vec![Vec3::ZERO; n_verts];
     for (tri, &fn_) in indices.chunks(3).zip(&face_normals) {
-        if tri.len() != 3 { continue; }
+        if tri.len() != 3 {
+            continue;
+        }
         let i0 = tri[0] as usize;
         let i1 = tri[1] as usize;
         let i2 = tri[2] as usize;
-        if i0 >= n_verts || i1 >= n_verts || i2 >= n_verts { continue; }
+        if i0 >= n_verts || i1 >= n_verts || i2 >= n_verts {
+            continue;
+        }
         normals[i0] += fn_;
         normals[i1] += fn_;
         normals[i2] += fn_;

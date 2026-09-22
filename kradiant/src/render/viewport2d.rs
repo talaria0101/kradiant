@@ -7,7 +7,7 @@ use crate::editing::AffineScale;
 use crate::editor::EditorState;
 use crate::editor::config::{EntityDrawAnchor, EntityDrawKind};
 use crate::editor::viewport::{DragMode, Ortho, StretchMode};
-use crate::map::BrushContent;
+use crate::map::{BrushContent, CachedBrushLines2d};
 use crate::render::{CachedLineBatch, RenderBackend};
 use crate::xmodel::XModel;
 use glam::Vec3;
@@ -563,12 +563,45 @@ impl Viewport2D {
                                         if !editor.config.view.show.convex {
                                             continue;
                                         }
-                                        let Some((aabb, polys)) = brush.get_polygons_and_aabb()
-                                        else {
-                                            continue;
-                                        };
 
-                                        // Coarse frustum cull by brush AABB before iterating faces/edges.
+                                        // Regenerate projected lines if never built or axis
+                                        // changed. Do this BEFORE the AABB coarse-cull: parser
+                                        // and update_brush_plane leave brush.aabb stale/zero
+                                        // until get_polygons_and_aabb refreshes it.
+                                        let needs_regen = brush
+                                            .cached_lines_2d
+                                            .as_ref()
+                                            .map_or(true, |c| c.axis != axis);
+                                        if needs_regen {
+                                            let mut verts = Vec::new();
+                                            {
+                                                let Some((_, polys)) =
+                                                    brush.get_polygons_and_aabb()
+                                                else {
+                                                    continue;
+                                                };
+                                                for (poly_verts, _) in polys {
+                                                    if poly_verts.len() < 2 {
+                                                        continue;
+                                                    }
+                                                    for i in 0..poly_verts.len() {
+                                                        let a = poly_verts[i];
+                                                        let b =
+                                                            poly_verts[(i + 1) % poly_verts.len()];
+                                                        let pa = project_to_2d(a, axis);
+                                                        let pb = project_to_2d(b, axis);
+                                                        verts.push(Vec3::new(pa[0], pa[1], 0.0));
+                                                        verts.push(Vec3::new(pb[0], pb[1], 0.0));
+                                                    }
+                                                }
+                                            }
+                                            brush.cached_lines_2d =
+                                                Some(CachedBrushLines2d { axis, verts });
+                                        }
+
+                                        // Coarse frustum cull by brush AABB (refreshed above
+                                        // on regen; otherwise valid from when the cache was built).
+                                        let aabb = brush.aabb;
                                         let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
                                             Ortho::XY => (
                                                 aabb.min.x as f32,
@@ -597,48 +630,43 @@ impl Viewport2D {
                                             continue;
                                         }
 
-                                        for (verts, _) in polys {
-                                            if verts.len() < 2 {
+                                        let gpu = brush.cached_lines_2d.as_ref().unwrap();
+                                        for chunk in gpu.verts.chunks_exact(2) {
+                                            let pa = chunk[0];
+                                            let pb = chunk[1];
+
+                                            // Frustum cull in projected 2D space.
+                                            let seg_min_x = pa.x.min(pb.x);
+                                            let seg_max_x = pa.x.max(pb.x);
+                                            let seg_min_y = pa.y.min(pb.y);
+                                            let seg_max_y = pa.y.max(pb.y);
+                                            if seg_max_x < view_min_x
+                                                || seg_min_x > view_max_x
+                                                || seg_max_y < view_min_y
+                                                || seg_min_y > view_max_y
+                                            {
                                                 continue;
                                             }
 
-                                            for i in 0..verts.len() {
-                                                let a = verts[i];
-                                                let b = verts[(i + 1) % verts.len()];
-
-                                                // Frustum cull in projected 2D space.
-                                                let pa = project_to_2d(a, axis);
-                                                let pb = project_to_2d(b, axis);
-                                                let seg_min_x = pa[0].min(pb[0]);
-                                                let seg_max_x = pa[0].max(pb[0]);
-                                                let seg_min_y = pa[1].min(pb[1]);
-                                                let seg_max_y = pa[1].max(pb[1]);
-                                                if seg_max_x < view_min_x
-                                                    || seg_min_x > view_max_x
-                                                    || seg_max_y < view_min_y
-                                                    || seg_min_y > view_max_y
-                                                {
-                                                    continue;
-                                                }
-
-                                                self.line_vertices
-                                                    .push(Vec3::new(pa[0], pa[1], 0.0));
-                                                self.line_vertices
-                                                    .push(Vec3::new(pb[0], pb[1], 0.0));
-                                            }
+                                            self.line_vertices.push(pa);
+                                            self.line_vertices.push(pb);
                                         }
                                     }
                                     BrushContent::Patch(patch) => {
                                         if !editor.config.view.show.patches {
                                             continue;
                                         }
-                                        let Some((mesh, patch_aabb, edges)) =
-                                            patch.get_mesh_aabb_wire()
-                                        else {
-                                            continue;
+                                        // Copy AABB out so the patch borrow ends before any
+                                        // subsequent get_mesh_aabb_wire call.
+                                        let patch_aabb = {
+                                            let Some((_mesh, aabb, _edges)) =
+                                                patch.get_mesh_aabb_wire()
+                                            else {
+                                                continue;
+                                            };
+                                            *aabb
                                         };
-                                        brush.aabb = patch_aabb.clone();
-                                        let positions = mesh.positions.as_slice();
+                                        brush.aabb = patch_aabb;
 
                                         let (a_min_x, a_max_x, a_min_y, a_max_y) = match axis {
                                             Ortho::XY => (
@@ -668,23 +696,52 @@ impl Viewport2D {
                                             continue;
                                         }
 
-                                        if positions.len() < 2 || edges.is_empty() {
-                                            continue;
+                                        // Regenerate projected lines if never built or axis changed.
+                                        let needs_regen = brush
+                                            .cached_lines_2d
+                                            .as_ref()
+                                            .map_or(true, |c| c.axis != axis);
+                                        if needs_regen {
+                                            let Some((positions, edges)) = (|| {
+                                                let (mesh, _aabb, edges) =
+                                                    patch.get_mesh_aabb_wire()?;
+                                                Some((
+                                                    mesh.positions.as_slice().to_vec(),
+                                                    edges.to_vec(),
+                                                ))
+                                            })(
+                                            ) else {
+                                                continue;
+                                            };
+                                            let mut verts = Vec::new();
+                                            if positions.len() >= 2 && !edges.is_empty() {
+                                                for (a, b) in edges {
+                                                    let ia = a as usize;
+                                                    let ib = b as usize;
+                                                    if ia >= positions.len()
+                                                        || ib >= positions.len()
+                                                    {
+                                                        continue;
+                                                    }
+                                                    let pa = project_to_2d(positions[ia], axis);
+                                                    let pb = project_to_2d(positions[ib], axis);
+                                                    verts.push(Vec3::new(pa[0], pa[1], 0.0));
+                                                    verts.push(Vec3::new(pb[0], pb[1], 0.0));
+                                                }
+                                            }
+                                            brush.cached_lines_2d =
+                                                Some(CachedBrushLines2d { axis, verts });
                                         }
 
-                                        for &(a, b) in edges {
-                                            let ia = a as usize;
-                                            let ib = b as usize;
-                                            if ia >= positions.len() || ib >= positions.len() {
-                                                continue;
-                                            }
-                                            let pa = core_util::project_to_2d(positions[ia], axis);
-                                            let pb = core_util::project_to_2d(positions[ib], axis);
+                                        let gpu = brush.cached_lines_2d.as_ref().unwrap();
+                                        for chunk in gpu.verts.chunks_exact(2) {
+                                            let pa = chunk[0];
+                                            let pb = chunk[1];
 
-                                            let seg_min_x = pa[0].min(pb[0]);
-                                            let seg_max_x = pa[0].max(pb[0]);
-                                            let seg_min_y = pa[1].min(pb[1]);
-                                            let seg_max_y = pa[1].max(pb[1]);
+                                            let seg_min_x = pa.x.min(pb.x);
+                                            let seg_max_x = pa.x.max(pb.x);
+                                            let seg_min_y = pa.y.min(pb.y);
+                                            let seg_max_y = pa.y.max(pb.y);
                                             if seg_max_x < view_min_x
                                                 || seg_min_x > view_max_x
                                                 || seg_max_y < view_min_y
@@ -693,8 +750,8 @@ impl Viewport2D {
                                                 continue;
                                             }
 
-                                            self.line_vertices.push(Vec3::new(pa[0], pa[1], 0.0));
-                                            self.line_vertices.push(Vec3::new(pb[0], pb[1], 0.0));
+                                            self.line_vertices.push(pa);
+                                            self.line_vertices.push(pb);
                                         }
                                     }
                                 }
@@ -1118,7 +1175,7 @@ impl Viewport2D {
                 }
 
                 if !self.selected_vertices.is_empty() {
-                draw_lines(backend, &self.selected_vertices, editor.selection_rgba);
+                    draw_lines(backend, &self.selected_vertices, editor.selection_rgba);
                 }
             }
             // Draw patch control vertices when in vertex editing mode
