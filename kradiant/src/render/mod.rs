@@ -4,13 +4,11 @@ pub mod texture_registry;
 mod viewport2d;
 mod viewport3d;
 
-use crate::{Vec3, render::viewport3d::TexVertex};
-
-use viewport3d::LitVertex;
+use crate::Vec3;
 
 pub use texture_registry::{RenderTextureInfo, TextureRegistry};
 pub use viewport2d::Viewport2D;
-pub use viewport3d::Viewport3D;
+pub use viewport3d::{LitVertex, TexVertex, Viewport3D};
 
 // ---------------------------------------------------------------------------
 // Batch collector types — owned data, no lifetime headaches
@@ -440,7 +438,12 @@ pub unsafe fn draw_lit_cached(
         for b in cached_batches {
             gl.uniform_matrix_4_f32_slice(Some(lit_mvp_loc), false, &mvp.to_cols_array());
             gl.uniform_4_f32_slice(Some(lit_color_loc), &b.color);
-            gl.uniform_3_f32(Some(lit_ldir_loc), b.light_dir.x, b.light_dir.y, b.light_dir.z);
+            gl.uniform_3_f32(
+                Some(lit_ldir_loc),
+                b.light_dir.x,
+                b.light_dir.y,
+                b.light_dir.z,
+            );
             gl.uniform_1_f32(Some(lit_amb_loc), b.ambient);
             gl.draw_arrays(glow::TRIANGLES, b.offset, b.count);
         }
@@ -501,12 +504,7 @@ pub unsafe fn draw_tex_cached(
             if let Some(rt) = tex_registry.get(&b.material) {
                 gl.uniform_matrix_4_f32_slice(Some(tex_mvp_loc), false, &mvp.to_cols_array());
                 gl.uniform_4_f32_slice(Some(tex_color_loc), &b.color);
-                gl.uniform_3_f32(
-                    Some(tex_ldir_loc),
-                    light_dir.x,
-                    light_dir.y,
-                    light_dir.z,
-                );
+                gl.uniform_3_f32(Some(tex_ldir_loc), light_dir.x, light_dir.y, light_dir.z);
                 gl.uniform_1_f32(Some(tex_amb_loc), ambient);
                 gl.uniform_1_i32(Some(tex_sampler_loc), 0);
                 gl.active_texture(glow::TEXTURE0);
@@ -516,12 +514,7 @@ pub unsafe fn draw_tex_cached(
             } else {
                 gl.uniform_matrix_4_f32_slice(Some(tex_mvp_loc), false, &mvp.to_cols_array());
                 gl.uniform_4_f32_slice(Some(tex_color_loc), &b.color);
-                gl.uniform_3_f32(
-                    Some(tex_ldir_loc),
-                    light_dir.x,
-                    light_dir.y,
-                    light_dir.z,
-                );
+                gl.uniform_3_f32(Some(tex_ldir_loc), light_dir.x, light_dir.y, light_dir.z);
                 gl.uniform_1_f32(Some(tex_amb_loc), ambient);
                 gl.uniform_1_i32(Some(tex_sampler_loc), 0);
                 gl.active_texture(glow::TEXTURE0);

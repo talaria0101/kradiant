@@ -7,19 +7,112 @@ use crate::editor::EditorState;
 use crate::editor::config::{EntityDrawAnchor, EntityDrawKind, RenderMode};
 use crate::editor::viewport::DragMode;
 use crate::render::RenderBackend;
-use crate::render::{LineBatchState, LitBatchState, TexBatchState};
-use crate::render::{flush_lines, flush_lit};
 use crate::render::{CachedLineBatch, CachedLitBatch, CachedTexBatch};
+use crate::render::{LineBatchState, LitBatchState, TexBatchState};
 use crate::render::{draw_line_cached, draw_lit_cached, draw_tex_cached};
+use crate::render::{flush_lines, flush_lit};
 //use crate::ui;
 use crate::assets::normalize_material_name;
 use crate::core_util;
-use crate::map::BrushContent;
+use crate::map::{BrushContent, CachedBrushGpu, Face};
+use crate::render::TextureRegistry;
 use crate::texmap::FaceUvMapper;
 use crate::xmodel::XModel;
 use glam::{Quat, Vec3};
 
 use crate::editor::selection::EdgeSelection;
+
+/// Generate GPU-facing data (line verts, tex verts, lit verts) for a convex brush.
+///
+/// `faces` must be cloned from `brush.content` to avoid borrow conflicts with
+/// `get_polygons_and_aabb()`. `polys` is the cached tessellation output.
+fn generate_convex_gpu_data(
+    faces: &[Face],
+    polys: &[(Vec<Vec3>, Vec<u32>)],
+    tex_registry: &TextureRegistry,
+) -> CachedBrushGpu {
+    let mut line_verts = Vec::new();
+    let mut tex_batches: HashMap<String, Vec<TexVertex>> = HashMap::new();
+    let mut lit_verts = Vec::new();
+    let mut tex_sizes: HashMap<String, [f32; 2]> = HashMap::new();
+
+    for (face, (positions, indices)) in faces.iter().zip(polys.iter()) {
+        if positions.len() < 3 || indices.len() < 3 {
+            continue;
+        }
+
+        let nf = crate::texmap::face_plane_normal(face).to_array();
+
+        let (tex_w, tex_h) = tex_registry
+            .get(&face.texture)
+            .map(|rt| (rt.size[0], rt.size[1]))
+            .unwrap_or((256.0, 256.0));
+        let mapper = FaceUvMapper::new(face, tex_w, tex_h);
+        tex_sizes
+            .entry(face.texture.clone())
+            .or_insert([tex_w, tex_h]);
+
+        // Wireframe lines for this face
+        if positions.len() >= 2 {
+            for i in 0..positions.len() {
+                let a = positions[i];
+                let b = positions[(i + 1) % positions.len()];
+                line_verts.push(a);
+                line_verts.push(b);
+            }
+        }
+
+        for tri in indices.chunks_exact(3) {
+            let i0 = tri[0] as usize;
+            let i1 = tri[1] as usize;
+            let i2 = tri[2] as usize;
+            if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+                continue;
+            }
+
+            let v0 = positions[i0];
+            let v1 = positions[i1];
+            let v2 = positions[i2];
+
+            lit_verts.push(LitVertex {
+                pos: v0.into(),
+                normal: nf,
+            });
+            lit_verts.push(LitVertex {
+                pos: v1.into(),
+                normal: nf,
+            });
+            lit_verts.push(LitVertex {
+                pos: v2.into(),
+                normal: nf,
+            });
+
+            let batch = tex_batches.entry(face.texture.clone()).or_default();
+            batch.push(TexVertex {
+                pos: v0.into(),
+                normal: nf,
+                uv: mapper.uv(v0).to_array(),
+            });
+            batch.push(TexVertex {
+                pos: v1.into(),
+                normal: nf,
+                uv: mapper.uv(v1).to_array(),
+            });
+            batch.push(TexVertex {
+                pos: v2.into(),
+                normal: nf,
+                uv: mapper.uv(v2).to_array(),
+            });
+        }
+    }
+
+    CachedBrushGpu {
+        line_verts,
+        tex_batches,
+        lit_verts,
+        tex_sizes,
+    }
+}
 
 /// Compute a stable hash of the edge selection for caching.
 fn edge_selection_hash(edges: &[EdgeSelection]) -> u64 {
@@ -49,14 +142,14 @@ pub struct View3dCache {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LitVertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TexVertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
@@ -570,186 +663,167 @@ impl Viewport3D {
                                 if !editor.config.view.show.convex {
                                     continue;
                                 }
-                                // Avoid borrow conflicts with `get_polygons_and_aabb()` by cloning
-                                // the small face metadata we need (texture + params + plane points).
-                                let faces = faces_src.clone();
-                                let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
-                                    continue;
-                                };
 
-                                debug_assert_eq!(
-                                    polys.len(),
-                                    faces.len(),
-                                    "brush polys not aligned with faces"
-                                );
-                                bounds_min = bounds_min.min(aabb.min);
-                                bounds_max = bounds_max.max(aabb.max);
-
-                                // Always generate line vertices (rebuild invariant:
-                                // draw-phase flag wireframe must be able to toggle
-                                // without triggering a rebuild).
-                                for (positions, _) in polys {
-                                    if positions.len() < 2 {
+                                // Regenerate if never built, or if any material's
+                                // registry size changed since UVs were baked
+                                // (textures finish loading asynchronously and bump
+                                // view_config_rev precisely to refresh UVs).
+                                let tex_stale = brush.cached_gpu.as_ref().is_some_and(|gpu| {
+                                    gpu.tex_sizes.iter().any(|(mat, baked)| {
+                                        let current = editor
+                                            .tex_registry
+                                            .get(mat)
+                                            .map(|rt| rt.size)
+                                            .unwrap_or([256.0, 256.0]);
+                                        current[0] != baked[0] || current[1] != baked[1]
+                                    })
+                                });
+                                if brush.cached_gpu.is_none() || tex_stale {
+                                    // Regenerate: borrow brush for tessellation, then store cache.
+                                    let faces = faces_src.clone();
+                                    let Some((aabb, polys)) = brush.get_polygons_and_aabb() else {
                                         continue;
-                                    }
-                                    for i in 0..positions.len() {
-                                        let a = positions[i];
-                                        let b = positions[(i + 1) % positions.len()];
-                                        self.line_vertices.push(a);
-                                        self.line_vertices.push(b);
-                                    }
+                                    };
+                                    debug_assert_eq!(
+                                        polys.len(),
+                                        faces.len(),
+                                        "brush polys not aligned with faces"
+                                    );
+                                    bounds_min = bounds_min.min(aabb.min);
+                                    bounds_max = bounds_max.max(aabb.max);
+                                    brush.cached_gpu = Some(generate_convex_gpu_data(
+                                        &faces,
+                                        polys,
+                                        &editor.tex_registry,
+                                    ));
+                                } else {
+                                    // Cache hit: use brush.aabb (always up-to-date after first tessellation).
+                                    bounds_min = bounds_min.min(brush.aabb.min);
+                                    bounds_max = bounds_max.max(brush.aabb.max);
                                 }
 
-                                for (face, (positions, indices)) in faces.iter().zip(polys.iter()) {
-                                    if positions.len() < 3 || indices.len() < 3 {
-                                        continue;
-                                    }
+                                let gpu = brush.cached_gpu.as_ref().unwrap();
 
-                                    let nf = crate::texmap::face_plane_normal(face).to_array();
-
-                                    // Fallback size if the texture isn't loaded yet (keeps UV math stable).
-                                    let (tex_w, tex_h) = editor
-                                        .tex_registry
-                                        .get(&face.texture)
-                                        .map(|rt| (rt.size[0], rt.size[1]))
-                                        .unwrap_or((256.0, 256.0));
-                                    let mapper = FaceUvMapper::new(face, tex_w, tex_h);
-
-                                    for tri in indices.chunks_exact(3) {
-                                        let i0 = tri[0] as usize;
-                                        let i1 = tri[1] as usize;
-                                        let i2 = tri[2] as usize;
-                                        if i0 >= positions.len()
-                                            || i1 >= positions.len()
-                                            || i2 >= positions.len()
-                                        {
-                                            continue;
-                                        }
-
-                                        let v0 = positions[i0];
-                                        let v1 = positions[i1];
-                                        let v2 = positions[i2];
-
-                                        self.tri_vertices.push(LitVertex {
-                                            pos: v0.into(),
-                                            normal: nf,
-                                        });
-                                        self.tri_vertices.push(LitVertex {
-                                            pos: v1.into(),
-                                            normal: nf,
-                                        });
-                                        self.tri_vertices.push(LitVertex {
-                                            pos: v2.into(),
-                                            normal: nf,
-                                        });
-
-                                        let batch =
-                                            tex_batches.entry(face.texture.clone()).or_default();
-                                        batch.push(TexVertex {
-                                            pos: v0.into(),
-                                            normal: nf,
-                                            uv: mapper.uv(v0).to_array(),
-                                        });
-                                        batch.push(TexVertex {
-                                            pos: v1.into(),
-                                            normal: nf,
-                                            uv: mapper.uv(v1).to_array(),
-                                        });
-                                        batch.push(TexVertex {
-                                            pos: v2.into(),
-                                            normal: nf,
-                                            uv: mapper.uv(v2).to_array(),
-                                        });
-                                    }
+                                // Append cached data
+                                self.line_vertices.extend_from_slice(&gpu.line_verts);
+                                self.tri_vertices.extend_from_slice(&gpu.lit_verts);
+                                for (mat, verts) in &gpu.tex_batches {
+                                    tex_batches
+                                        .entry(mat.clone())
+                                        .or_default()
+                                        .extend_from_slice(verts);
                                 }
                             } else if let BrushContent::Patch(patch) = &mut brush.content {
                                 if !editor.config.view.show.patches {
                                     continue;
                                 }
-                                // Always generate patch wireframe lines (rebuild invariant).
-                                let Some((mesh, patch_aabb, edges)) =
-                                    patch.get_mesh_aabb_wire()
+                                let Some((mesh, patch_aabb, edges)) = patch.get_mesh_aabb_wire()
                                 else {
                                     continue;
                                 };
                                 bounds_min = bounds_min.min(patch_aabb.min);
                                 bounds_max = bounds_max.max(patch_aabb.max);
-                                let positions = mesh.positions.as_slice();
-                                for &(a, b) in edges {
-                                    let ia = a as usize;
-                                    let ib = b as usize;
-                                    if ia >= positions.len() || ib >= positions.len() {
-                                        continue;
-                                    }
-                                    self.line_vertices.push(positions[ia]);
-                                    self.line_vertices.push(positions[ib]);
-                                }
 
-                                let ptex = patch.texture.clone();
+                                // Generate GPU data if not cached
+                                if brush.cached_gpu.is_none() {
+                                    let mut line_verts = Vec::new();
+                                    let mut tex_batches_local: HashMap<String, Vec<TexVertex>> =
+                                        HashMap::new();
+                                    let mut lit_verts = Vec::new();
 
-                                if let Some(tess) = patch.get_mesh() {
-                                    let pos = &tess.positions;
-                                    let indices = &tess.indices;
-                                    let uvs = &tess.uvs;
-                                    let normals = &tess.normals;
-
-                                    for chunk in indices.chunks_exact(3) {
-                                        let i0 = chunk[0] as usize;
-                                        let i1 = chunk[1] as usize;
-                                        let i2 = chunk[2] as usize;
-
-                                        if i0 >= pos.len()
-                                            || i1 >= pos.len()
-                                            || i2 >= pos.len()
-                                            || i0 >= uvs.len()
-                                            || i1 >= uvs.len()
-                                            || i2 >= uvs.len()
-                                            || i0 >= normals.len()
-                                            || i1 >= normals.len()
-                                            || i2 >= normals.len()
-                                        {
+                                    let positions = mesh.positions.as_slice();
+                                    for &(a, b) in edges {
+                                        let ia = a as usize;
+                                        let ib = b as usize;
+                                        if ia >= positions.len() || ib >= positions.len() {
                                             continue;
                                         }
-
-                                        let v0 = pos[i0];
-                                        let v1 = pos[i1];
-                                        let v2 = pos[i2];
-
-                                        // Flat face normal (same as convex brushes)
-                                        let n = (v1 - v0).cross(v2 - v0).normalize_or_zero();
-                                        let nf = [n.x, n.y, n.z];
-
-                                        self.tri_vertices.push(LitVertex {
-                                            pos: v0.into(),
-                                            normal: nf,
-                                        });
-                                        self.tri_vertices.push(LitVertex {
-                                            pos: v1.into(),
-                                            normal: nf,
-                                        });
-                                        self.tri_vertices.push(LitVertex {
-                                            pos: v2.into(),
-                                            normal: nf,
-                                        });
-
-                                        let batch =
-                                            tex_batches.entry(ptex.clone()).or_default();
-                                        batch.push(TexVertex {
-                                            pos: v0.into(),
-                                            normal: normals[i0].to_array(),
-                                            uv: uvs[i0].to_array(),
-                                        });
-                                        batch.push(TexVertex {
-                                            pos: v1.into(),
-                                            normal: normals[i1].to_array(),
-                                            uv: uvs[i1].to_array(),
-                                        });
-                                        batch.push(TexVertex {
-                                            pos: v2.into(),
-                                            normal: normals[i2].to_array(),
-                                            uv: uvs[i2].to_array(),
-                                        });
+                                        line_verts.push(positions[ia]);
+                                        line_verts.push(positions[ib]);
                                     }
+
+                                    let ptex = patch.texture.clone();
+
+                                    if let Some(tess) = patch.get_mesh() {
+                                        let pos = &tess.positions;
+                                        let indices = &tess.indices;
+                                        let uvs = &tess.uvs;
+                                        let normals = &tess.normals;
+
+                                        for chunk in indices.chunks_exact(3) {
+                                            let i0 = chunk[0] as usize;
+                                            let i1 = chunk[1] as usize;
+                                            let i2 = chunk[2] as usize;
+
+                                            if i0 >= pos.len()
+                                                || i1 >= pos.len()
+                                                || i2 >= pos.len()
+                                                || i0 >= uvs.len()
+                                                || i1 >= uvs.len()
+                                                || i2 >= uvs.len()
+                                                || i0 >= normals.len()
+                                                || i1 >= normals.len()
+                                                || i2 >= normals.len()
+                                            {
+                                                continue;
+                                            }
+
+                                            let v0 = pos[i0];
+                                            let v1 = pos[i1];
+                                            let v2 = pos[i2];
+
+                                            let n = (v1 - v0).cross(v2 - v0).normalize_or_zero();
+                                            let nf = [n.x, n.y, n.z];
+
+                                            lit_verts.push(LitVertex {
+                                                pos: v0.into(),
+                                                normal: nf,
+                                            });
+                                            lit_verts.push(LitVertex {
+                                                pos: v1.into(),
+                                                normal: nf,
+                                            });
+                                            lit_verts.push(LitVertex {
+                                                pos: v2.into(),
+                                                normal: nf,
+                                            });
+
+                                            let batch =
+                                                tex_batches_local.entry(ptex.clone()).or_default();
+                                            batch.push(TexVertex {
+                                                pos: v0.into(),
+                                                normal: normals[i0].to_array(),
+                                                uv: uvs[i0].to_array(),
+                                            });
+                                            batch.push(TexVertex {
+                                                pos: v1.into(),
+                                                normal: normals[i1].to_array(),
+                                                uv: uvs[i1].to_array(),
+                                            });
+                                            batch.push(TexVertex {
+                                                pos: v2.into(),
+                                                normal: normals[i2].to_array(),
+                                                uv: uvs[i2].to_array(),
+                                            });
+                                        }
+                                    }
+
+                                    brush.cached_gpu = Some(CachedBrushGpu {
+                                        line_verts,
+                                        tex_batches: tex_batches_local,
+                                        lit_verts,
+                                        tex_sizes: HashMap::new(),
+                                    });
+                                }
+
+                                let gpu = brush.cached_gpu.as_ref().unwrap();
+                                self.line_vertices.extend_from_slice(&gpu.line_verts);
+                                self.tri_vertices.extend_from_slice(&gpu.lit_verts);
+                                for (mat, verts) in &gpu.tex_batches {
+                                    tex_batches
+                                        .entry(mat.clone())
+                                        .or_default()
+                                        .extend_from_slice(verts);
                                 }
                             }
                         }
@@ -842,7 +916,9 @@ impl Viewport3D {
                     }
                     tex_all_count = tex_all.len();
                     if !tex_all.is_empty() {
-                        backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_tex));
+                        backend
+                            .gl
+                            .bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_tex));
                         backend.gl.buffer_data_u8_slice(
                             glow::ARRAY_BUFFER,
                             bytemuck::cast_slice(&tex_all),
@@ -878,13 +954,14 @@ impl Viewport3D {
                                 .map(|(_, t)| t.len())
                                 .sum::<usize>();
                         if total > 0 {
-                            let mut lit_all: Vec<LitVertex> =
-                                Vec::with_capacity(total);
+                            let mut lit_all: Vec<LitVertex> = Vec::with_capacity(total);
                             lit_all.extend_from_slice(&self.tri_vertices);
                             for &(_, ref tris) in &self.entity_solid_batches {
                                 lit_all.extend_from_slice(tris);
                             }
-                            backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_lit));
+                            backend
+                                .gl
+                                .bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_lit));
                             backend.gl.buffer_data_u8_slice(
                                 glow::ARRAY_BUFFER,
                                 bytemuck::cast_slice(&lit_all),
@@ -902,7 +979,9 @@ impl Viewport3D {
                             count: self.line_vertices.len() as i32,
                             color: geom_col,
                         });
-                        backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_line));
+                        backend
+                            .gl
+                            .bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_line));
                         backend.gl.buffer_data_u8_slice(
                             glow::ARRAY_BUFFER,
                             bytemuck::cast_slice(&self.line_vertices),
@@ -919,7 +998,9 @@ impl Viewport3D {
                             for &(_, ref lines) in &self.entity_line_batches {
                                 line_all.extend_from_slice(lines);
                             }
-                            backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_line));
+                            backend
+                                .gl
+                                .bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_line));
                             backend.gl.buffer_data_u8_slice(
                                 glow::ARRAY_BUFFER,
                                 bytemuck::cast_slice(&line_all),
@@ -1191,7 +1272,7 @@ impl Viewport3D {
                                     let polys = if editor.view3d.drag_mode
                                         == DragMode::StretchSelection
                                     {
-                                        let mut probe = brush.clone();
+                                        let mut probe = brush.clone_for_preview();
                                         if let BrushContent::Convex(probe_faces) =
                                             &mut probe.content
                                         {
@@ -1410,7 +1491,9 @@ impl Viewport3D {
                     if !trans_batches.is_empty() {
                         backend.gl.use_program(Some(backend.tex_program));
                         backend.gl.bind_vertex_array(Some(backend.vao));
-                        backend.gl.bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_tex));
+                        backend
+                            .gl
+                            .bind_buffer(glow::ARRAY_BUFFER, Some(backend.vbo_tex));
                         backend
                             .gl
                             .vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, 32, 0);
@@ -1443,24 +1526,16 @@ impl Viewport3D {
                                 backend
                                     .gl
                                     .uniform_1_f32(Some(&backend.tex_amb_loc), ambient);
-                                backend
-                                    .gl
-                                    .uniform_1_i32(Some(&backend.tex_sampler_loc), 0);
+                                backend.gl.uniform_1_i32(Some(&backend.tex_sampler_loc), 0);
                                 backend.gl.active_texture(glow::TEXTURE0);
-                                backend
-                                    .gl
-                                    .bind_texture(glow::TEXTURE_2D, Some(rt.tex));
-                                backend
-                                    .gl
-                                    .draw_arrays(glow::TRIANGLES, b.offset, b.count);
+                                backend.gl.bind_texture(glow::TEXTURE_2D, Some(rt.tex));
+                                backend.gl.draw_arrays(glow::TRIANGLES, b.offset, b.count);
                             }
                         }
 
                         backend.gl.disable_vertex_attrib_array(2);
                         backend.gl.disable_vertex_attrib_array(1);
-                        backend
-                            .gl
-                            .bind_texture(glow::TEXTURE_2D, None);
+                        backend.gl.bind_texture(glow::TEXTURE_2D, None);
                     }
 
                     backend.gl.depth_mask(true);

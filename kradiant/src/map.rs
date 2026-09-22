@@ -7,6 +7,7 @@
 use crate::core_util::vec3_to_origin;
 use crate::editing::{Aabb, aabb_from_polys, aabb_from_positions};
 use crate::editor::SurfInspector;
+use crate::editor::viewport::Ortho;
 use crate::texmap::{
     face_plane_normal, q3_texture_axes_from_normal, rotate_texture_axes, translation_offset_shift,
 };
@@ -82,6 +83,37 @@ pub enum BrushContent {
     Patch(Patch),
 }
 
+/// Per-brush cached GPU data (vertices ready for upload).
+///
+/// Stored alongside the brush so that unchanged brushes skip UV mapping,
+/// normal computation, and batch assembly during the rebuild loop.
+#[derive(Debug, Clone)]
+pub struct CachedBrushGpu {
+    /// Wireframe line segment vertices.
+    pub line_verts: Vec<Vec3>,
+    /// Textured triangle vertices keyed by material name.
+    pub tex_batches: HashMap<String, Vec<crate::render::TexVertex>>,
+    /// Lit (flat-shaded) triangle vertices.
+    pub lit_verts: Vec<crate::render::LitVertex>,
+    /// Texture sizes (w, h) each material was UV-baked with. Used to detect
+    /// stale UVs when a texture finishes loading asynchronously.
+    pub tex_sizes: HashMap<String, [f32; 2]>,
+}
+
+/// Per-brush cached 2D projected wireframe lines for the ortho viewport.
+///
+/// Stores line segment endpoints projected to 2D for a specific axis, before
+/// view-frustum culling. Regenerated when geometry changes or the view axis
+/// changes; zoom/pan rebuilds reuse the cache and only re-cull.
+#[derive(Debug, Clone)]
+pub struct CachedBrushLines2d {
+    /// Ortho axis these endpoints were projected for.
+    pub axis: Ortho,
+    /// Line segment endpoints as projected 2D points (z=0), stored in
+    /// consecutive pairs `(a, b)` forming each segment.
+    pub verts: Vec<Vec3>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Brush {
     pub id: BrushId,
@@ -89,6 +121,12 @@ pub struct Brush {
     pub aabb: Aabb,
     /// Cached per‑face polygon data computed on demand.
     cached_geometry: Option<Vec<(Vec<Vec3>, Vec<u32>)>>,
+    /// Cached GPU-facing data from last rebuild. None if never rebuilt or if
+    /// cached_geometry was invalidated.
+    pub(crate) cached_gpu: Option<CachedBrushGpu>,
+    /// Cached 2D projected wireframe lines for the ortho viewport. Cleared on
+    /// geometry changes; axis mismatches are detected at use time.
+    pub(crate) cached_lines_2d: Option<CachedBrushLines2d>,
     // Indicates whether the brush has been modified since geometry was cached.
     //dirty: bool,
     //generation: u64,
@@ -217,6 +255,8 @@ impl Brush {
             content,
             aabb: Aabb::default(),
             cached_geometry: None,
+            cached_gpu: None,
+            cached_lines_2d: None,
             //dirty: false,
             //generation: 0,
             //last_generation: 1,
@@ -252,9 +292,30 @@ impl Brush {
         self.get_polygons_and_aabb().map(|(_, polys)| polys)
     }
 
+    /// Clone for temporary preview/probe edits. Omits GPU and 2D line caches
+    /// (they are invalid after preview geometry edits and only add clone cost).
+    pub fn clone_for_preview(&self) -> Self {
+        Self {
+            id: self.id,
+            content: self.content.clone(),
+            aabb: self.aabb,
+            cached_geometry: None,
+            cached_gpu: None,
+            cached_lines_2d: None,
+        }
+    }
+
     /// Invalidate cached geometry so the next `get_polygons` call recomputes.
     pub fn invalidate_geometry(&mut self) {
         self.cached_geometry = None;
+        self.cached_gpu = None;
+        self.cached_lines_2d = None;
+    }
+
+    /// Invalidate only the cached GPU data (UVs, normals, batch data) without
+    /// re-tessellating. Use when texture params change but geometry is unchanged.
+    pub fn invalidate_gpu(&mut self) {
+        self.cached_gpu = None;
     }
 
     /// Update a single brush plane and bump the map generation counter if it changed.
@@ -268,7 +329,9 @@ impl Brush {
             if let Some(face) = faces.get_mut(plane_index) {
                 face.plane_points = new_plane;
                 *generation = generation.wrapping_add(1);
-                self.cached_geometry = None; // force next get_ to recompute
+                self.cached_geometry = None;
+                self.cached_gpu = None;
+                self.cached_lines_2d = None;
                 return;
             }
         }
@@ -305,6 +368,8 @@ impl Brush {
                 patch.cached_mesh = None;
             }
         }
+        self.cached_gpu = None;
+        self.cached_lines_2d = None;
         *generation = generation.wrapping_add(1);
         self.aabb.min += delta;
         self.aabb.max += delta;
@@ -356,6 +421,7 @@ impl Brush {
                 patch.texture = texture.to_owned();
             }
         }
+        self.cached_gpu = None;
     }
     pub fn set_texture_params(&mut self, si: SurfInspector) {
         match &mut self.content {
@@ -369,6 +435,7 @@ impl Brush {
                 // TODO: other params
             }
         }
+        self.cached_gpu = None;
     }
 
     pub fn is_clip(&self) -> bool {
@@ -610,6 +677,8 @@ mod tests {
             }]),
             aabb: Aabb::default(),
             cached_geometry: None,
+            cached_gpu: None,
+            cached_lines_2d: None,
         };
 
         let mut gen_id = 0u64;

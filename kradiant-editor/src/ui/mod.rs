@@ -1274,14 +1274,19 @@ fn draw_texture_browser(ui: &Ui, state: &mut EditorState) {
                 let Some(brush) = entity.brushes.get_mut(sel.brush_idx) else {
                     continue;
                 };
-                let kradiant::map::BrushContent::Convex(faces) = &mut brush.content else {
-                    continue;
-                };
-                let Some(face) = faces.get_mut(sel.face_idx) else {
-                    continue;
-                };
-                face.texture = selected.clone();
-                any = true;
+                let mut changed = false;
+                if let kradiant::map::BrushContent::Convex(faces) = &mut brush.content {
+                    if let Some(face) = faces.get_mut(sel.face_idx) {
+                        face.texture = selected.clone();
+                        changed = true;
+                    }
+                }
+                if changed {
+                    // Material key changed: drop GPU batches so tex_batches are
+                    // rebuilt under the new material. Geometry is unchanged.
+                    brush.invalidate_gpu();
+                    any = true;
+                }
             }
         } else {
             if map.is_some() && !selected_brushes.is_empty() {
