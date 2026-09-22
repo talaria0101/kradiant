@@ -10,7 +10,7 @@ original's face rect against generated portal AABBs, 16-unit tolerance).
 | path | portals | full | partial | untouched | mean area | center-hit | time |
 |---|---|---|---|---|---|---|---|
 | plane-scan auto pass | 3441 | 86 | 83 | 28 | 0.61 | 117/197 | ~10 s |
-| BSP generator, BrushScoring (default) | 4129 | 95 | 98 | 4 | 0.72 | 135/197 | ~5 s |
+| BSP generator, BrushScoring (default) | 3858 | 95 | 98 | 4 | 0.72 | 135/197 | ~5 s |
 | BSP generator, CodFaces | 2513 | 80 | 103 | 14 | 0.60 | 118/197 | ~8 s |
 
 training_outside BSP baseline (in-repo map, pinned by
@@ -82,6 +82,23 @@ incidents along the way: a burial `Vec::retain` that dropped tracking
 entries without recording brush ids (25 phantoms; partition manually),
 and a twin overlap threshold that stranded a real window (absorption
 replaces twins entirely now).
+
+### Skybox detection and where the map ends (landed)
+A brush with a sky face and no drawn face at all (`is_skybox_brush`:
+dawnville's 12 pure-sky shell brushes, cyt's 6 sky+caulk hull pieces)
+is boundary, not structure. Two coupled uses: the tree keeps the full
+sealed set (sky planes are load-bearing global splitters; excluding
+them cost 24 fulls on dawnville), while emission additionally rejects
+portals outside the tight town bounds (skybox excluded) plus a 64-unit
+margin. Result on identical coverage: dawnville 4129 -> 3858 portals,
+cyt 854 -> 697, zero generated portals outside town+64 on either map.
+Brushes mixing sky with drawn faces (rooftop open to sky) stay
+structural; pinned by `skybox_shell_is_not_structural`.
+
+### Auto portals menu item removed
+The plane-scan whole-map pass (*Portals -> Auto portals*) is out of
+the 2D menu; the BSP pass is the whole-map generator. The scan
+function stays in code (unit tests, dbg harness) as fallback.
 
 ### 7. Merge gap 32; union extents capped
 BSP default `merge_gap` is 32.0 (was 16). Unions (merge + absorption)

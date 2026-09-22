@@ -877,6 +877,81 @@ impl PortalTree {
     }
 }
 
+/// A face draws nothing visible (skybox shell, caulked backs): it
+/// contributes no occluder surface. Used to recognise boundary brushes;
+/// detail brushes (clip, trigger, ...) are already excluded upstream.
+fn is_nondrawn_texture(tex: &str) -> bool {
+    if tex.starts_with("sky/") {
+        return true;
+    }
+    const NAMES: &[&str] = &["caulk", "nodraw", "skip", "hint"];
+    if tex.starts_with("common/") {
+        let t = tex.rsplit('/').next().unwrap_or(tex);
+        if NAMES.contains(&t) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A skybox brush: the map-containing shell whose faces point at the sky
+/// (usually only the inner ones). It bounds the map but occludes nothing,
+/// so it must not seed BSP splits or portals: any brush with a sky face
+/// and no drawn face at all. Brushes mixing sky with real surfaces (a
+/// rooftop block with a sky top) stay structural.
+fn is_skybox_brush(brush: &Brush) -> bool {
+    match &brush.content {
+        BrushContent::Convex(faces) => {
+            faces.iter().any(|f| f.texture.starts_with("sky/"))
+                && faces.iter().all(|f| {
+                    is_nondrawn_texture(&f.texture) || is_detail_texture(&f.texture)
+                })
+        }
+        BrushContent::Patch(_) => false,
+    }
+}
+
+/// Worldspawn brushes, collected once. `all` seals the void (skybox
+/// included: like the compiler, the tree needs a sealed map, and sky
+/// planes turn out to be load-bearing global splitters). `town` excludes
+/// the skybox shell and defines where the map actually ends. Shared by
+/// the generator and the debug helpers so they cannot drift apart.
+struct StructuralSet {
+    all: Vec<BspBrush>,
+    town: Vec<BspBrush>,
+}
+
+fn collect_structural_brushes(map: &Map, pool: &mut PlanePool) -> StructuralSet {
+    let mut set = StructuralSet {
+        all: Vec::new(),
+        town: Vec::new(),
+    };
+    if let Some(world) = map.entities.first() {
+        for brush in &world.brushes {
+            if matches!(brush.content, BrushContent::Patch(_)) {
+                continue;
+            }
+            let detail = match &brush.content {
+                BrushContent::Convex(faces) => {
+                    faces.iter().any(|f| is_detail_texture(&f.texture))
+                }
+                BrushContent::Patch(_) => true,
+            };
+            if detail {
+                continue;
+            }
+            let sky = is_skybox_brush(brush);
+            if let Some(b) = bsp_brush_from_map_brush(brush, 0, pool) {
+                if !sky {
+                    set.town.push(b.clone());
+                }
+                set.all.push(b);
+            }
+        }
+    }
+    set
+}
+
 /// Detail textures never become structural faces (CoD builtin shader table).
 fn is_detail_texture(tex: &str) -> bool {
     let t = tex.rsplit('/').next().unwrap_or(tex);
@@ -1930,30 +2005,25 @@ pub fn generate_bsp_portals(
     let mut report = BspPortalReport::default();
     let mut pool = PlanePool::default();
 
-    // Structural brushes: worldspawn, non-patch, non-detail textures.
-    let mut structural: Vec<BspBrush> = Vec::new();
-    if let Some(world) = map.entities.first() {
-        for brush in &world.brushes {
-            if matches!(brush.content, BrushContent::Patch(_)) {
-                continue;
-            }
-            let detail = match &brush.content {
-                BrushContent::Convex(faces) => {
-                    faces.iter().any(|f| is_detail_texture(&f.texture))
-                }
-                BrushContent::Patch(_) => true,
-            };
-            if detail {
-                continue;
-            }
-            if let Some(b) = bsp_brush_from_map_brush(brush, 0, &mut pool) {
-                structural.push(b);
-            }
-        }
-    }
+    // Structural brushes: worldspawn, no patches, no detail (skybox
+    // included: the tree needs a sealed map). The town set excludes the
+    // skybox shell and defines where the map actually ends.
+    let sets = collect_structural_brushes(map, &mut pool);
+    let structural = sets.all;
     report.structural_brushes = structural.len();
     if structural.is_empty() {
         return Err("no structural brushes in worldspawn".to_string());
+    }
+
+    // Where the map actually ends: tight bounds over the town set.
+    // Computed before the build moves the brush list; used below to
+    // reject portals outside the map (skybox shell, far void).
+    let mut struct_bounds: Option<Aabb> = None;
+    for b in &sets.town {
+        struct_bounds = Some(match struct_bounds {
+            None => b.bounds,
+            Some(acc) => aabb_union(acc, b.bounds),
+        });
     }
 
     // Build tree + portals.
@@ -1973,6 +2043,9 @@ pub fn generate_bsp_portals(
     let candidates = collect_candidates(&tree);
     report.candidates = candidates.len();
 
+    // Portals outside the structural bounds (+ margin for wall thickness
+    // and float noise) are void-shell cross-sections, never mapper
+    // portals, no matter their framing.
     // Filter + emit: keep openings whose perimeter is mostly solid-framed
     // (doorways, windows, arches). With `area_separators` also keep the
     // larger open-area cross-sections, which need only partial framing.
@@ -1984,6 +2057,7 @@ pub fn generate_bsp_portals(
         .max()
         .map_or(0, |id| id.wrapping_add(1));
     let mut placed: Vec<crate::portals::PlacedPortal> = Vec::new();
+    const MAP_END_MARGIN: f32 = 64.0;
     for (winding, plane) in candidates {
         // Reject uncarved void cross-sections that reach the world bound.
         let wb = winding_bounds(&winding);
@@ -1991,6 +2065,22 @@ pub fn generate_bsp_portals(
             .max((wb.max.y - wb.min.y).max(wb.max.z - wb.min.z));
         if max_ext > params.max_extent {
             continue;
+        }
+        // Reject portals outside where the map ends (skybox shell and
+        // far void cross-sections that framing alone would keep).
+        if let Some(sb) = struct_bounds {
+            let cx = (wb.min.x + wb.max.x) * 0.5;
+            let cy = (wb.min.y + wb.max.y) * 0.5;
+            let cz = (wb.min.z + wb.max.z) * 0.5;
+            if cx < sb.min.x - MAP_END_MARGIN
+                || cx > sb.max.x + MAP_END_MARGIN
+                || cy < sb.min.y - MAP_END_MARGIN
+                || cy > sb.max.y + MAP_END_MARGIN
+                || cz < sb.min.z - MAP_END_MARGIN
+                || cz > sb.max.z + MAP_END_MARGIN
+            {
+                continue;
+            }
         }
         let framed = solid_perimeter_fraction(&tree, &winding);
         let keep = if params.area_separators {
@@ -2132,6 +2222,42 @@ mod tests {
         // Front = the +plane side (x 32..64), back = x 0..32.
         assert!((f.bounds.min.x - 32.0).abs() < 0.2 && (f.bounds.max.x - 64.0).abs() < 0.2);
         assert!((bk.bounds.min.x - 0.0).abs() < 0.2 && (bk.bounds.max.x - 32.0).abs() < 0.2);
+    }
+
+    /// Skybox shell brushes (a sky face, nothing drawn) are boundary, not
+    /// structure: excluded from the structural set so they seed no splits
+    /// and no portals. A block with a drawn face and a sky top (rooftop
+    /// open to the sky) stays structural.
+    #[test]
+    fn skybox_shell_is_not_structural() {
+        let mut map = crate::map::Map::default();
+        map.entities.push(crate::map::Entity {
+            id: crate::map::EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: Default::default(),
+            brushes: vec![
+                box_brush((0.0, 0.0, 0.0), (64.0, 64.0, 64.0)),
+                convex_brush_from_aabb(
+                    BrushId(1),
+                    Aabb::from_points(Vec3::new(-1024.0, -1024.0, -1024.0), Vec3::new(1088.0, 1088.0, 1088.0)),
+                    "sky/testsky",
+                ),
+            ],
+            model: None,
+        });
+        // Rooftop block: drawn walls, sky top. Still solid.
+        if let BrushContent::Convex(faces) = &mut map.entities[0].brushes[0].content {
+            for f in faces.iter_mut().skip(1) {
+                f.texture = "brick/testwall".to_string();
+            }
+            faces[0].texture = "sky/testsky".to_string();
+        }
+        let mut pool = PlanePool::default();
+        let sets = collect_structural_brushes(&map, &mut pool);
+        assert_eq!(sets.all.len(), 2, "sealed tree keeps the shell");
+        assert_eq!(sets.town.len(), 1, "town set drops the shell");
+        // The town survivor is the inner block (bounds prove it).
+        assert!((sets.town[0].bounds.max.x - 64.0).abs() < 0.5);
     }
 
     #[test]
@@ -2598,24 +2724,7 @@ mod tests {
 /// portals (extent-capped). Only for tuning; not part of the public API.
 pub fn dbg_framing_histogram(map: &Map) -> Vec<(usize, usize)> {
     let mut pool = PlanePool::default();
-    let mut structural: Vec<BspBrush> = Vec::new();
-    if let Some(world) = map.entities.first() {
-        for brush in &world.brushes {
-            if matches!(brush.content, BrushContent::Patch(_)) {
-                continue;
-            }
-            let detail = match &brush.content {
-                BrushContent::Convex(faces) => faces.iter().any(|f| is_detail_texture(&f.texture)),
-                BrushContent::Patch(_) => true,
-            };
-            if detail {
-                continue;
-            }
-            if let Some(b) = bsp_brush_from_map_brush(brush, 0, &mut pool) {
-                structural.push(b);
-            }
-        }
-    }
+    let structural: Vec<BspBrush> = collect_structural_brushes(map, &mut pool).all;
     let tree = PortalTree::build(pool, structural, SplitterSelection::default(), BspPortalParams::default().max_depth);
     let cands = collect_candidates(&tree);
     let mut buckets = [0usize; 11];
@@ -2637,24 +2746,7 @@ pub fn dbg_framing_histogram(map: &Map) -> Vec<(usize, usize)> {
 /// areas and perimeter framing.
 pub fn dbg_probe_planes(map: &mut Map, planes: &[(f32, usize)], u_range: (f32, f32), v_range: (f32, f32)) {
     let mut pool = PlanePool::default();
-    let mut structural: Vec<BspBrush> = Vec::new();
-    if let Some(world) = map.entities.first() {
-        for brush in &world.brushes {
-            if matches!(brush.content, BrushContent::Patch(_)) {
-                continue;
-            }
-            let detail = match &brush.content {
-                BrushContent::Convex(faces) => faces.iter().any(|f| is_detail_texture(&f.texture)),
-                BrushContent::Patch(_) => true,
-            };
-            if detail {
-                continue;
-            }
-            if let Some(b) = bsp_brush_from_map_brush(brush, 0, &mut pool) {
-                structural.push(b);
-            }
-        }
-    }
+    let structural: Vec<BspBrush> = collect_structural_brushes(map, &mut pool).all;
     let tree = PortalTree::build(pool, structural, SplitterSelection::default(), BspPortalParams::default().max_depth);
     eprintln!("bsp: {} leaves, {} portals", tree.nodes.iter().filter(|n| n.leaf).count(), tree.portals.len());
     for p in &tree.portals {
@@ -2710,24 +2802,7 @@ pub fn dbg_probe_planes(map: &mut Map, planes: &[(f32, usize)], u_range: (f32, f
 /// print the ancestor plane chain plus the leaf's portal list.
 pub fn dbg_trace_point(map: &mut Map, pt: Vec3) {
     let mut pool = PlanePool::default();
-    let mut structural: Vec<BspBrush> = Vec::new();
-    if let Some(world) = map.entities.first() {
-        for brush in &world.brushes {
-            if matches!(brush.content, BrushContent::Patch(_)) {
-                continue;
-            }
-            let detail = match &brush.content {
-                BrushContent::Convex(faces) => faces.iter().any(|f| is_detail_texture(&f.texture)),
-                BrushContent::Patch(_) => true,
-            };
-            if detail {
-                continue;
-            }
-            if let Some(b) = bsp_brush_from_map_brush(brush, 0, &mut pool) {
-                structural.push(b);
-            }
-        }
-    }
+    let structural: Vec<BspBrush> = collect_structural_brushes(map, &mut pool).all;
     let tree = PortalTree::build(pool, structural, SplitterSelection::default(), BspPortalParams::default().max_depth);
     eprintln!(
         "trace point ({:.0},{:.0},{:.0}): leaves {} portals {}",
