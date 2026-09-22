@@ -10,8 +10,8 @@ original's face rect against generated portal AABBs, 16-unit tolerance).
 | path | portals | full | partial | untouched | mean area | center-hit | time |
 |---|---|---|---|---|---|---|---|
 | plane-scan auto pass | 3441 | 86 | 83 | 28 | 0.61 | 117/197 | ~10 s |
-| BSP generator, BrushScoring (default) | 3858 | 95 | 98 | 4 | 0.72 | 135/197 | ~5 s |
-| BSP generator, CodFaces | 2513 | 80 | 103 | 14 | 0.60 | 118/197 | ~8 s |
+| BSP generator, BrushScoring (default) | 3719 | 105 | 88 | 4 | 0.75 | 139/197 | ~6 s |
+| BSP generator, CodFaces | 1901 | 91 | 99 | 7 | 0.64 | 123/197 | ~6 s |
 
 training_outside BSP baseline (in-repo map, pinned by
 `bsp::tests::training_outside_bsp_baseline`): 97 structural brushes,
@@ -94,6 +94,19 @@ margin. Result on identical coverage: dawnville 4129 -> 3858 portals,
 cyt 854 -> 697, zero generated portals outside town+64 on either map.
 Brushes mixing sky with drawn faces (rooftop open to sky) stay
 structural; pinned by `skybox_shell_is_not_structural`.
+
+### Circulation: stairs + ladders get one portal each (landed)
+Step runs (3+ boxes, ascending tops, touching along the run) and
+`common/ladder` shafts each get ONE portal: stair runs a box over the
+steps plus 72 headroom, active face on the run end facing deeper open
+space; ladders a wall-coplanar slab over the shaft. Emitted after
+prune (exempt from burial: boxes bound solid steps) with per-fragment
+suppression (placed fragments fully inside a circulation box are
+covered and go). Dawnville: 220 circulation portals, fulls 95 -> 105
+at fewer total portals (3858 -> 3719). Cyt (9 ladders incl. the tower
+shaft): 40 circulation, 34 -> 38 fulls. Pinned by
+`stair_runs_chain_ascending_steps`, `ladder_shafts_span_the_ladder`
+and `prune_absorb_expands_keeper`.
 
 ### Auto portals menu item removed
 The plane-scan whole-map pass (*Portals -> Auto portals*) is out of

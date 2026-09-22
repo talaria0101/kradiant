@@ -128,6 +128,8 @@ pub struct BspPortalReport {
     /// Portals dropped by the prune pass (buried in solid, or twin of a
     /// larger portal through the same wall).
     pub portals_pruned: usize,
+    /// Stair-run and ladder-shaft portals added by the circulation pass.
+    pub portals_circulation: usize,
     pub max_depth: usize,
 }
 
@@ -1992,6 +1994,353 @@ fn prune_placed_portals(
 }
 
 // ---------------------------------------------------------------------------
+// Circulation: stairs + ladders
+// ---------------------------------------------------------------------------
+
+/// Minimum steps forming a run; shorter stacks are landings, not stairs.
+const STAIR_MIN_STEPS: usize = 3;
+/// Rise per step: CoD steps run ~8-16 units; bounding accepts ramps.
+const STAIR_MIN_RISE: f32 = 4.0;
+const STAIR_MAX_RISE: f32 = 48.0;
+/// Steps may touch, overlap, or gap this much along the run.
+const STAIR_MAX_GAP: f32 = 16.0;
+/// Larger boxes are landings/walls, not steps.
+const STAIR_MAX_STEP_FOOTPRINT: f32 = 512.0;
+const STAIR_MAX_STEP_HEIGHT: f32 = 64.0;
+/// Climbing headroom above the top step (player height).
+const STAIR_HEADROOM: f32 = 72.0;
+/// Ladder marker texture (builtin): ladder brushes are detail, so the
+/// BSP never sees them; they are found by texture instead.
+const LADDER_TEXTURE: &str = "common/ladder";
+/// Face-rect margin around a ladder shaft (coverage tolerance).
+const LADDER_MARGIN: f32 = 8.0;
+
+/// One detected stair run: step bounds plus run direction.
+struct StairRun {
+    bounds: Aabb,
+    /// run axis (0 = x, 1 = y).
+    axis: usize,
+    /// +1 ascends toward +axis, -1 toward -axis.
+    uphill: f32,
+}
+
+/// Worldspawn boxes that could be steps: compact, squat, with at least
+/// one drawn (non-common, non-sky) face. Buried caulk blocks are out.
+fn step_candidates(map: &Map) -> Vec<Aabb> {
+    let mut out = Vec::new();
+    let Some(world) = map.entities.first() else {
+        return out;
+    };
+    for brush in &world.brushes {
+        let BrushContent::Convex(faces) = &brush.content else {
+            continue;
+        };
+        if !faces.iter().any(|f| {
+            !f.texture.starts_with("common/") && !f.texture.starts_with("sky/")
+        }) {
+            continue;
+        }
+        let Some(aabb) = crate::portals::aabb_of_brush_pub(brush) else {
+            continue;
+        };
+        let e = extents_of(&aabb);
+        if e[0] > STAIR_MAX_STEP_FOOTPRINT
+            || e[1] > STAIR_MAX_STEP_FOOTPRINT
+            || e[2] < STAIR_MIN_RISE
+            || e[2] > STAIR_MAX_STEP_HEIGHT
+        {
+            continue;
+        }
+        out.push(aabb);
+    }
+    // Deterministic chain order: ascending tops.
+    out.sort_by(|a, b| {
+        a.max.z
+            .partial_cmp(&b.max.z)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
+}
+
+/// Chain step boxes into runs along x/y. Each link must ascend within
+/// the rise band, touch along the run axis, and overlap across at least
+/// half the narrower width. Greedy longest-first from each seed.
+fn detect_stair_runs(map: &Map) -> Vec<StairRun> {
+    let cands = step_candidates(map);
+    let mut used = vec![false; cands.len()];
+    let mut runs = Vec::new();
+    for seed in 0..cands.len() {
+        if used[seed] {
+            continue;
+        }
+        let mut best: Option<(usize, f32, Vec<usize>)> = None;
+        for axis in 0..2usize {
+            for dir in [1.0f32, -1.0f32] {
+                let mut seq = vec![seed];
+                let mut edge = if dir > 0.0 {
+                    cands[seed].max[axis]
+                } else {
+                    cands[seed].min[axis]
+                };
+                let mut top = cands[seed].max.z;
+                loop {
+                    let mut next: Option<usize> = None;
+                    for (j, cand) in cands.iter().enumerate() {
+                        if used[j] || seq.contains(&j) {
+                            continue;
+                        }
+                        let gap = if dir > 0.0 {
+                            cand.min[axis] - edge
+                        } else {
+                            edge - cand.max[axis]
+                        };
+                        if gap < -STAIR_MAX_GAP || gap > STAIR_MAX_GAP {
+                            continue;
+                        }
+                        let rise = cand.max.z - top;
+                        if rise < STAIR_MIN_RISE || rise > STAIR_MAX_RISE {
+                            continue;
+                        }
+                        let oa = 1 - axis;
+                        let cur = seq.last().map(|&s| cands[s]).unwrap();
+                        let overlap = (cur.max[oa].min(cand.max[oa])
+                            - cur.min[oa].max(cand.min[oa]))
+                        .max(0.0);
+                        let narrow = (cur.max[oa] - cur.min[oa])
+                            .min(cand.max[oa] - cand.min[oa]);
+                        if narrow <= 0.0 || overlap / narrow < 0.5 {
+                            continue;
+                        }
+                        next = Some(j);
+                        break;
+                    }
+                    let Some(j) = next else {
+                        break;
+                    };
+                    if dir > 0.0 {
+                        edge = cands[j].max[axis];
+                    } else {
+                        edge = cands[j].min[axis];
+                    }
+                    top = cands[j].max.z;
+                    seq.push(j);
+                }
+                if seq.len() >= STAIR_MIN_STEPS
+                    && best.as_ref().map_or(true, |b| seq.len() > b.2.len())
+                {
+                    best = Some((axis, dir, seq));
+                }
+            }
+        }
+        if let Some((axis, dir, seq)) = best {
+            let mut bounds: Option<Aabb> = None;
+            for &s in &seq {
+                bounds = Some(match bounds {
+                    None => cands[s],
+                    Some(acc) => aabb_union(acc, cands[s]),
+                });
+            }
+            if let Some(mut bounds) = bounds {
+                // Climbing headroom above the top step.
+                bounds.max.z += STAIR_HEADROOM;
+                runs.push(StairRun {
+                    bounds,
+                    axis,
+                    uphill: dir,
+                });
+            }
+            for s in seq {
+                used[s] = true;
+            }
+        }
+    }
+    runs
+}
+
+/// Ladder shaft slabs to portal: the ladder face rect (margin added)
+/// extruded to portal thickness. Ladders are detail brushes; without
+/// this they get only incidental fragment coverage.
+fn ladder_shafts(map: &Map, thickness: f32) -> Vec<Aabb> {
+    let mut out = Vec::new();
+    let Some(world) = map.entities.first() else {
+        return out;
+    };
+    for brush in &world.brushes {
+        let BrushContent::Convex(faces) = &brush.content else {
+            continue;
+        };
+        if !faces.iter().any(|f| f.texture == LADDER_TEXTURE) {
+            continue;
+        }
+        let Some(aabb) = crate::portals::aabb_of_brush_pub(brush) else {
+            continue;
+        };
+        let e = extents_of(&aabb);
+        let axis = thin_axis_of(&e);
+        let (u, v) = in_plane_axes(axis);
+        let half = thickness.max(e[axis]) * 0.5;
+        let mid = (aabb.min[axis] + aabb.max[axis]) * 0.5;
+        let mut lo = [0.0f32; 3];
+        let mut hi = [0.0f32; 3];
+        lo[axis] = mid - half;
+        hi[axis] = mid + half;
+        lo[u] = aabb.min[u] - LADDER_MARGIN;
+        hi[u] = aabb.max[u] + LADDER_MARGIN;
+        lo[v] = aabb.min[v] - LADDER_MARGIN;
+        hi[v] = aabb.max[v] + LADDER_MARGIN;
+        out.push(Aabb::from_points(
+            Vec3::new(lo[0], lo[1], lo[2]),
+            Vec3::new(hi[0], hi[1], hi[2]),
+        ));
+    }
+    out
+}
+
+fn aabb_contains(outer: &Aabb, inner: &Aabb, tol: f32) -> bool {
+    (0..3).all(|k| outer.min[k] - tol <= inner.min[k] && inner.max[k] <= outer.max[k] + tol)
+}
+
+/// Emit one portal brush per stair run and ladder shaft, then drop
+/// emitted fragments fully inside those boxes (the big box covers their
+/// area). Runs after prune: circulation boxes are exempt from burial
+/// (they bound solid steps) and need no merge (single by construction).
+/// Returns how many circulation portals were added.
+fn emit_circulation_portals(
+    map: &mut Map,
+    tree: &PortalTree,
+    textures: &crate::portals::PortalTextures,
+    params: &BspPortalParams,
+    placed: &mut Vec<crate::portals::PlacedPortal>,
+) -> usize {
+    let runs = detect_stair_runs(map);
+    let shafts = ladder_shafts(map, params.thickness);
+    if runs.is_empty() && shafts.is_empty() {
+        return 0;
+    }
+    let mut next_id = map
+        .entities
+        .iter()
+        .flat_map(|e| e.brushes.iter().map(|b| b.id.0))
+        .max()
+        .map_or(0, |id| id.wrapping_add(1));
+    let mut boxes: Vec<(Aabb, crate::portals::PortalSide)> = Vec::new();
+    // Stair runs: box over steps + headroom, active face on the run
+    // axis end facing deeper open space (ties face downhill entry).
+    for run in &runs {
+        let mut axis_vec = Vec3::ZERO;
+        axis_vec[run.axis] = 1.0;
+        let c = (run.bounds.min + run.bounds.max) * 0.5;
+        let fp = open_run_length(tree, c + axis_vec * 8.0, axis_vec);
+        let bp = open_run_length(tree, c - axis_vec * 8.0, -axis_vec);
+        // front = +axis end. Face it when its run is longer; ties face
+        // the downhill entry.
+        let uphill_front = run.uphill > 0.0;
+        let face_front = if fp == bp {
+            !uphill_front
+        } else {
+            fp > bp
+        };
+        let mut brush =
+            crate::editing::convex_brush_from_aabb(BrushId(next_id), run.bounds, &textures.nodraw);
+        next_id += 1;
+        if let BrushContent::Convex(faces) = &mut brush.content {
+            // Cap whose outward normal points along the faced end.
+            let want_out = if face_front { axis_vec } else { -axis_vec };
+            for f in faces.iter_mut() {
+                // Inward normals: the faced cap's inward points opposite.
+                let n = face_plane_normal(f);
+                if (n + want_out).length() < 0.1 {
+                    f.texture = textures.portal.clone();
+                }
+            }
+        }
+        let id = brush.id;
+        let aabb = crate::portals::aabb_of_brush_pub(&brush);
+        if let Some(world) = map.entities.first_mut() {
+            world.brushes.push(brush);
+        }
+        if let Some(aabb) = aabb {
+            // PortalSide equivalent of the faced end (matches the
+            // generate_opening_portal_brush convention for merge votes).
+            let side = if face_front {
+                crate::portals::PortalSide::Negative
+            } else {
+                crate::portals::PortalSide::Positive
+            };
+            placed.push(crate::portals::PlacedPortal {
+                entity: 0,
+                id,
+                aabb,
+                side,
+            });
+            boxes.push((aabb, side));
+        }
+    }
+    // Ladder shafts: wall-coplanar slabs; face the deeper side (away
+    // from the wall), ties keep Negative.
+    for shaft in &shafts {
+        let e = extents_of(shaft);
+        let axis = thin_axis_of(&e);
+        let mut axis_vec = Vec3::ZERO;
+        axis_vec[axis] = 1.0;
+        let c = (shaft.min + shaft.max) * 0.5;
+        let fp = open_run_length(tree, c + axis_vec * 8.0, axis_vec);
+        let bp = open_run_length(tree, c - axis_vec * 8.0, -axis_vec);
+        let side = if fp >= bp {
+            crate::portals::PortalSide::Negative
+        } else {
+            crate::portals::PortalSide::Positive
+        };
+        let brush = crate::portals::generate_opening_portal_brush(
+            BrushId(next_id),
+            shaft,
+            side,
+            textures,
+        );
+        next_id += 1;
+        let id = brush.id;
+        let aabb = crate::portals::aabb_of_brush_pub(&brush);
+        if let Some(world) = map.entities.first_mut() {
+            world.brushes.push(brush);
+        }
+        if let Some(aabb) = aabb {
+            placed.push(crate::portals::PlacedPortal {
+                entity: 0,
+                id,
+                aabb,
+                side,
+            });
+            boxes.push((aabb, side));
+        }
+    }
+    // Suppress fragments fully inside a circulation box: covered.
+    let mut dropped: std::collections::HashSet<BrushId> = std::collections::HashSet::new();
+    let mut survivors = Vec::with_capacity(placed.len());
+    for p in placed.drain(..) {
+        // Never suppress a circulation box itself.
+        let own = boxes.iter().any(|(b, _)| {
+            (b.min - p.aabb.min).length() < 0.5 && (b.max - p.aabb.max).length() < 0.5
+        });
+        if own {
+            survivors.push(p);
+            continue;
+        }
+        if boxes.iter().any(|(b, _)| aabb_contains(b, &p.aabb, 1.0)) {
+            dropped.insert(p.id);
+        } else {
+            survivors.push(p);
+        }
+    }
+    *placed = survivors;
+    for entity in map.entities.iter_mut() {
+        entity.brushes.retain(|b| !dropped.contains(&b.id));
+    }
+    // Circulation boxes were tracked inline above; count them for the
+    // report via the placed growth.
+    boxes.len()
+}
+
+// ---------------------------------------------------------------------------
 
 /// Build the BSP for the map's worldspawn structural brushes and emit a
 /// portal brush for every leaf portal a mapper would mark. Returns the
@@ -2162,6 +2511,11 @@ pub fn generate_bsp_portals(
     // Second pass: drop slabs buried in solid and collapse twin slabs
     // covering one opening from parallel planes.
     report.portals_pruned = prune_placed_portals(map, &mut placed, &tree, textures, params.max_union);
+    // Circulation last: one portal per stair run and ladder shaft (fragments
+    // inside those boxes are suppressed as covered). Exempt from burial
+    // and merge: single boxes by construction.
+    report.portals_circulation =
+        emit_circulation_portals(map, &tree, textures, params, &mut placed);
     report.portals_created = placed.len();
     let _ = world_brush_count;
 
@@ -2492,6 +2846,65 @@ mod tests {
         let f = Aabb::from_points(Vec3::new(64.0, 0.0, 0.0), Vec3::new(72.0, 64.0, 64.0));
         assert!(!can_absorb(&big, &f));
         assert!(!can_absorb(&f, &big));
+    }
+
+    /// Stair detection: three ascending boxes chain into one run with
+    /// the run axis, uphill direction and headroom bounds; two steps
+    /// and flat boxes do not.
+    #[test]
+    fn stair_runs_chain_ascending_steps() {
+        fn drawn_box(min: (f32, f32, f32), max: (f32, f32, f32)) -> Brush {
+            let mut b = box_brush(min, max);
+            if let BrushContent::Convex(faces) = &mut b.content {
+                faces[0].texture = "brick/test".to_string();
+            }
+            b
+        }
+        let mut map = crate::map::Map::default();
+        map.entities.push(crate::map::Entity {
+            id: crate::map::EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: Default::default(),
+            brushes: vec![
+                drawn_box((0.0, 0.0, 0.0), (64.0, 16.0, 8.0)),
+                drawn_box((0.0, 16.0, 0.0), (64.0, 32.0, 20.0)),
+                drawn_box((0.0, 32.0, 0.0), (64.0, 48.0, 32.0)),
+                drawn_box((200.0, 200.0, 0.0), (264.0, 264.0, 64.0)),
+            ],
+            model: None,
+        });
+        let runs = detect_stair_runs(&map);
+        assert_eq!(runs.len(), 1, "one run, landing box excluded");
+        let run = &runs[0];
+        assert_eq!(run.axis, 1, "run along y");
+        assert!(run.uphill > 0.0, "ascending toward +y");
+        assert!((run.bounds.min.y - 0.0).abs() < 0.5);
+        assert!((run.bounds.max.y - 48.0).abs() < 0.5);
+        assert!((run.bounds.max.z - (32.0 + STAIR_HEADROOM)).abs() < 0.5);
+    }
+
+    /// Ladder shafts: one slab per ladder brush, coplanar, portal
+    /// thickness, face rect with margin.
+    #[test]
+    fn ladder_shafts_span_the_ladder() {
+        let mut ladder = box_brush((0.0, 0.0, 0.0), (4.0, 32.0, 128.0));
+        if let BrushContent::Convex(faces) = &mut ladder.content {
+            faces[0].texture = "common/ladder".to_string();
+        }
+        let mut map = crate::map::Map::default();
+        map.entities.push(crate::map::Entity {
+            id: crate::map::EntityId(0),
+            classname: "worldspawn".to_string(),
+            properties: Default::default(),
+            brushes: vec![ladder],
+            model: None,
+        });
+        let shafts = ladder_shafts(&map, 8.0);
+        assert_eq!(shafts.len(), 1);
+        let s = &shafts[0];
+        assert!((s.max.x - s.min.x - 8.0).abs() < 0.5, "portal thickness");
+        assert!((s.min.y + 8.0).abs() < 0.5 && (s.max.y - 40.0).abs() < 0.5);
+        assert!((s.min.z + 8.0).abs() < 0.5 && (s.max.z - 136.0).abs() < 0.5);
     }
 
     /// End to end through prune: a trim cube beside a wall slab folds
