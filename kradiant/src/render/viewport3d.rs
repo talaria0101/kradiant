@@ -461,7 +461,7 @@ impl Viewport3D {
                         let has_model = ent.model.is_some();
                         let style = editor.entity_drawing.resolve(&ent.classname, has_model);
 
-                        if draw_entity_visual {
+                        if draw_entity_visual && (editor.config.view.show.models || !has_model) {
                             match style.kind {
                                 EntityDrawKind::Box
                                 | EntityDrawKind::SolidBox

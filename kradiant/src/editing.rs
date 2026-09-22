@@ -1215,8 +1215,15 @@ impl PickMask {
     pub const CLIP: PickMask = PickMask(1 << 2);
     pub const PORTAL: PickMask = PickMask(1 << 3);
     pub const HINT: PickMask = PickMask(1 << 4);
-    pub const ALL: PickMask =
-        PickMask(Self::CONVEX.0 | Self::PATCH.0 | Self::CLIP.0 | Self::PORTAL.0 | Self::HINT.0);
+    pub const MODEL: PickMask = PickMask(1 << 5);
+    pub const ALL: PickMask = PickMask(
+        Self::CONVEX.0
+            | Self::PATCH.0
+            | Self::CLIP.0
+            | Self::PORTAL.0
+            | Self::HINT.0
+            | Self::MODEL.0,
+    );
 
     pub fn contains(self, other: PickMask) -> bool {
         (self.0 & other.0) != 0
@@ -1224,6 +1231,31 @@ impl PickMask {
 
     pub fn add(&mut self, other: PickMask) {
         self.0 |= other.0
+    }
+}
+
+impl From<crate::editor::config::Show> for PickMask {
+    fn from(show: crate::editor::config::Show) -> Self {
+        let mut mask = PickMask::NONE;
+        if show.convex {
+            mask.add(PickMask::CONVEX);
+        }
+        if show.patches {
+            mask.add(PickMask::PATCH);
+        }
+        if show.clip_brushes {
+            mask.add(PickMask::CLIP);
+        }
+        if show.portal_brushes {
+            mask.add(PickMask::PORTAL);
+        }
+        if show.hint_brushes {
+            mask.add(PickMask::HINT);
+        }
+        if show.models {
+            mask.add(PickMask::MODEL);
+        }
+        mask
     }
 }
 
@@ -1672,6 +1704,10 @@ pub fn pick_brush_or_ent_by_ray(
         let style = config.resolve(classname, has_model);
 
         if matches!(style.kind, EntityDrawKind::Hidden) {
+            continue;
+        }
+
+        if !mask.contains(PickMask::MODEL) && has_model {
             continue;
         }
 

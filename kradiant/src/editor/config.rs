@@ -37,7 +37,7 @@ impl RenderMode {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Copy, Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct Show {
     pub models: bool,

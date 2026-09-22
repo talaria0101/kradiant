@@ -307,22 +307,7 @@ impl View2D {
                     (world, world.into())
                 };
 
-                let mut mask = PickMask::NONE;
-                if config.view.show.convex {
-                    mask.add(PickMask::CONVEX);
-                }
-                if config.view.show.patches {
-                    mask.add(PickMask::PATCH);
-                }
-                if config.view.show.clip_brushes {
-                    mask.add(PickMask::CLIP);
-                }
-                if config.view.show.portal_brushes {
-                    mask.add(PickMask::PORTAL);
-                }
-                if config.view.show.hint_brushes {
-                    mask.add(PickMask::HINT);
-                }
+                let mask: PickMask = config.view.show.into();
 
                 // Shift+LMouse for selection
                 let shift_selecting = canvas_interacting

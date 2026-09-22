@@ -447,7 +447,8 @@ impl Viewport2D {
                             let has_model = entity.model.is_some();
                             let style = editor.entity_drawing.resolve(&entity.classname, has_model);
 
-                            if draw_entity_visual {
+                            if draw_entity_visual && (editor.config.view.show.models || !has_model)
+                            {
                                 let pivot = origin;
 
                                 if let Some(model) = entity.model.as_ref() {
