@@ -1015,6 +1015,294 @@ mod tests {
         assert_eq!(mesh.colors.len(), 4);
     }
 
+    // --- Tests with real patch data from zh_frenzy_br.map ---
+
+    #[test]
+    fn tesselates_real_terrain_4x4_from_zh_frenzy() {
+        // 4x4 terrain patch with real elevation data from zh_frenzy_br.map
+        let v = |x, y, z, u, vv| PatchVertex {
+            position: Vec3::new(x, y, z),
+            uv: Vec2::new(u, vv),
+            color: [255, 255, 255, 255],
+            turned_edge: false,
+        };
+        let patch = Patch::new(
+            PatchType::Terrain,
+            "belgium/ground/rock@rubble_2asnow".into(),
+            PatchParams {
+                rows: 4,
+                cols: 4,
+                contents: 134217728,
+                subdivision: 8,
+                ..Default::default()
+            },
+            vec![
+                vec![
+                    v(4584.0, -424.0, 70.118874, 0.0, 0.0),
+                    v(4584.0, -388.0, 49.486500, 0.0, 0.326523),
+                    v(4584.0, -352.0, 59.483105, 0.0, 0.620649),
+                    v(4584.0, -316.0, 67.709694, 0.0, 0.915274),
+                ],
+                vec![
+                    v(4622.0, -424.0, 53.915836, 0.334124, 0.0),
+                    v(4622.0, -388.0, 18.123352, 0.334124, 0.326523),
+                    v(4622.0, -352.0, -4.176507, 0.334124, 0.620649),
+                    v(4622.0, -316.0, -9.849315, 0.334124, 0.915274),
+                ],
+                vec![
+                    v(4660.0, -424.0, 104.304977, 0.832483, 0.0),
+                    v(4660.0, -388.0, 90.192787, 0.832483, 0.326523),
+                    v(4660.0, -352.0, 68.022606, 0.832483, 0.620649),
+                    v(4660.0, -316.0, 56.389309, 0.832483, 0.915274),
+                ],
+                vec![
+                    v(4698.0, -424.0, 122.168457, 1.179829, 0.0),
+                    v(4698.0, -388.0, 140.327347, 1.179829, 0.326523),
+                    v(4698.0, -352.0, 138.087326, 1.179829, 0.620649),
+                    v(4698.0, -316.0, 144.253220, 1.179829, 0.915274),
+                ],
+            ],
+        );
+        let mesh = tessellate_patch(&patch).expect("tessellate");
+        // 4x4 grid = 16 vertices
+        assert_eq!(mesh.positions.len(), 16);
+        // 3x3 quads * 6 indices = 54
+        assert_eq!(mesh.indices.len(), 54);
+        assert_eq!(mesh.uvs.len(), 16);
+        assert_eq!(mesh.colors.len(), 16);
+        assert_eq!(mesh.normals.len(), 16);
+        // Verify Z range covers real terrain data (lowest ~ -9.85, highest ~ 144.25)
+        let min_z = mesh
+            .positions
+            .iter()
+            .map(|p| p.z)
+            .fold(f32::INFINITY, f32::min);
+        let max_z = mesh
+            .positions
+            .iter()
+            .map(|p| p.z)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(min_z < -5.0, "min_z should be below -5, got {min_z}");
+        assert!(max_z > 140.0, "max_z should be above 140, got {max_z}");
+    }
+
+    #[test]
+    fn tesselates_real_patch_def5_9x3_curve() {
+        let patch = Patch::new(
+            PatchType::Curve,
+            "battleship/metal@grey".into(),
+            PatchParams {
+                rows: 9,
+                cols: 3,
+                subdivision: 8,
+                ..Default::default()
+            },
+            vec![
+                vec![
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -3216.0, 80.0),
+                        uv: Vec2::new(0.0, 0.0),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -3216.0, 268.0),
+                        uv: Vec2::new(0.0, 1.46875),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -3216.0, 456.0),
+                        uv: Vec2::new(0.0, 2.9375),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                ],
+                vec![
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -3472.0, 80.0),
+                        uv: Vec2::new(2.0, 0.0),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -3472.0, 268.0),
+                        uv: Vec2::new(2.0, 1.46875),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -3472.0, 456.0),
+                        uv: Vec2::new(2.0, 2.9375),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                ],
+                vec![
+                    PatchVertex {
+                        position: Vec3::new(3672.0, -3472.0, 80.0),
+                        uv: Vec2::new(4.0625, 0.0),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3672.0, -3472.0, 268.0),
+                        uv: Vec2::new(4.0625, 1.46875),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3672.0, -3472.0, 456.0),
+                        uv: Vec2::new(4.0625, 2.9375),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                ],
+                vec![
+                    PatchVertex {
+                        position: Vec3::new(3936.0, -3472.0, 80.0),
+                        uv: Vec2::new(6.125, 0.0),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3936.0, -3472.0, 268.0),
+                        uv: Vec2::new(6.125, 1.46875),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3936.0, -3472.0, 456.0),
+                        uv: Vec2::new(6.125, 2.9375),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                ],
+                vec![
+                    PatchVertex {
+                        position: Vec3::new(3936.0, -3216.0, 80.0),
+                        uv: Vec2::new(8.125, 0.0),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3936.0, -3216.0, 268.0),
+                        uv: Vec2::new(8.125, 1.46875),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3936.0, -3216.0, 456.0),
+                        uv: Vec2::new(8.125, 2.9375),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                ],
+                vec![
+                    PatchVertex {
+                        position: Vec3::new(3936.0, -2960.0, 80.0),
+                        uv: Vec2::new(10.125, 0.0),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3936.0, -2960.0, 268.0),
+                        uv: Vec2::new(10.125, 1.46875),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3936.0, -2960.0, 456.0),
+                        uv: Vec2::new(10.125, 2.9375),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                ],
+                vec![
+                    PatchVertex {
+                        position: Vec3::new(3672.0, -2960.0, 80.0),
+                        uv: Vec2::new(12.1875, 0.0),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3672.0, -2960.0, 268.0),
+                        uv: Vec2::new(12.1875, 1.46875),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3672.0, -2960.0, 456.0),
+                        uv: Vec2::new(12.1875, 2.9375),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                ],
+                vec![
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -2960.0, 80.0),
+                        uv: Vec2::new(14.25, 0.0),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -2960.0, 268.0),
+                        uv: Vec2::new(14.25, 1.46875),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -2960.0, 456.0),
+                        uv: Vec2::new(14.25, 2.9375),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                ],
+                vec![
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -3216.0, 80.0),
+                        uv: Vec2::new(16.25, 0.0),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -3216.0, 268.0),
+                        uv: Vec2::new(16.25, 1.46875),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                    PatchVertex {
+                        position: Vec3::new(3408.0, -3216.0, 456.0),
+                        uv: Vec2::new(16.25, 2.9375),
+                        color: [255, 255, 255, 255],
+                        turned_edge: false,
+                    },
+                ],
+            ],
+        );
+        let mesh = tessellate_patch(&patch).expect("tessellate");
+        // 9x3 control points, subdiv=8: seg_r=(9-1)/2=4, seg_c=(3-1)/2=1
+        // tess_rows=4*8+1=33, tess_cols=1*8+1=9 -> 33*9=297
+        assert_eq!(mesh.positions.len(), 297);
+        assert!(!mesh.indices.is_empty());
+        assert_eq!(mesh.uvs.len(), mesh.positions.len());
+        assert_eq!(mesh.colors.len(), mesh.positions.len());
+        assert_eq!(mesh.normals.len(), mesh.positions.len());
+        // Verify bounding box covers real geometry
+        let min_z = mesh
+            .positions
+            .iter()
+            .map(|p| p.z)
+            .fold(f32::INFINITY, f32::min);
+        let max_z = mesh
+            .positions
+            .iter()
+            .map(|p| p.z)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(min_z < 100.0, "min_z should be ~80, got {min_z}");
+        assert!(max_z > 400.0, "max_z should be ~456, got {max_z}");
+    }
+
     #[test]
     fn tesselates_curve_patch_bezier() {
         let v = |x, y, z, u, v| PatchVertex {
